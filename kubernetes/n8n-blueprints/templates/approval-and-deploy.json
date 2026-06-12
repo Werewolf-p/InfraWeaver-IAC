@@ -1,0 +1,80 @@
+{
+  "name": "Approval and Deploy",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "approve",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh2",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "approve"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json.body;\nconst ghToken = '${GITHUB_TOKEN}';\nconst issueNum = input.issue_number || input.issue;\nif (!issueNum) { throw new Error('Missing issue or issue_number field'); }\nconst action = input.action || 'approve';\nconst labels = action === 'reject' ? ['rejected'] : ['approved', 'automation'];\nconst data = await this.helpers.httpRequest({\n  method: 'PATCH',\n  url: 'https://api.github.com/repos/${GITHUB_REPO}/issues/' + issueNum,\n  headers: { 'Authorization': 'token ' + ghToken, 'User-Agent': 'n8n-automation', 'Accept': 'application/vnd.github.v3+json' },\n  body: { labels: labels },\n  json: true\n});\nreturn [{json: {status: action, issue: data.number, labels: labels}}];"
+      },
+      "id": "code2",
+      "name": "Approve",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "resp2",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        690,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Approve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "executionTimeout": 30
+  }
+}

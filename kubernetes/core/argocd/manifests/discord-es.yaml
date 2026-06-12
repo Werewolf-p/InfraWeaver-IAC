@@ -1,0 +1,39 @@
+---
+# ExternalSecret — Discord webhook URL for ArgoCD notifications
+# The argocd-notifications-cm references $argocd-discord-secret:webhook-url
+# which reads from this Kubernetes secret.
+# Source: OpenBao at secret/platform/discord (property: webhook_url)
+#
+# Rate-limit / disconnect notes:
+#   - refreshInterval: 15m reduces webhook-rotation outage windows without adding
+#     meaningful load to OpenBao.
+#   - deletionPolicy: Retain ensures the secret (and thus ArgoCD notifications)
+#     continue functioning during transient OpenBao outages. If OpenBao is sealed,
+#     ESO will log an error but keep the existing secret intact.
+#   - If the webhook URL is rotated in OpenBao, ArgoCD notifications will pick
+#     up the new URL within 15m automatically (no manual restart needed).
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: argocd-discord-secret
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-notifications-controller
+    app.kubernetes.io/component: notifications
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: argocd-discord-secret
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: webhook-url
+      remoteRef:
+        key: secret/platform/discord
+        property: webhook_url
+        conversionStrategy: Default
+        decodingStrategy: None
+        metadataPolicy: None

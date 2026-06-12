@@ -1,0 +1,38 @@
+installCRDs: true
+
+replicaCount: 1
+
+# Memory limits prevent unbounded growth from OOM-killing nodes
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+webhook:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+certController:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 512Mi
+
+serviceMonitor:
+  enabled: true
+
+# Self-healing: ensure external-secrets operator is never evicted
+priorityClassName: platform-critical

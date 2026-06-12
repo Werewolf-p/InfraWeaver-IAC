@@ -1,0 +1,255 @@
+---
+# Kyverno ClusterPolicy: require non-root containers
+# Mode: Audit — logs violations but does NOT block deployments.
+# Applies to: apps/ and catalog/ namespaces (all others excluded in values.yaml)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root
+  annotations:
+    policies.kyverno.io/title: Require Non-Root Containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Containers must not run as root (UID 0). Pods must set runAsNonRoot: true
+      or specify a non-zero runAsUser. Reduces blast radius of container escapes.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-run-as-non-root
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Containers must set runAsNonRoot: true or runAsUser > 0."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): "true"
+            containers:
+              - name: "*"
+                =(securityContext):
+                  =(runAsNonRoot): "true"
+---
+# Kyverno ClusterPolicy: require resource limits
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Every container must define CPU and memory limits to prevent resource
+      exhaustion on the node.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-container-resources
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Containers must define resource limits (cpu and memory)."
+        pattern:
+          spec:
+            containers:
+              - name: "*"
+                resources:
+                  limits:
+                    cpu: "?*"
+                    memory: "?*"
+---
+# Kyverno ClusterPolicy: disallow privileged containers
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged-containers
+  annotations:
+    policies.kyverno.io/title: Disallow Privileged Containers
+    policies.kyverno.io/category: Pod Security Standards (Baseline)
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Privileged containers share the host's root namespace and have full
+      access to host resources. This is a critical security risk.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-privileged
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Containers must not set privileged: true."
+        pattern:
+          spec:
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+---
+# Kyverno ClusterPolicy: require drop ALL capabilities
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-drop-all-capabilities
+  annotations:
+    policies.kyverno.io/title: Require Drop All Capabilities
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Containers should drop all Linux capabilities and only add back what
+      they strictly need. This follows the principle of least privilege.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-drop-all
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Containers should drop ALL capabilities (securityContext.capabilities.drop: [ALL])."
+        pattern:
+          spec:
+            containers:
+              - name: "*"
+                securityContext:
+                  capabilities:
+                    drop: "ALL | ?*"
+---
+# Kyverno ClusterPolicy: disallow host namespaces
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-host-namespaces
+  annotations:
+    policies.kyverno.io/title: Disallow Host Namespaces
+    policies.kyverno.io/category: Pod Security Standards (Baseline)
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Pods must not use host PID, IPC, or network namespaces — these allow
+      direct access to host-level resources.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-host-namespaces
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Pods must not use hostPID, hostIPC, or hostNetwork."
+        pattern:
+          spec:
+            =(hostPID): "false"
+            =(hostIPC): "false"
+            =(hostNetwork): "false"
+---
+# Kyverno ClusterPolicy: disallow privilege escalation in catalog workloads
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privilege-escalation
+  annotations:
+    policies.kyverno.io/title: Disallow Privilege Escalation
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Containers should set allowPrivilegeEscalation: false so a compromised process
+      cannot gain additional privileges via setuid binaries or file capabilities.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-allow-privilege-escalation
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Containers should set allowPrivilegeEscalation: false."
+        pattern:
+          spec:
+            =(initContainers):
+              - =(securityContext):
+                  =(allowPrivilegeEscalation): "false"
+            containers:
+              - name: "*"
+                =(securityContext):
+                  =(allowPrivilegeEscalation): "false"
+---
+# Kyverno ClusterPolicy: disallow hostPath volumes
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-hostpath-volumes
+  annotations:
+    policies.kyverno.io/title: Disallow hostPath Volumes
+    policies.kyverno.io/category: Pod Security Standards (Baseline)
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      hostPath volumes expose node filesystems directly inside pods and are a common
+      container escape and node-compromise vector. This audit policy highlights any
+      catalog workload still relying on hostPath mounts.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-hostpath-volumes
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Pods should not use hostPath volumes."
+        pattern:
+          spec:
+            =(volumes):
+              - X(hostPath): "null"

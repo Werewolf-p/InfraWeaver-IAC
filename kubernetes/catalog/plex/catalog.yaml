@@ -1,0 +1,15 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/plex
+name: plex
+description: "Plex(https://plex.tv) organizes video, music and photos from personal media libraries and streams them to smart TVs, streaming boxes and mobile devices. This container is packaged as a standalone Plex"
+namespace: plex
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/plex
+categories:
+  - "MediaServer-Video"
+  - "MediaServer-Music"
+  - "MediaServer-Photos"
+ingressroute:
+  host: plex.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T21:52:13.591Z

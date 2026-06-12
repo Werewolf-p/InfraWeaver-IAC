@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: sissbruecker/linkding
+name: linkding
+description: "linkding is a simple bookmark service that you can host yourself. [br]Creating user by using console 'python manage.py createsuperuser --username=joe --email=joe@example.com'[/br]"
+namespace: linkding
+source: community-apps
+tier: simple
+image: sissbruecker/linkding
+categories:
+  - "Productivity"
+  - "Network-Web"
+ingressroute:
+  host: linkding.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T06:52:44.288Z

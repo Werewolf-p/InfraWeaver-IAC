@@ -1,0 +1,34 @@
+---
+# catalog.yaml — Container registry (Docker Distribution v2)
+# Access: registry.int.${BASE_DOMAIN} (VPN-only, internal)
+# Push:   docker push registry.int.${BASE_DOMAIN}/<image>:<tag>
+# Pull:   docker pull registry.int.${BASE_DOMAIN}/<image>:<tag>
+#
+# Auth: htpasswd credentials stored in OpenBao → ExternalSecret → k8s secret
+# Storage: Longhorn PVC (configurable size, defaults to 50Gi)
+
+name: registry
+description: "Private Docker/OCI container registry (Docker Distribution v2)"
+namespace: registry
+
+ingressroute:
+  host: registry.int.${BASE_DOMAIN}
+  entrypoint: websecure
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Read by scripts/seed-catalog-secrets.sh
+# Path: secret/data/platform/registry
+secrets:
+  path: platform/registry
+  keys:
+    htpasswd:
+      type: htpasswd        # bcrypt htpasswd string, generated on first seed
+      username: infraweaver
+    username:
+      type: static
+      value: "infraweaver"
+    password:
+      type: password        # random 32-char password, unique per deploy
+
+replicas: "1"
+storage_size: "50Gi"

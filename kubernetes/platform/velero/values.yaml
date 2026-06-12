@@ -1,0 +1,113 @@
+# Velero — Kubernetes backup solution using MinIO as S3-compatible backend
+# MinIO is deployed separately in the velero namespace to store backups on Longhorn PVC
+#
+# Backup schedule: daily at 2:00 AM (Europe/Amsterdam)
+# Retention: 7 days for daily, 4 weeks for weekly
+#
+# To restore a namespace:
+#   velero restore create --from-backup <backup-name> --include-namespaces <ns>
+#
+# To list backups:
+#   velero backup get
+#
+configuration:
+  # S3-compatible backend using in-cluster MinIO
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero-backups
+      default: true
+      config:
+        region: minio
+        s3ForcePathStyle: "true"
+        s3Url: http://minio-velero.velero.svc.cluster.local:9000
+        publicUrl: https://minio-velero.int.${BASE_DOMAIN}
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: minio
+
+# Credentials injected from ExternalSecret (minio-velero-credentials)
+credentials:
+  useSecret: true
+  existingSecret: velero-s3-credentials
+
+# Schedule backups
+schedules:
+  daily-all:
+    disabled: false
+    schedule: "0 2 * * *"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: "168h"  # 7 days
+      includedNamespaces:
+        - "*"
+      excludedNamespaces:
+        - kube-system
+        - kube-public
+        - kube-node-lease
+        - velero
+      storageLocation: default
+      volumeSnapshotLocations:
+        - default
+  weekly-full:
+    disabled: false
+    schedule: "0 3 * * 0"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: "672h"  # 28 days
+      includedNamespaces:
+        - "*"
+      excludedNamespaces:
+        - kube-system
+        - kube-public
+        - kube-node-lease
+        - velero
+      storageLocation: default
+      volumeSnapshotLocations:
+        - default
+
+# Longhorn CSI snapshot support
+features: "EnableCSI"
+
+# Resource limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Init containers use the official velero image
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.10.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+nodeAgent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Pin kubectl image tag — bitnami/kubectl only publishes the 'latest' tag on Docker Hub.
+# However, bitnami/kubectl:latest uses a dynamically-linked sh that is incompatible
+# with the velero scratch container. Disable upgradeCRDs job and manage CRDs via
+# ArgoCD directly — the CRDs are already installed.
+kubectl:
+  image:
+    tag: "latest"
+
+# Disable the upgrade-crds hook job — it uses bitnami/kubectl whose sh binary
+# requires libreadline.so.8 not available in the velero scratch container.
+# CRDs are managed by ArgoCD and are already up to date.
+upgradeCRDs: false

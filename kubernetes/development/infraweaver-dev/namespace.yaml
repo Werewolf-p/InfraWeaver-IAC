@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infraweaver-dev
+  labels:
+    app.kubernetes.io/name: infraweaver-dev
+    app.kubernetes.io/part-of: infraweaver
+    pod-security.kubernetes.io/enforce: restricted

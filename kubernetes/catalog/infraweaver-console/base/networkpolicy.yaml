@@ -1,0 +1,107 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: infraweaver-console
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# ── Default deny all egress ───────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: infraweaver-console
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-console
+  policyTypes:
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infraweaver-console
+  namespace: infraweaver-console
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-console
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Traefik ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - port: 3000
+          protocol: TCP
+  egress:
+    # DNS resolution (kube-dns)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # InfraWeaver API (same namespace)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: infraweaver-api
+      ports:
+        - port: 3001
+          protocol: TCP
+    # ArgoCD server for sync/diff status
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argocd
+      ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+    # Authentik OIDC provider for NextAuth session validation
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: authentik
+      ports:
+        - port: 9000
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+    # Kubernetes API server (for namespace/pod operations and k8s client)
+    - to:
+        - ipBlock:
+            cidr: ${MGMT_SUBNET_CIDR}
+      ports:
+        - port: 6443
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - port: 443
+          protocol: TCP
+    # External HTTPS only (GitHub API for GitOps commits, OIDC discovery)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP

@@ -1,0 +1,43 @@
+---
+# Standalone ArgoCD Application for cert-manager ClusterIssuers.
+# Deploys after core-cert-manager (Helm chart) to ensure CRDs are ready.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-cert-manager-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/cert-manager/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+  ignoreDifferences:
+    - group: cert-manager.io
+      kind: ClusterIssuer
+      jsonPointers:
+        - /status
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jqPathExpressions:
+        - .status
+        - .metadata.annotations["argocd.argoproj.io/tracking-id"]

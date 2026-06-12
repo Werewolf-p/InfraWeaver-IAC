@@ -1,0 +1,89 @@
+# N8N Blueprints Configuration
+# This file contains parameters for blueprint deployment and integration
+
+n8n:
+  url: "https://n8n.${BASE_DOMAIN}"
+  # Token should be provided via environment variable N8N_ADMIN_TOKEN
+  apiVersion: "v1"
+
+# Integration endpoints
+integrations:
+  slack:
+    webhookUrl: "${SLACK_WEBHOOK_URL}"  # Environment variable
+    enabled: true
+    channel: "#infrastructure"
+    
+  github:
+    token: "${GITHUB_TOKEN}"
+    owner: "${GITHUB_ORG}"
+    repo: "InfraWeaver-platform"
+    
+  proxmox:
+    apiUrl: "https://pve.${BASE_DOMAIN}:8006"
+    tokenId: "${PROXMOX_TOKEN_ID}"
+    tokenSecret: "${PROXMOX_TOKEN_SECRET}"
+    
+  kubernetes:
+    # Kubeconfig can be mounted from secret or provided via env
+    configPath: "/tmp/kubeconfig"
+
+# Monitoring parameters
+monitoring:
+  # 2-hour stability tracking
+  stabilityTrackingWindow: "2h"
+  healthCheckInterval: "5m"  # Check every 5 minutes
+  
+  # Alert thresholds
+  failingPodsThreshold: 5      # Alert if > 5 pods failing
+  nodeFailureThreshold: 1      # Alert if any node down
+  
+  # Log retention
+  logRetention: "30d"
+  logPath: "/tmp/cluster-health-logs"
+
+# Workflows to deploy
+blueprints:
+  - name: "cluster-health-monitor"
+    enabled: true
+    schedule: "*/5 * * * *"  # Every 5 minutes
+    priority: "high"
+    
+  - name: "problem-detector"
+    enabled: true
+    schedule: "*/15 * * * *"  # Every 15 minutes
+    priority: "high"
+    
+  - name: "auto-fix-workflow"
+    enabled: false  # Requires approval gate
+    schedule: "manual"
+    priority: "critical"
+    
+  - name: "time-range-check"
+    enabled: false  # Requires custom time range
+    schedule: "manual"
+    priority: "medium"
+    
+  - name: "git-auto-commit"
+    enabled: false  # Requires git credentials
+    schedule: "manual"
+    priority: "medium"
+
+# Credentials (reference, actual values via secrets/vault)
+credentials:
+  kubeconfig: "kubeconfig_credential"
+  slackWebhook: "slack_webhook"
+  sshKey: "ssh_credential"
+  githubToken: "github_credential"
+  proxmoxToken: "proxmox_credential"
+
+# Deployment strategy
+deployment:
+  strategy: "kustomize"  # or "helm", "api", "cronjob"
+  replicas: 1
+  restartPolicy: "OnFailure"
+  
+# Backup & export
+backup:
+  enabled: true
+  schedule: "0 0 * * 0"  # Weekly Sunday midnight
+  destination: "git"  # Store exported workflows in git

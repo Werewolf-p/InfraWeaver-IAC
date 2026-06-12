@@ -1,0 +1,40 @@
+---
+# PodDisruptionBudget for Authentik server
+# Ensures at least 1 Authentik pod is available during node drains (login remains functional).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: authentik-server-pdb
+  namespace: authentik
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: server
+      app.kubernetes.io/name: authentik
+---
+# PodDisruptionBudget for Authentik worker
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: authentik-worker-pdb
+  namespace: authentik
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/name: authentik
+---
+# PodDisruptionBudget for Authentik LDAP outpost
+# Ensures LDAP auth (TrueNAS etc.) stays available during node drains.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: authentik-ldap-outpost-pdb
+  namespace: authentik
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: authentik-ldap-outpost

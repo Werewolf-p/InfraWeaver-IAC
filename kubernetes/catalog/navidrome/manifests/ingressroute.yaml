@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: navidrome
+  namespace: navidrome
+  labels:
+    app.kubernetes.io/name: navidrome
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`navidrome.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: navidrome
+          port: 4533
+  tls:
+    store:
+      name: default
+      namespace: traefik

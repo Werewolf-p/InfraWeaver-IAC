@@ -1,0 +1,77 @@
+name: validate-code
+
+# Companion gate to validate-iac.yml. That workflow validates kubernetes/**
+# manifests; this one validates the *code* layers that previously had no CI
+# coverage at all: terraform (OpenTofu) modules, shell scripts, and python.
+#
+# Kept as a SEPARATE workflow (and separate status-check context) so the
+# validate-iac branch-protection check is untouched. shellcheck + ruff are
+# blocking; tofu fmt/validate starts non-blocking (continue-on-error) until
+# proven consistently green, then flip `continue-on-error: false`.
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+      - ".github/workflows/validate-code.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        run: |
+          # All tracked *.sh plus the bash git-hook (no extension).
+          mapfile -t files < <(find scripts -type f -name '*.sh')
+          files+=(scripts/git-hooks/pre-push)
+          printf 'shellcheck: %d files\n' "${#files[@]}"
+          # --severity=error: real errors block; style/warning noise (SC2034,
+          # SC1090, ...) does not. Tighten later by cleaning warnings.
+          shellcheck -x --severity=error "${files[@]}"
+
+  ruff:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint python scripts
+        run: ruff check scripts
+
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    continue-on-error: false   # tofu validate confirmed green locally — now blocking
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+      - name: tofu fmt (check)
+        run: tofu fmt -check -recursive terraform
+      - name: Throwaway SSH key for provider validation
+        # The proxmox provider config eagerly calls file(<ssh key>) at validate
+        # time. The key only needs to EXIST (no connection is made), so generate
+        # a disposable one at the default path the config expects.
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keygen -t ed25519 -N '' -q -f ~/.ssh/deployer_ed25519
+      - name: tofu validate (root module, no backend)
+        working-directory: terraform
+        run: |
+          tofu init -backend=false -input=false
+          tofu validate

@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: lidarr
+  namespace: lidarr
+  labels:
+    app.kubernetes.io/name: lidarr
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`lidarr.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: lidarr
+          port: 8686
+  tls:
+    store:
+      name: default
+      namespace: traefik

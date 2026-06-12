@@ -1,0 +1,9 @@
+---
+# ArgoCD self-management — ArgoCD manages itself via GitOps
+# application.yaml fields used by the root ApplicationSet:
+# repoURL, targetRevision, chart, releaseName, namespace
+repoURL: https://argoproj.github.io/argo-helm
+targetRevision: "9.5.*"
+chart: argo-cd
+releaseName: argocd
+namespace: argocd

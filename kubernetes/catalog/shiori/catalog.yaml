@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: ghcr.io/go-shiori/shiori
+name: shiori
+description: "Shiori is a simple bookmarks manager written in the Go language. Intended as a simple clone of Pocket. Default Login username: shiori password: gopher After starting container for the first time run t"
+namespace: shiori
+source: community-apps
+tier: simple
+image: ghcr.io/go-shiori/shiori
+categories:
+  - "Productivity"
+ingressroute:
+  host: shiori.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T07:01:10.401Z

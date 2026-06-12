@@ -1,0 +1,33 @@
+---
+# Standalone ArgoCD Application for Falco supplementary manifests.
+# The Falco Helm chart (platform-falco) is managed by the root ApplicationSet.
+# This Application deploys namespace security labels and NetworkPolicies.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-falco-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: http://onedev.onedev.svc.cluster.local/InfraWeaver-platform
+    targetRevision: HEAD
+    path: kubernetes/platform/falco/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: falco
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

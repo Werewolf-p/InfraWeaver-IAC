@@ -1,0 +1,26 @@
+---
+# Homepage — homelab dashboard IngressRoute
+# Internal: accessible behind Authentik forward-auth middleware.
+# Domain: home.int.${BASE_DOMAIN} — covered by *.int.${BASE_DOMAIN} wildcard cert (DNS-01).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: homepage
+  namespace: traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`home.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: homepage
+          namespace: traefik
+          port: 3000
+  tls:
+    secretName: platform-int-wildcard-tls

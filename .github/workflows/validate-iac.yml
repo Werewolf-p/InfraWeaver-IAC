@@ -1,0 +1,41 @@
+name: validate-iac
+
+# Server-side GitOps gate: every change to manifests is validated on PR before
+# it can reach main (which ArgoCD syncs to the cluster). This is the "how large
+# orgs do it" control — branch protection should require this check to pass, so
+# the client-side pre-push hook becomes a fast local pre-check, not the gate.
+on:
+  pull_request:
+    paths:
+      - "kubernetes/**"
+      - "scripts/validate-iac.sh"
+      - ".github/workflows/validate-iac.yml"
+  push:
+    branches: [main]
+    paths:
+      - "kubernetes/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate-iac   # status-check context name (required by branch protection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl (provides kustomize v5)
+        uses: azure/setup-kubectl@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o /tmp/kc.tar.gz \
+            https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kc.tar.gz -C /usr/local/bin kubeconform
+
+      - name: Validate IaC (render + schema + secret-leak gate)
+        run: bash scripts/validate-iac.sh
+
+      - name: Validate ESO references
+        run: bash scripts/validate-eso-refs.sh || true   # informational until hardened

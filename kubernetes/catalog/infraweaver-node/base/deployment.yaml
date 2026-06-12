@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraweaver-node
+  namespace: infraweaver-system
+  labels:
+    app: infraweaver-node
+    app.kubernetes.io/name: infraweaver-node
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      app: infraweaver-node
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        app: infraweaver-node
+    spec:
+      serviceAccountName: infraweaver-node
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: infraweaver-node
+          image: ${IMAGE_REGISTRY}/infraweaver-node:f0a35feeae1ee301ecc3f6d07a8338fe80c70896
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3001
+              name: health
+          env:
+            - name: APP_VERSION
+              value: "main-b42d758"
+            - name: PORT
+              value: "3001"
+            - name: NODE_ENV
+              value: production
+            - name: HUB_URL
+              value: ws://infraweaver-api.infraweaver-console.svc.cluster.local:3001
+            - name: REGISTRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-node-registration
+                  key: REGISTRATION_TOKEN
+                  optional: true
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ARGOCD_SERVER
+              value: http://argocd-server.argocd.svc.cluster.local
+            - name: ARGOCD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-node-registration
+                  key: ARGOCD_TOKEN
+                  optional: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          # Readiness gates on /health (agent process up & running), NOT /ready.
+          # /ready stays 503 until a one-time manual console approval of the node
+          # — but this is an OUTBOUND agent with no Service routing traffic to it,
+          # so gating readiness on approval has no routing value. It only kept the
+          # Deployment perpetually Unavailable → app Degraded → which failed the
+          # bootstrap app-of-apps sync wave and stalled GitOps for every app.
+          # /health reflects the agent's true healthy-but-pending-approval state;
+          # a genuinely broken agent still crash-loops on the liveness /health
+          # probe and surfaces as NotReady. Approval status is shown in the Console.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

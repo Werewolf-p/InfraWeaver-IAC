@@ -1,0 +1,28 @@
+---
+# Grant the ArgoCD notifications controller read access to argocd-discord-secret.
+# The default Role only covers argocd-notifications-secret; this extends it
+# so the $argocd-discord-secret:webhook-url reference in the notifiers config works.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-notifications-discord-secret
+  namespace: argocd
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["argocd-discord-secret"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-notifications-discord-secret
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: argocd-notifications-controller
+    namespace: argocd
+roleRef:
+  kind: Role
+  name: argocd-notifications-discord-secret
+  apiGroup: rbac.authorization.k8s.io

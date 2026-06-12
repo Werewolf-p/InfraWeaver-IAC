@@ -1,0 +1,40 @@
+---
+# ArgoCD Application for PriorityClasses core manifest
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-priority-classes
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/priority-classes/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=false
+      - Replace=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+      jsonPointers:
+        - /metadata/annotations
+        - /preemptionPolicy

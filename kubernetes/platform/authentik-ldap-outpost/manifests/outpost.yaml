@@ -1,0 +1,128 @@
+---
+# Authentik LDAP Outpost — exposes Authentik as an LDAP server
+# TrueNAS (and other LDAP-only apps) authenticate against this outpost.
+# Outpost PK: 3558b634-115c-4065-895a-012dc3c25328
+# Note: Namespace is managed by apps-authentik-manifests, not here.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: authentik-ldap-token
+  namespace: authentik
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao
+  target:
+    name: authentik-ldap-token
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: token
+      remoteRef:
+        key: secret/platform/authentik-ldap-outpost
+        property: token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-ldap-outpost
+  namespace: authentik
+  labels:
+    app: authentik-ldap-outpost
+    app.kubernetes.io/name: authentik-ldap-outpost
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: authentik-ldap-outpost
+  template:
+    metadata:
+      labels:
+        app: authentik-ldap-outpost
+    spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: authentik-ldap-outpost
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ldap-outpost
+          image: ghcr.io/goauthentik/ldap:2026.2.2
+          ports:
+            - containerPort: 3389
+              name: ldap
+              protocol: TCP
+            - containerPort: 6636
+              name: ldaps
+              protocol: TCP
+            - containerPort: 9300
+              name: metrics
+              protocol: TCP
+          env:
+            - name: AUTHENTIK_HOST
+              # Use internal cluster service (HTTP) — avoids TLS cert chain issues with self-signed CA
+              value: "http://authentik-server.authentik.svc.cluster.local"
+            - name: AUTHENTIK_INSECURE
+              value: "true"
+            - name: AUTHENTIK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-ldap-token
+                  key: token
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9300
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /outpost.goauthentik.io/ping
+              port: 9300
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+# LoadBalancer service — exposes LDAP to TrueNAS (${TRUENAS_HOST}) via MetalLB
+apiVersion: v1
+kind: Service
+metadata:
+  name: authentik-ldap-outpost
+  namespace: authentik
+  annotations:
+    metallb.io/address-pool: vlan3-pool
+spec:
+  type: LoadBalancer
+  loadBalancerIP: ${METALLB_LDAP_VIP}
+  selector:
+    app: authentik-ldap-outpost
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 3389
+      protocol: TCP
+    - name: ldaps
+      port: 636
+      targetPort: 6636
+      protocol: TCP

@@ -1,0 +1,31 @@
+---
+# Certificate for ${BASE_DOMAIN} — Let's Encrypt wildcard via Cloudflare DNS-01
+# Covers *.${BASE_DOMAIN} + base domain (publicly trusted by all clients)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-wildcard-cert
+  namespace: traefik
+spec:
+  secretName: platform-wildcard-tls
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+  dnsNames:
+    - "${BASE_DOMAIN}"
+    - "*.${BASE_DOMAIN}"
+---
+# Certificate for *.int.${BASE_DOMAIN} — Let's Encrypt wildcard via Cloudflare DNS-01
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: int-platform-wildcard-cert
+  namespace: traefik
+spec:
+  secretName: platform-int-wildcard-tls
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+  dnsNames:
+    - "int.${BASE_DOMAIN}"
+    - "*.int.${BASE_DOMAIN}"

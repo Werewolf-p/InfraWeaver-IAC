@@ -1,0 +1,142 @@
+---
+# NetworkPolicies for the kyverno namespace
+# Kyverno runs four controllers:
+#   admission-controller  — mutating/validating webhook (port 9443)
+#   background-controller — scans existing resources (no external listeners)
+#   cleanup-controller    — handles TTL/scheduled cleanups (no external listeners)
+#   reports-controller    — aggregates policy reports (no external listeners)
+#
+# Security model:
+#   - Only the K8s API server should reach the admission webhook (port 9443)
+#   - Only Prometheus should scrape metrics (port 8000)
+#   - All intra-namespace communication is allowed for controller coordination
+
+# ── Default deny all ingress ──────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# ── Allow K8s API server → admission-controller webhook (port 9443) ──────────
+# The Kubernetes API server calls this webhook for every Pod/Deployment/etc.
+# admission at runtime. Without this, all pod creations would fail.
+#
+# No `from:` selector — the API server runs as a static pod and its traffic
+# source IP is not predictable across CNI/Talos configurations.
+# (Same pattern used by cert-manager and external-secrets webhooks.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-from-apiserver
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: admission-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9443
+
+---
+# ── Allow Prometheus to scrape Kyverno metrics (port 8000) ───────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: kyverno
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8000   # Kyverno metrics port
+
+---
+# ── Allow intra-namespace communication (controllers coordinate internally) ───
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}   # all pods within kyverno namespace
+---
+# ── Default deny all egress ───────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+---
+# ── Allow Kyverno egress: cluster DNS ──────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# ── Allow Kyverno egress: Kubernetes API ──────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-k8s-api
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${MGMT_SUBNET_CIDR}
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443

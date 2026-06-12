@@ -1,0 +1,57 @@
+{
+  "name": "DNS Health Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "t1",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfToken = '${CLOUDFLARE_API_TOKEN}';\nconst cfZone = '${CLOUDFLARE_ZONE_ID}';\nconst baseUrl = `https://api.cloudflare.com/client/v4/zones/${cfZone}/dns_records`;\nconst headers = { 'Authorization': `Bearer ${cfToken}`, 'Content-Type': 'application/json' };\n\n// Proper DoH endpoints (JSON format)\nconst dohEndpoints = [\n  { name: 'Cloudflare', url: 'https://cloudflare-dns.com/dns-query' },\n  { name: 'Google', url: 'https://dns.google/resolve' }\n];\n\nasync function checkDomain(domain, endpoint) {\n  try {\n    const resp = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `${endpoint.url}?name=${domain}&type=A`,\n      headers: { 'Accept': 'application/dns-json' },\n      json: true,\n      timeout: 8000\n    });\n    return { resolver: endpoint.name, ok: resp.Status === 0, answers: (resp.Answer||[]).map(a => a.data) };\n  } catch(e) {\n    return { resolver: endpoint.name, ok: false, error: e.message };\n  }\n}\n\n// Get all public A records from Cloudflare\nconst resp = await this.helpers.httpRequest({ method: 'GET', url: `${baseUrl}?per_page=100&type=A`, headers, json: true });\nconst records = (resp.result || []).filter(r => !r.name.startsWith('edns-') && !r.name.includes('.int.'));\n\nconst issues = [];\nfor (const r of records) {\n  const checks = await Promise.all(dohEndpoints.map(ep => checkDomain.call(this, r.name, ep)));\n  const allOk = checks.every(c => c.ok);\n  if (!allOk) {\n    issues.push({ name: r.name, expected: r.content, proxied: r.proxied, failed: checks.filter(c => !c.ok).map(c => `${c.resolver}: ${c.error || 'NXDOMAIN'}`) });\n  }\n}\n\n// If there are issues, report to the inbox\nif (issues.length > 0) {\n  const desc = issues.map(i => `- ${i.name} (proxied=${i.proxied}) failed: ${i.failed.join(', ')}`).join('\\n');\n  await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://n8n.${BASE_DOMAIN}/webhook/inbox',\n    headers: { 'Content-Type': 'application/json' },\n    body: { type: 'bug', title: `DNS: ${issues.length} record(s) failing resolution`, description: `DNS Health Monitor alert:\\n${desc}`, source: 'dns-health-monitor', priority: 'high' },\n    json: true\n  });\n}\n\nreturn [{ json: { timestamp: new Date().toISOString(), checked: records.length, healthy: records.length - issues.length, issues: issues.length, details: issues } }];\n"
+      },
+      "id": "h1",
+      "name": "Check DNS Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Check DNS Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "executionTimeout": 120
+  }
+}

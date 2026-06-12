@@ -1,0 +1,294 @@
+---
+# Platform alerting rules for InfraWeaver
+# These complement the default kube-prometheus-stack rules with platform-specific alerts.
+# Deployed via kubernetes/bootstrap/app-monitoring-alerts.yaml to the monitoring namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # must match prometheusRule selector label
+spec:
+  groups:
+
+    # ── Node health ─────────────────────────────────────────────────────────────
+    - name: node.health
+      rules:
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} is NotReady"
+            description: "Node {{ $labels.node }} has been NotReady for more than 2 minutes."
+
+        - alert: NodeHighCPU
+          expr: (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)) * 100 > 85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High CPU on {{ $labels.instance }}"
+            description: "CPU usage > 85% for 10 minutes on {{ $labels.instance }}."
+
+        - alert: NodeHighMemory
+          expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High memory on {{ $labels.instance }}"
+            description: "Memory usage > 85% for 5 minutes on {{ $labels.instance }}."
+
+        - alert: NodeDiskPressure
+          expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} has DiskPressure"
+            description: "Node {{ $labels.node }} is reporting DiskPressure."
+
+        - alert: NodeCriticalMemory
+          expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 92
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Critical memory on {{ $labels.instance }}"
+            description: "Memory usage > 92% for 3 minutes on {{ $labels.instance }}. Proxmox OOM kill risk is high."
+
+    - name: node.oom
+      rules:
+        - alert: NodeOOMKillDetected
+          expr: increase(node_vmstat_oom_kill[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "OOM kill detected on {{ $labels.instance }}"
+            description: >-
+              The kernel OOM killer fired on node {{ $labels.instance }}.
+              Check kubelet reservations, eviction thresholds, and the heaviest pods on that node.
+
+    # ── PVC / Storage ────────────────────────────────────────────────────────────
+    - name: storage.alerts
+      rules:
+        - alert: PVCHighUsage
+          expr: |
+            (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} > 80% full"
+            description: "PVC usage is {{ printf \"%.0f\" $value }}% on {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}."
+
+        - alert: PVCCriticalUsage
+          expr: |
+            (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 95
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} > 95% full"
+            description: "PVC is critically full ({{ printf \"%.0f\" $value }}%). Immediate action needed."
+
+        - alert: LonghornVolumesDegraded
+          expr: longhorn_volume_robustness{robustness="degraded"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Longhorn volume {{ $labels.volume }} is degraded"
+            description: "Volume {{ $labels.volume }} has been in degraded state for > 15m. A replica rebuild may be in progress or a replica is lost."
+
+    # ── Pod / Workload health ────────────────────────────────────────────────────
+    - name: pod.health
+      rules:
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total[15m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
+            description: "Container {{ $labels.container }} has restarted {{ printf \"%.0f\" $value }} times in 15 minutes."
+
+        - alert: PodNotRunning
+          expr: |
+            kube_pod_status_phase{phase=~"Failed|Unknown",namespace!~"kube-system"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is in {{ $labels.phase }}"
+            description: "Pod has been in {{ $labels.phase }} state for more than 5 minutes."
+
+    # ── etcd health ──────────────────────────────────────────────────────────────
+    - name: etcd.health
+      rules:
+        - alert: EtcdHighCommitDuration
+          expr: |
+            histogram_quantile(0.99, rate(etcd_disk_backend_commit_duration_seconds_bucket[5m])) > 0.25
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "etcd commit latency high on {{ $labels.instance }}"
+            description: "etcd 99th percentile commit duration > 250ms for 5 minutes."
+
+        - alert: EtcdMemberDown
+          expr: up{job="kube-etcd"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "etcd member {{ $labels.instance }} is down"
+            description: "etcd cluster member has been unreachable for more than 1 minute."
+
+    # ── TLS / Cert expiry ─────────────────────────────────────────────────────────
+    - name: tls.alerts
+      rules:
+        - alert: CertificateExpiringSoon
+          expr: |
+            certmanager_certificate_expiration_timestamp_seconds - time() < 7 * 24 * 3600
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in < 7 days"
+            description: "Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} will expire soon."
+
+        - alert: CertificateExpiringCritical
+          expr: |
+            certmanager_certificate_expiration_timestamp_seconds - time() < 2 * 24 * 3600
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in < 2 days"
+            description: "URGENT: Certificate {{ $labels.name }} expires soon — check cert-manager."
+
+    # ── Longhorn storage ─────────────────────────────────────────────────────────
+    - name: longhorn.health
+      rules:
+        - alert: LonghornVolumeDegraded
+          expr: longhorn_volume_robustness == 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Longhorn volume {{ $labels.volume }} is degraded"
+            description: "Longhorn volume has degraded robustness. Check replica health in Longhorn UI."
+
+        - alert: LonghornVolumeFaulted
+          expr: longhorn_volume_robustness == 3
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Longhorn volume {{ $labels.volume }} is FAULTED"
+            description: "Longhorn volume is faulted — data may be at risk. Check Longhorn UI immediately."
+
+        - alert: LonghornNodeStoragePressure
+          expr: |
+            (longhorn_node_storage_used_bytes / longhorn_node_storage_capacity_bytes) * 100 > 80
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Longhorn node storage > 80% on {{ $labels.node }}"
+            description: "Longhorn storage usage is {{ printf \"%.0f\" $value }}% on node {{ $labels.node }}."
+
+    # ── OpenBao / Vault ──────────────────────────────────────────────────────────
+    - name: openbao.health
+      rules:
+        - alert: OpenBaoSealed
+          expr: vault_core_unsealed == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "OpenBao is SEALED — secrets unavailable"
+            description: >-
+              OpenBao pod {{ $labels.pod }} is sealed. ExternalSecrets cannot sync
+              and apps may fail to start. Run: kubectl exec -n openbao <pod> -- bao operator unseal
+
+        - alert: OpenBaoUnavailable
+          expr: up{job=~".*openbao.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "OpenBao scrape target is down"
+            description: "OpenBao pod may have crashed. Check: kubectl get pods -n openbao"
+
+    # ── ArgoCD application health ─────────────────────────────────────────────────
+    - name: argocd.health
+      rules:
+        - alert: ArgoCDAppDegraded
+          expr: argocd_app_info{health_status="Degraded"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} is Degraded"
+            description: "ArgoCD application {{ $labels.name }} has been Degraded > 10 min. Check the ArgoCD UI."
+
+        - alert: ArgoCDSyncFailed
+          expr: argocd_app_info{sync_status="OutOfSync",operation_state_phase="Failed"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} sync failed"
+            description: "ArgoCD application sync has failed. The self-healer will retry automatically."
+
+    # ── ExternalSecrets ───────────────────────────────────────────────────────────
+    - name: externalsecrets.health
+      rules:
+        - alert: ExternalSecretNotSynced
+          expr: |
+            externalsecret_status_condition{status="False",condition="Ready"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} not synced"
+            description: "ExternalSecret has not synced for > 15 minutes. Check OpenBao connectivity."
+
+    # ── Automation health ───────────────────────────────────────────────────────
+    - name: automation.health
+      rules:
+        - alert: ClusterAutomationCronJobMissedSuccess
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace=~"argocd|longhorn-system",cronjob=~"argocd-self-healer|node-notready-remediator|node-memory-rebalancer|workload-janitor|longhorn-replica-guardian"} > 7200
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Automation CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not succeeded recently"
+            description: "Cluster automation CronJob {{ $labels.cronjob }} has not reported a successful run within the last 2 hours."
+
+        - alert: LonghornBackupVerifierMissedSuccess
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="longhorn-backup-verifier"} > 172800
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Longhorn backup verifier has not succeeded in 48h"
+            description: "The longhorn-backup-verifier CronJob has not recorded a successful run within the last 48 hours."
+
+        - alert: ClusterAutomationCronJobSuspended
+          expr: |
+            kube_cronjob_spec_suspend{namespace=~"argocd|longhorn-system",cronjob=~"argocd-self-healer|node-notready-remediator|node-memory-rebalancer|workload-janitor|longhorn-backup-verifier|longhorn-replica-guardian"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Automation CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} is suspended"
+            description: "Automation CronJob {{ $labels.cronjob }} is suspended and will not run until resumed."

@@ -1,0 +1,21 @@
+name: infraweaver-console
+description: "InfraWeaver Console — platform management UI with RBAC"
+namespace: infraweaver-console
+
+ingressroute:
+  host: infraweaver.int.${BASE_DOMAIN}
+  entrypoint: websecure
+
+secrets:
+  path: platform/infraweaver-console
+  keys:
+    oidc-client-id:
+      type: static
+      value: "infraweaver-console"
+    oidc-client-secret:
+      type: password
+    nextauth-secret:
+      type: password
+    argocd-token:
+      type: password
+replicas: "2"

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: infraweaver-api
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-api
+spec:
+  selector:
+    app: infraweaver-api
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+      protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,387 @@
+---
+# ── Platform Access Control Blueprint ────────────────────────────────────────
+# Defines groups and per-application access policies for the platform.
+#
+# Model: every *.int host sits behind Authentik forward-auth.
+# Authorization is enforced here via per-application policy bindings.
+#
+# Groups:
+#   platform-admins  → superset: admins pass every policy below (always "above").
+#   platform-users   → regular users (shared apps).
+#   infra-*          → scoped access to a specific sensitive panel; admins included.
+#
+# To open a sensitive panel to a non-admin, add the user to the matching infra-* group.
+# To add a new app → add an Application (blueprint-apps.yaml) + a policy binding below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-access-control
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  access-control.yaml: |
+    version: 1
+    metadata:
+      name: Platform Access Control
+    entries:
+      # ── Groups ──────────────────────────────────────────────────────────────
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: platform-admins
+        attrs:
+          name: platform-admins
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: platform-users
+        attrs:
+          name: platform-users
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-network
+        attrs:
+          name: infra-network
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-automation
+        attrs:
+          name: infra-automation
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-proxmox
+        attrs:
+          name: infra-proxmox
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-containers
+        attrs:
+          name: infra-containers
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-truenas
+        attrs:
+          name: infra-truenas
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-vault
+        attrs:
+          name: infra-vault
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-gitops
+        attrs:
+          name: infra-gitops
+          is_superuser: false
+      - model: authentik_core.group
+        state: present
+        identifiers:
+          name: infra-storage
+        attrs:
+          name: infra-storage
+          is_superuser: false
+      # ── Expression Policies ──────────────────────────────────────────────────
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-admins-only
+        attrs:
+          name: policy-admins-only
+          expression: |
+            return ak_is_group_member(request.user, name="platform-admins")
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-platform-users
+        attrs:
+          name: policy-platform-users
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="platform-users")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-network
+        attrs:
+          name: policy-infra-network
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-network")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-automation
+        attrs:
+          name: policy-infra-automation
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-automation")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-proxmox
+        attrs:
+          name: policy-infra-proxmox
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-proxmox")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-containers
+        attrs:
+          name: policy-infra-containers
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-containers")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-truenas
+        attrs:
+          name: policy-infra-truenas
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-truenas")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-vault
+        attrs:
+          name: policy-infra-vault
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-vault")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-gitops
+        attrs:
+          name: policy-infra-gitops
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-gitops")
+            )
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers:
+          name: policy-infra-storage
+        attrs:
+          name: policy-infra-storage
+          expression: |
+            return (
+              ak_is_group_member(request.user, name="platform-admins") or
+              ak_is_group_member(request.user, name="infra-storage")
+            )
+      # ── Application Policy Bindings ──────────────────────────────────────────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, adguard]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, adguard]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-network]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, ansible]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, ansible]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-automation]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, traefik-dashboard]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, traefik-dashboard]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, proxmox-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, proxmox-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-proxmox]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, portainer-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, portainer-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-containers]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, portainer2]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, portainer2]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-containers]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, truenas]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, truenas]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-truenas]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, vault1]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, vault1]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-vault]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, argocd-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, argocd-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-gitops]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, grafana-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, grafana-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, openbao-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, openbao-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-vault]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, infraweaver-console-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, infraweaver-console-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, longhorn]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, longhorn]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-storage]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, argocd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, argocd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-platform-users]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, openbao]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, openbao]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30

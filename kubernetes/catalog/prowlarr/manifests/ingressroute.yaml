@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: prowlarr
+  namespace: prowlarr
+  labels:
+    app.kubernetes.io/name: prowlarr
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`prowlarr.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: prowlarr
+          port: 9696
+  tls:
+    store:
+      name: default
+      namespace: traefik

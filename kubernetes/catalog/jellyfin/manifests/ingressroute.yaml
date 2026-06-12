@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jellyfin
+  namespace: jellyfin
+  labels:
+    app.kubernetes.io/name: jellyfin
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`jellyfin.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: jellyfin
+          port: 8096
+  tls:
+    store:
+      name: default
+      namespace: traefik

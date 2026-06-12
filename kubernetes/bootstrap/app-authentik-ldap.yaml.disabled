@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-authentik-ldap
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: authentik-ldap-outpost
+    infraweaver.io/layer: platform
+spec:
+  project: default
+  source:
+    repoURL: http://onedev.onedev.svc.cluster.local/InfraWeaver-platform
+    targetRevision: main
+    path: kubernetes/platform/authentik-ldap-outpost/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: authentik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy' 

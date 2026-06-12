@@ -1,0 +1,104 @@
+---
+# alertmanager-discord — bridges Alertmanager webhooks to Discord
+# Webhook URL is stored in OpenBao and injected via ExternalSecret
+#
+# To set up:
+# 1. Create a Discord webhook in your server: Server Settings → Integrations → Webhooks
+# 2. Store the URL in OpenBao: bao kv put secret/platform/discord webhook_url="https://discord.com/api/webhooks/..."
+# 3. Sync will inject the URL via ExternalSecret below
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager-discord
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager-discord
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager-discord
+  template:
+    metadata:
+      labels:
+        app: alertmanager-discord
+    spec:
+      priorityClassName: platform-standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alertmanager-discord
+          # NOTE: pin this to a specific digest/tag when next updating.
+          # Using :latest risks unexpected breakage on node restarts/rollouts.
+          # Check releases: https://github.com/benjojo/alertmanager-discord/releases
+          image: benjojo/alertmanager-discord:latest
+          ports:
+            - containerPort: 9094
+          env:
+            - name: DISCORD_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: discord-webhook-secret
+                  key: webhook_url
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9094
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9094
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-discord
+  namespace: monitoring
+spec:
+  selector:
+    app: alertmanager-discord
+  ports:
+    - port: 9094
+      targetPort: 9094
+---
+# ExternalSecret — pull Discord webhook URL from OpenBao
+# Run: bao kv put secret/platform/discord webhook_url="https://discord.com/api/webhooks/..."
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: discord-webhook
+  namespace: monitoring
+spec:
+  # Match ArgoCD's shorter refresh window so webhook rotations heal quickly.
+  refreshInterval: 15m
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: discord-webhook-secret
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: webhook_url
+      remoteRef:
+        key: secret/platform/discord
+        property: webhook_url

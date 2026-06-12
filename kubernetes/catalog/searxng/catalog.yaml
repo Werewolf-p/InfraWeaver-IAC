@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: searxng/searxng
+name: searxng
+description: "Privacy-respecting, hackable metasearch engine. SearXNG is a fork of searx."
+namespace: searxng
+source: community-apps
+tier: simple
+image: searxng/searxng
+categories:
+  - "Productivity"
+  - "Other"
+ingressroute:
+  host: searxng.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:58:30.697Z

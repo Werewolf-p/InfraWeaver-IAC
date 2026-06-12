@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ExternalDNS — Unified DNS management for ${BASE_DOMAIN} (all subdomains)
+#
+# Architecture:
+#   - IngressRoutes ARE the single source of truth for DNS records
+#   - Only routes annotated with external-dns.alpha.kubernetes.io/managed: "true"
+#     get published to Cloudflare (opt-in, NOT opt-out)
+#   - Public services: annotate with managed + cloudflare-proxied: "true"
+#     → Cloudflare CDN proxied record pointing to public IP (${PUBLIC_INGRESS_IP})
+#   - Private .int services: rely on Cloudflare wildcard *.int.${BASE_DOMAIN} → ${METALLB_TRAEFIK_VIP}
+#     No annotation needed — wildcard handles all .int resolution
+#   - Truly private (no DNS at all): just don't annotate the route
+#
+# Source: traefik-proxy — reads IngressRoute objects, extracts Host() rules.
+# Policy: upsert-only — never deletes existing records (safe default).
+# TXT owner: infraweaver-prod — marks managed records so other ExternalDNS
+#            instances don't interfere.
+# ─────────────────────────────────────────────────────────────────────────────
+
+sources:
+  - traefik-proxy
+  - service
+
+provider:
+  name: cloudflare
+
+# Cloudflare API token — injected from ExternalSecret (pulled from OpenBao)
+env:
+  - name: CF_API_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: cloudflare-api-token
+        key: CF_API_TOKEN
+
+# Manage ALL ${BASE_DOMAIN} subdomains (both public and int)
+domainFilters:
+  - "${BASE_DOMAIN}"
+
+# Default target for services without explicit target annotation
+# (used for .int services if they opt-in to managed DNS)
+extraArgs:
+  - --default-targets=${PUBLIC_INGRESS_IP}
+  - --annotation-filter=external-dns.alpha.kubernetes.io/managed in (true)
+
+# upsert-only: create/update records but NEVER delete them
+# Change to "sync" later once you're confident in the managed records
+policy: upsert-only
+
+# TXT records claim ownership — prevents other ExternalDNS instances interfering
+txtOwnerId: "infraweaver-prod"
+txtPrefix: "edns-"
+
+# How often to reconcile DNS records against IngressRoutes
+interval: "2m"
+
+logLevel: "info"
+logFormat: "text"
+
+# RBAC — create ClusterRole for ExternalDNS to read K8s + Traefik resources
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: external-dns
+
+# Extra RBAC rules to read Traefik IngressRoute CRDs
+# (not included in default ExternalDNS ClusterRole)
+extraRules:
+  - apiGroups:
+      - traefik.io
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+    verbs:
+      - get
+      - list
+      - watch
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 50Mi
+  limits:
+    memory: 128Mi
+
+# Single replica is fine — DNS reconciliation is stateless and idempotent
+replicaCount: 1

@@ -1,0 +1,305 @@
+# ── Platform Identity (fork re-targeting — the ONE declarative source) ────────
+# Every value that differs between forks/deployments lives here. The InfraWeaver
+# console reads this block from git (platform-config.ts → getPlatformIdentity)
+# and derives hostnames, image refs, OIDC/callback URLs, TLS secret names,
+# allowlists, and the homepage service map from it.
+#
+# Fork model (see docs/gitops-operating-model.md §0): committed values use
+# ${PLACEHOLDER} tokens filled by scripts/generate-from-env.sh from .env. The
+# console IGNORES un-substituted ${...} tokens and falls back to env → typed
+# defaults, so a fresh template checkout still boots. Precedence at runtime:
+#   1. this block (substituted)   2. console env vars   3. typed code defaults
+#
+# The ONLY value NOT configured here is the user-feedback URL (hardcoded in
+# app/api/feedback/route.ts by design).
+identity:
+  baseDomain: ${BASE_DOMAIN}                       # e.g. example.com
+  brandName: ${PLATFORM_BRAND_NAME}                # console title / branding
+  registryHost: registry.int.${BASE_DOMAIN}        # private OCI registry host
+  argocdUrl: https://argocd.int.${BASE_DOMAIN}     # ArgoCD API base
+  authentikUrl: https://auth.${BASE_DOMAIN}        # Authentik base URL
+  authentikIssuer: https://auth.${BASE_DOMAIN}/application/o/infraweaver-console/
+  defaultCluster: ${DEFAULT_CLUSTER_ID}            # default cluster id (e.g. homelab-prod)
+  tlsSecrets:
+    public: platform-wildcard-tls                  # TLS secret for *.${BASE_DOMAIN}
+    internal: platform-wildcard-int-tls            # TLS secret for *.int.${BASE_DOMAIN}
+  accessTierMiddlewares:
+    vpn: vpn-only                                  # Traefik middleware marking the VPN tier
+    internal: internal-only                        # Traefik middleware marking the internal tier
+  # The collections below are ADDITIVE — entries EXTEND the console's built-in
+  # defaults (cluster service hosts, nas_providers hosts, etc.), never replace
+  # them. Leave empty to use defaults; add fork-specific entries as needed.
+  internalHostAllowlist: []     # extra internal hosts for SSRF-guarded fetches
+  externalRouteDomains: []      # non-app domains served by the `external-routes` app
+  homepageServiceMap: {}        # override/add homepage service-label → ArgoCD-app-name
+
+# ── True Core (mandatory, cannot be disabled) ─────────────────────────────────
+# These are ALWAYS deployed. Listed here for visibility only.
+# Editing this list does NOT enable/disable apps — they are hardcoded.
+core:
+  apps:
+    argocd:
+      description: "GitOps engine — powers all deployments"
+    cert-manager:
+      description: "TLS certificate automation (Let's Encrypt)"
+    traefik:
+      description: "Ingress controller — all HTTP(S) routing"
+      replicas: 2
+    external-secrets:
+      description: "Syncs secrets from OpenBao → Kubernetes Secrets"
+    longhorn:
+      description: "HA distributed block storage — cross-node PVC replication + scheduled backups to NFS"
+      enabled: true  # set ENABLE_LONGHORN=false in .env to skip on lightweight setups
+    openbao:
+      description: "Secrets vault (open-source Vault fork)"
+    metallb:
+      description: "Load balancer IP assignment for bare-metal"
+    kyverno:
+      description: "Policy engine — enforces resource limits on all pods, blocks privileged containers in app namespaces"
+      enabled: true  # set ENABLE_KYVERNO=false in .env to rely on PSA labels only
+    priority-classes:
+      description: "Pod scheduling priority tiers"
+    local-path-provisioner:
+      description: "Local disk storage for lightweight workloads"
+
+# ── Optional Core Groups ───────────────────────────────────────────────────────
+# Each group maps to a kubernetes/<tier>/ directory.
+# Set enabled: false to remove the entire group from the cluster.
+# Set replicas: N per app to run N pod replicas (basic HA).
+# Stateless apps (Grafana, Homepage) support 2+ replicas.
+# Stateful apps with a DB (Authentik, Loki) typically use 1.
+groups:
+  # ── Monitoring Stack (OPTIONAL) ────────────────────────────────────────────
+  # Set enabled: true to deploy Prometheus, Loki, Alertmanager, and Grafana dashboards.
+  # Resource cost: ~2 GB RAM, ~10 GB storage.
+  # The InfraWeaver console degrades gracefully without it (metrics/log features hidden).
+  # Companion bootstrap files (app-alertmanager-discord.yaml, app-monitoring-*.yaml)
+  # are managed automatically by sync-groups.sh when this group is enabled/disabled.
+  core-monitoring:
+    description: "Prometheus, Loki, Alertmanager — cluster observability (optional)"
+    enabled: true
+    # kubernetes/monitoring/ apps
+    apps:
+      kube-prometheus-stack:
+        description: "Prometheus + kube-state-metrics + node-exporter"
+        replicas: 1       # Prometheus StatefulSet — 1 is standard
+      loki:
+        description: "Log aggregation"
+        replicas: 1
+      alertmanager-discord:
+        description: "Discord alert forwarder for Alertmanager"
+        replicas: 1
+      alerts:
+        description: "PrometheusRule alert definitions (no pods)"
+
+  # ── Core Platform Services ─────────────────────────────────────────────────
+  # Required apps (authentik, dns, external-routes) always deploy.
+  # Optional apps below default to enabled: false — set true to enable.
+  # Companion bootstrap files are managed automatically by sync-groups.sh.
+  core-platform:
+    description: "SSO (required) + optional platform services"
+    enabled: true
+    # kubernetes/platform/ apps
+    apps:
+      # ── REQUIRED — do not disable ──────────────────────────────────────────
+      authentik:
+        description: "Identity provider and SSO gateway"
+        replicas: 1       # Set 2 for HA (PostgreSQL handles state)
+      authentik-ldap-outpost:
+        description: "LDAP directory server — needed for TrueNAS and apps that cannot use OIDC"
+        replicas: 1
+
+      # ── OPTIONAL — set enabled: true to deploy ─────────────────────────────
+      velero:
+        description: "Kubernetes backup controller"
+        enabled: false
+      minio-velero:
+        description: "S3-compatible storage for Velero backups"
+        enabled: false
+        replicas: 1
+      external-dns:
+        description: "Automatic DNS record management via Cloudflare"
+        enabled: true
+        replicas: 1
+      homepage:
+        description: "Homelab dashboard (console /home tab provides same content)"
+        enabled: false    # optional: console has built-in home tab
+        replicas: 2       # Stateless — 2 replicas for HA
+      argocd-image-updater:
+        description: "Automatic container image tag updates via GitOps"
+        enabled: false    # optional: needed only when using Onedev CI + auto image updates
+        replicas: 1
+      grafana:
+        description: "Standalone Grafana for custom dashboards"
+        enabled: false
+        replicas: 2       # Stateless — 2 replicas for HA
+      falco:
+        description: "Runtime security and threat detection"
+        enabled: false    # optional: advanced security monitoring
+        replicas: 1
+      wazuh:
+        description: "SIEM and security event management"
+        enabled: false    # optional: enterprise-grade security operations
+
+catalog:
+  # List of catalog apps to install.
+  # Core apps (argocd, traefik, external-secrets, authentik, etc.) are always installed.
+  # Add or remove entries here to control which optional apps are deployed.
+  #
+  # Available catalog apps:
+  #   wiki             — Wiki.js documentation wiki            (wiki.int.yourdomain.com)
+  #   gatus            — Uptime/status monitoring              (status.int.yourdomain.com)
+  #                      Gatus replaces the old Uptime Kuma deployment for the same purpose.
+  #   gitea            — Self-hosted Git forge                 (gitea.int.yourdomain.com)
+  #   vaultwarden      — Bitwarden-compatible passwords        (vaultwarden.int.yourdomain.com)
+  #   it-tools         — IT/Dev tool collection                (it-tools.int.yourdomain.com)
+  #   stirling-pdf     — PDF manipulation tools                (stirling-pdf.int.yourdomain.com)
+  #   excalidraw       — Collaborative whiteboard              (excalidraw.int.yourdomain.com)
+  #   actual           — Personal finance / budgeting          (actual.int.yourdomain.com)
+  #   n8n              — Workflow automation                   (n8n.int.yourdomain.com)
+  #   forgejo          — Community Git forge (Gitea fork)      (forgejo.int.yourdomain.com)
+  #   onedev           — All-in-one DevOps platform (Git+CI)   (onedev.int.yourdomain.com)
+  #   registry         — Private OCI/Docker container registry  (registry.int.yourdomain.com)
+  #
+  # Defined but not yet enabled (manifests still in development):
+  #   mealie           — Recipe manager with OIDC              (mealie.int.yourdomain.com)
+  #   changedetection  — Website change monitoring             (changedetection.int.yourdomain.com)
+  #   paperless-ngx    — Document management (complex)         (paperless.int.yourdomain.com)
+  #
+  # Optional apps (fully implemented, not enabled by default):
+  #   code-server      — VS Code in browser                   (code-server.int.yourdomain.com)
+  #   jellyfin         — Media server                          (jellyfin.int.yourdomain.com)
+  #   plex             — Plex Media Server (ADMIN_USERNAME folder only) (plex.int.yourdomain.com)
+  #   ntfy             — Push notifications                    (ntfy.int.yourdomain.com)
+  #   linkding         — Bookmark manager                      (linkding.int.yourdomain.com)
+  #   navidrome        — Music streaming server                (navidrome.int.yourdomain.com)
+  #   speedtest-tracker— Internet speed tracking               (speedtest-tracker.int.yourdomain.com)
+  #   searxng          — Private meta search engine            (searxng.int.yourdomain.com)
+  #   grocy            — Household & grocery management        (grocy.int.yourdomain.com)
+  #   immich           — Photo backup & management             (immich.int.yourdomain.com)
+  #   outline          — Team knowledge base (OIDC)            (outline.int.yourdomain.com)
+  enabled:
+    - gatus
+    - stirling-pdf
+    - onedev
+    - infraweaver-console
+    - infraweaver-api
+    - infraweaver-node
+    - registry
+    - plex
+
+  # ── Per-catalog-app HA settings ──────────────────────────────────────────────
+  # Set replicas: N to run N pods. Default is 1.
+  # Only effective for apps whose Helm chart supports replicaCount.
+  ha:
+    gatus:
+      replicas: 1
+    stirling-pdf:
+      replicas: 1
+    onedev:
+      replicas: 1
+    registry:
+      replicas: 1
+
+# ── InfraWeaver Console RBAC ──────────────────────────────────────────────────
+console:
+  rbac:
+    roles:
+      admin:
+        groups:
+          - platform-admins
+        permissions:
+          - "*"
+      operator:
+        groups:
+          - platform-operators
+        permissions:
+          - "apps:read"
+          - "apps:sync"
+          - "config:read"
+          - "catalog:write"
+          - "users:read"
+      viewer:
+        groups:
+          - platform-users
+        permissions:
+          - "apps:read"
+          - "config:read"
+          - "users:read"
+
+# ── Persistence (TrueNAS NFS backup for Longhorn volumes) ─────────────────────
+persistence:
+  truenas:
+    # Set to true if you have a TrueNAS instance with NFS available.
+    # When enabled, Longhorn backs up all PVCs annotated with
+    #   recurring-job-group.longhorn.io/truenas-backup: "enabled"
+    # to the NFS share at nfs_ip:/nfs_path nightly.
+    #
+    # TrueNAS prerequisites (one-time setup):
+    #   1. Create dataset: Storage → Pools → Add Dataset "longhorn-backups"
+    #   2. Sharing → NFS → Add Share: /mnt/tank/longhorn-backups
+    #   3. Set "All Dirs" and network access to 10.10.0.0/24
+    #   4. Set Mapall User: root (Longhorn requires root NFS access)
+    #
+    # Fresh redeploy restore:
+    #   Run scripts/restore-from-truenas.sh before deploying apps to
+    #   restore the latest backup of each volume from TrueNAS.
+    enabled: true
+    nfs_ip: "10.25.0.135"
+    nfs_path: "/mnt/Main/k8s-longhorn-backups"
+
+# ── Backup Configuration ───────────────────────────────────────────────────────
+# Controls which backup providers are active. Set via BACKUP_PROVIDER in .env
+# and applied by scripts/configure-platform.sh at deploy time.
+#
+# Options:
+#   none     — no automated backups (not recommended for production)
+#   longhorn — Longhorn block-level PVC backup to TrueNAS/NFS (above) — lightweight
+#   velero   — Kubernetes config backup (deployments, secrets, services + PVCs) to MinIO
+#   both     — full protection: Longhorn data backup + Velero K8s backup
+#
+# Longhorn backup is handled by the persistence.truenas section above.
+# Velero/MinIO are enabled/disabled via groups.core-platform.apps.velero/minio-velero.
+#
+# Note: Longhorn and Velero are COMPLEMENTARY, not alternatives:
+#   - Longhorn = your data (PVC contents) backed up to NFS
+#   - Velero = your cluster state (K8s manifests + PVC snapshots) backed up to MinIO S3
+backup:
+  # Set by configure-platform.sh from .env BACKUP_PROVIDER — do not edit manually
+  provider: "longhorn"
+
+
+# Configure NAS providers for user share assignment via the InfraWeaver console.
+# Shares are provisioned as K8s PVCs using csi-driver-smb and tracked in users.yaml.
+#
+# Service account setup:
+#   Synology: Create 'infraweaver-svc' user in DSM → Control Panel → User & Group
+#             Grant read/write to shares that need provisioning
+#             Store credentials in OpenBao at secret/platform/nas/synology
+#   TrueNAS:  System → API Keys → Generate key for 'infraweaver-svc'
+#             Store in OpenBao at secret/platform/nas/truenas
+#
+# All NAS operations are logged via the InfraWeaver console audit trail.
+nas_providers:
+  synology:
+    enabled: true
+    host: "10.25.0.21"
+    port: 5001
+    protocol: "https"
+    smb_enabled: true
+    nfs_enabled: false          # Enable in DSM → Control Panel → File Services → NFS
+    # K8s secret referenced by csi-driver-smb StorageClasses:
+    credentials_secret: "nas-synology-credentials"
+    # Shares available for user assignment (auto-discovered via DSM API):
+    managed_shares:
+      - Mediaserver               # Media files — subfolders per user for isolation
+  truenas:
+    enabled: true
+    host: "10.25.0.135"
+    port: 443
+    protocol: "https"
+    smb_enabled: true
+    nfs_enabled: true
+    credentials_secret: "nas-truenas-credentials"
+    managed_shares:
+      - Main                      # Primary dataset pool

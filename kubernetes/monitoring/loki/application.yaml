@@ -1,0 +1,10 @@
+repoURL: https://grafana.github.io/helm-charts
+targetRevision: "2.*"
+chart: loki-stack
+releaseName: loki
+namespace: monitoring
+# loki-stack 2.x StatefulSet template doesn't set persistentVolumeClaimRetentionPolicy.
+# K8s 1.25+ defaults add it, and SSA Apply reclaims ownership → constant OutOfSync.
+# Disable SSA for this app to use client-side apply where jsonPointers ignoreDiff works.
+serverSideApply: "false"
+replicas: "1"

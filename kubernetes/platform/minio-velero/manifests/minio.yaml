@@ -1,0 +1,292 @@
+---
+# MinIO — S3-compatible object storage for Velero backups
+# Stores all backup data on Longhorn PVC (persistent, survives pod restarts)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    app.kubernetes.io/name: velero
+    infraweaver.io/type: platform
+---
+# PVC for MinIO backup storage (Longhorn retained — never auto-deleted)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-velero-data
+  namespace: velero
+  annotations:
+    # Include in nightly TrueNAS NFS backup (RecurringJob: truenas-backup-daily).
+    # MinIO stores Velero cluster backups — backing up the backup store ensures
+    # Velero restores survive a complete TrueNAS + cluster failure scenario.
+    recurring-job-group.longhorn.io/truenas-backup: "enabled"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: minio-velero-pvc-reader
+  namespace: velero
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    resourceNames: ["minio-velero-data"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: minio-velero-pvc-reader-system-nodes
+  namespace: velero
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: minio-velero-pvc-reader
+subjects:
+  - kind: Group
+    name: system:nodes
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio-velero
+  namespace: velero
+  labels:
+    app.kubernetes.io/name: minio-velero
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: minio-velero
+  template:
+    metadata:
+      labels:
+        app: minio-velero
+    spec:
+      priorityClassName: platform-standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-velero-credentials
+                  key: access_key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-velero-credentials
+                  key: secret_key
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-velero-data
+---
+# Job — Create the velero-backups bucket on MinIO startup
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-create-bucket
+  namespace: velero
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+          command:
+            - sh
+            - -c
+            - |
+              until mc alias set minio http://minio-velero.velero.svc.cluster.local:9000 $ACCESS_KEY $SECRET_KEY; do
+                echo "Waiting for MinIO to be ready..."; sleep 5
+              done
+              mc mb --ignore-existing minio/velero-backups
+              mc anonymous set none minio/velero-backups
+              echo "Bucket created"
+          env:
+            - name: HOME
+              value: /tmp
+            - name: ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-velero-credentials
+                  key: access_key
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-velero-credentials
+                  key: secret_key
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-velero
+  namespace: velero
+spec:
+  selector:
+    app: minio-velero
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+# IngressRoute — MinIO console (VPN-only)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: minio-velero-console
+  namespace: traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`minio-velero.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: minio-velero
+          namespace: velero
+          port: 9001
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ExternalSecret — pull MinIO credentials from OpenBao
+# Setup: bao kv put secret/platform/minio-velero access_key="minioadmin" secret_key="<strong-password>"
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: minio-velero-credentials
+  namespace: velero
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: minio-velero-credentials
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: access_key
+      remoteRef:
+        key: secret/platform/minio-velero
+        property: access_key
+    - secretKey: secret_key
+      remoteRef:
+        key: secret/platform/minio-velero
+        property: secret_key
+---
+# Velero also needs access to MinIO — separate secret in velero format
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: velero-s3-credentials
+  namespace: velero
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: velero-s3-credentials
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template:
+      data:
+        cloud: |
+          [default]
+          aws_access_key_id={{ .access_key }}
+          aws_secret_access_key={{ .secret_key }}
+  data:
+    - secretKey: access_key
+      remoteRef:
+        key: secret/platform/minio-velero
+        property: access_key
+    - secretKey: secret_key
+      remoteRef:
+        key: secret/platform/minio-velero
+        property: secret_key

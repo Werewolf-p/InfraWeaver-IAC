@@ -1,0 +1,8 @@
+# Falco — runtime security for node and workload threat detection
+# Chart: https://falcosecurity.github.io/charts
+repoURL: https://falcosecurity.github.io/charts
+targetRevision: "4.21.*"
+chart: falco
+releaseName: falco
+namespace: falco
+replicas: "1"

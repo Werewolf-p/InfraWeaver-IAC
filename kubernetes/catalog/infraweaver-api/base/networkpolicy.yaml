@@ -1,0 +1,85 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infraweaver-api
+  namespace: infraweaver-console
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow console (in same namespace)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: infraweaver-console
+      ports:
+        - port: 3001
+    # Allow Traefik ingress (for external access via api.int.${BASE_DOMAIN})
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - port: 3001
+    # Allow Prometheus scraping from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 3001
+  egress:
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Kubernetes API server (cluster management operations)
+    - to:
+        - ipBlock:
+            cidr: ${MGMT_SUBNET_CIDR}
+      ports:
+        - port: 6443
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - port: 443
+          protocol: TCP
+    # ArgoCD server (application sync/diff/status)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argocd
+      ports:
+        - port: 80
+          protocol: TCP
+    # OneDev git server (IaC version updates)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: onedev
+      ports:
+        - port: 80
+          protocol: TCP
+    # External HTTPS (GitHub API, upstream services)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP

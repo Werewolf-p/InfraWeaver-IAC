@@ -1,0 +1,38 @@
+name: sync-to-public
+
+# Publishes a SANITIZED subset of this PRIVATE source repo to the PUBLIC template
+# repo (IaC + config/param never leave private). See scripts/sync-to-public.sh.
+#
+# Setup (one-time):
+#   1. Create a PUBLIC template repo (e.g. <owner>/InfraWeaver-template).
+#   2. Add a repo secret PUBLIC_REPO_PAT = a fine-grained PAT with `contents:write`
+#      on ONLY that public repo.
+#   3. Set the `vars.PUBLIC_REPO` variable to "owner/public-repo".
+# Until both are set, the job no-ops (it only runs when PUBLIC_REPO is defined),
+# so adding this workflow changes nothing on its own.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-to-public
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Guard: only run once the public target is configured.
+    if: ${{ vars.PUBLIC_REPO != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sync sanitized tree to public repo
+        env:
+          PUBLIC_REPO_URL: https://x-access-token:${{ secrets.PUBLIC_REPO_PAT }}@github.com/${{ vars.PUBLIC_REPO }}.git
+        run: bash scripts/sync-to-public.sh

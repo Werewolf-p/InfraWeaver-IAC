@@ -1,0 +1,36 @@
+---
+# ── Authentik Platform Users Blueprint ───────────────────────────────────────
+# Creates all platform users on first boot.
+# Passwords are injected via env vars (from ExternalSecret sourced from OpenBao).
+#
+# TO ADD A USER:
+#   1. Add entry to users.yaml (repo root) for documentation + sync
+#   2. Add an entry below for the Authentik user
+#   3. Add their password to OpenBao via seed-openbao-authentik.sh
+#   4. Add password mapping to externalsecret.yaml + env var to authentik/values.yaml
+#   (Group membership is set dynamically from users.yaml — no workflow changes needed)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-users
+  namespace: authentik
+data:
+  users.yaml: |
+    version: 1
+    metadata:
+      name: Platform Users Setup
+    entries:
+      # ── Platform admin user ───────────────────────────────────────────────────
+      # Username = admin (from .env). sub_mode=user_username means
+      # this username is also the ArgoCD principal ID.
+      - model: authentik_core.user
+        state: present
+        identifiers:
+          username: "${ADMIN_USERNAME}"
+        attrs:
+          name: "${ADMIN_NAME}"
+          email: "${ADMIN_EMAIL}"
+          password: !Env AUTHENTIK_ADMIN_PASSWORD
+          is_active: true
+
+

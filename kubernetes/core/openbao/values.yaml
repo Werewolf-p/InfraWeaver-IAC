@@ -1,0 +1,142 @@
+server:
+  # Probe tuning: OpenBao takes 2-3 minutes to start and unseal.
+  # - readinessProbe: 10s timeout, 60s initial delay, 5 failures tolerated
+  # - livenessProbe: disabled — autounseal sidecar handles recovery; HTTP liveness
+  #   was killing the pod before it could fully initialize (exit 137 after ~150s)
+  readinessProbe:
+    enabled: true
+    failureThreshold: 5
+    initialDelaySeconds: 60
+    periodSeconds: 15
+    successThreshold: 1
+    timeoutSeconds: 10
+
+  livenessProbe:
+    enabled: false
+
+  # Node affinity: prefer cp1/cp2 over cp3 which has known Longhorn mmap instability.
+  # SIGBUS crashes occur when cp3 briefly loses volume connectivity, causing mmap
+  # page faults in OpenBao's Raft/BBolt storage. Preferring stable nodes prevents this.
+  affinity: |
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+            - talos-prod-cp2
+            - talos-prod-cp3
+
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      storage "raft" {
+        path = "/openbao/data"
+        node_id = "openbao-0"
+      }
+
+      # Audit log: write all requests/responses to a file inside the data volume.
+      # Log is rotated at 100MB. Required for compliance and incident investigation.
+      audit {
+        type = "file"
+        path = "/openbao/data/audit.log"
+        options = {
+          file_path = "/openbao/data/audit.log"
+          log_raw    = "false"
+          hmac_accessor = "true"
+        }
+      }
+
+      api_addr = "http://openbao.openbao.svc.cluster.local:8200"
+      cluster_addr = "http://openbao.openbao.svc.cluster.local:8201"
+
+  dataStorage:
+    enabled: true
+    size: 5Gi
+    storageClass: local-path   # local-path avoids Longhorn I/O errors on Raft BoltDB
+    accessMode: ReadWriteOnce
+
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/router.middlewares: traefik-forward-auth@kubernetescrd
+    hosts:
+      - host: openbao.prod.local
+        paths:
+          - /
+      - host: openbao.int.${BASE_DOMAIN}
+        paths:
+          - /
+    pathType: Prefix
+
+  service:
+    type: ClusterIP
+
+  serviceAccount:
+    create: true
+    name: openbao
+
+  extraContainers:
+    - name: autounseal
+      image: quay.io/openbao/openbao:2.5.3
+      command:
+        - /bin/sh
+        - -c
+        - >-
+          echo "Autounseal sidecar starting...";
+          while true; do
+            EXIT_CODE=0;
+            bao status -address=http://127.0.0.1:8200 >/dev/null 2>&1 || EXIT_CODE=$?;
+            if [ "$EXIT_CODE" = "2" ]; then
+              UNSEAL_KEY=$(cat /etc/openbao-unseal/unseal_key 2>/dev/null || true);
+              if [ -n "$UNSEAL_KEY" ]; then
+                echo "OpenBao sealed - unsealing...";
+                bao operator unseal -address=http://127.0.0.1:8200 "$UNSEAL_KEY" >/dev/null 2>&1 && echo "Unseal OK" || echo "Unseal failed";
+              else
+                echo "Sealed but no unseal key yet";
+              fi;
+            fi;
+            sleep 30;
+          done
+      env:
+        - name: BAO_ADDR
+          value: "http://127.0.0.1:8200"
+      volumeMounts:
+        - name: userconfig-openbao-unseal
+          mountPath: /etc/openbao-unseal
+          readOnly: true
+
+  extraVolumes:
+    - type: secret
+      name: openbao-unseal
+      defaultMode: "0444"
+
+injector:
+  enabled: false
+
+ui:
+  enabled: true
+  serviceType: ClusterIP
+
+# Self-healing: ensure OpenBao (secrets engine) is never evicted
+priorityClassName: platform-critical
+
+# Memory limit: OpenBao uses ~56Mi at rest, 256Mi gives 4.5x headroom
+resources:
+  requests:
+    memory: 64Mi
+    cpu: 25m
+  limits:
+    memory: 256Mi
+    cpu: 500m

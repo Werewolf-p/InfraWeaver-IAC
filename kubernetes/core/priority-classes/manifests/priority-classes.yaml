@@ -1,0 +1,73 @@
+---
+# PriorityClasses — Self-healing layer: ensures critical infra pods survive
+# resource pressure and are scheduled before optional workloads.
+#
+# Source: kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/
+#
+# Hierarchy:
+#   platform-critical (1000000) — core infra that must never be evicted
+#     → traefik, argocd, cert-manager, openbao, external-secrets, metallb, coredns
+#   platform-high (750000) — auth / SSO — must survive node pressure (all logins depend on it)
+#     → authentik server, worker, postgresql, redis
+#   platform-standard (500000) — platform services that should survive user workloads
+#     → longhorn, monitoring, alerting, shared platform components
+#   platform-default (100000, global default) — normal workloads
+#   game-server (10000) — lowest-priority user workloads; never preempt others
+#
+# WARNING: values >= 1000000000 are reserved by Kubernetes for system pods.
+# platform-critical uses 1000000 which is safely below that limit.
+
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical
+  labels:
+    infraweaver.io/managed: "true"
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Core infrastructure components — traefik, argocd, cert-manager, openbao, external-secrets, metallb, and coredns. Never evict these under resource pressure."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-high
+  labels:
+    infraweaver.io/managed: "true"
+value: 750000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "High-priority platform services such as Authentik SSO. All user logins depend on these — they must survive memory pressure and be evicted after critical infra only."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-standard
+  labels:
+    infraweaver.io/managed: "true"
+value: 500000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Shared platform services such as Longhorn and monitoring. Can preempt general workloads but not platform-critical services."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-default
+  labels:
+    infraweaver.io/managed: "true"
+value: 100000
+globalDefault: true
+preemptionPolicy: PreemptLowerPriority
+description: "Default priority for general workloads."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: game-server
+  labels:
+    infraweaver.io/managed: "true"
+value: 10000
+globalDefault: false
+preemptionPolicy: Never
+description: "Game servers are lowest priority and can be evicted before platform services under node pressure."

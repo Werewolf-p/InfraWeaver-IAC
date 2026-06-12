@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# pre-push — "develop in private, publish to public only via the sanitizer" guard
+#
+# Topology (docs/PRIVATE-PUBLIC-GITOPS-AND-DR.md):
+#   PRIVATE  InfraWeaver-infra      = full source of truth + ArgoCD GitOps source.
+#                                     terraform/ ansible/ envs/ params/ AND
+#                                     kubernetes/** config (with ${PLACEHOLDER}s)
+#                                     all legitimately live here. Push freely.
+#   PUBLIC   InfraWeaver-template    = sanitized, forkable mirror. Receives content
+#                                     ONLY through scripts/sync-to-public.sh, which
+#                                     git-archives the tracked tree, strips IaC +
+#                                     params + prod overlays, and runs a deny-scan.
+#
+# This hook therefore BLOCKS a direct `git push` to the PUBLIC mirror (that path
+# would bypass the sanitizer and could leak IaC/params/config). Pushes to the
+# private infra repo — and any other remote — are unrestricted: developing and
+# committing kubernetes/** config to the private repo is the intended workflow.
+#
+# Bypass (escape hatch, e.g. seeding an empty public repo by hand):
+#   ALLOW_PUBLIC_PUSH=1 git push <public-remote> ...
+#
+# Installed via:  git config core.hooksPath scripts/git-hooks
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+remote_name="${1:-}"
+remote_url="${2:-}"
+
+# Identify the PUBLIC template mirror. Match by repo name so it works for https
+# and ssh remote URLs alike. Override with PUBLIC_REPO_MATCH if the mirror is
+# renamed/forked.
+public_match="${PUBLIC_REPO_MATCH:-InfraWeaver-template}"
+
+case "$remote_url" in
+  *"$public_match"*) : ;;   # pushing to the public mirror — guard applies
+  *) exit 0 ;;              # private infra repo or anything else — unrestricted
+esac
+
+if [ "${ALLOW_PUBLIC_PUSH:-0}" = "1" ]; then
+  echo "pre-push: ALLOW_PUBLIC_PUSH=1 set — direct public-mirror push allowed." >&2
+  exit 0
+fi
+
+echo "" >&2
+echo "✖ pre-push BLOCKED: direct push to the PUBLIC mirror ($public_match)." >&2
+echo "" >&2
+echo "  The public template must only receive SANITIZED content. Publish with:" >&2
+echo "" >&2
+echo "      PUBLIC_REPO_URL=\"https://x-access-token:\${TOKEN}@github.com/<owner>/InfraWeaver-template.git\" \\" >&2
+echo "        scripts/sync-to-public.sh" >&2
+echo "" >&2
+echo "  That strips terraform/ ansible/ envs/ params/ + prod overlays and runs a" >&2
+echo "  deny-scan before pushing — your IaC, parameters, and config never leave the" >&2
+echo "  private repo. To override intentionally: ALLOW_PUBLIC_PUSH=1 git push $remote_name ..." >&2
+echo "" >&2
+exit 1

@@ -1,0 +1,43 @@
+---
+# Rate Limiting Middleware — protects public endpoints from brute-force attacks
+#
+# Applied to: auth.${BASE_DOMAIN} (Authentik login page)
+# Limit: 20 requests per second average, burst of 50
+# This is permissive enough for normal users but blocks automated attacks.
+#
+# Reference: https://doc.traefik.io/traefik/middlewares/http/ratelimit/
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-auth
+  namespace: traefik
+spec:
+  rateLimit:
+    average: 20       # 20 requests/second sustained
+    burst: 50         # allow bursts up to 50 requests
+    period: 1s
+    # auth.${BASE_DOMAIN} is Cloudflare-proxied, so Traefik's connection source
+    # is always a Cloudflare edge IP. Without sourceCriterion every user shares
+    # ONE bucket, which saturates and 429s Authentik's static assets so the
+    # login SPA never boots. Bucket per real client via Cloudflare's header.
+    sourceCriterion:
+      requestHeaderName: Cf-Connecting-IP
+
+---
+# Stricter rate limit for Authentik flow/API endpoints
+# These endpoints (token, authorize, revoke) should have tighter limits
+# to prevent OAuth token brute-forcing.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-auth-strict
+  namespace: traefik
+spec:
+  rateLimit:
+    average: 5        # 5 requests/second for auth flow endpoints
+    burst: 10
+    period: 1s
+    # Same Cloudflare-proxied caveat as rate-limit-auth: bucket per real client,
+    # otherwise all users collapse into one shared, easily-saturated bucket.
+    sourceCriterion:
+      requestHeaderName: Cf-Connecting-IP

@@ -1,0 +1,2782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script>
+    window.__IW_INIT_TOKEN__ = "__IW_TOKEN_VALUE__";
+    (function () {
+      const _fetch = window.fetch;
+      window.fetch = function (input, init) {
+        init = init || {};
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        if (url.startsWith("/api/") || url.startsWith("api/")) {
+          const headers = new Headers(init.headers || {});
+          if (window.__IW_INIT_TOKEN__) headers.set("Authorization", "Bearer " + window.__IW_INIT_TOKEN__);
+          init.headers = headers;
+        }
+        return _fetch(input, init);
+      };
+    })();
+  </script>
+  <title>InfraWeaver — Platform Setup</title>
+  <style>
+    :root {
+      --bg: #0a0e1a;
+      --bg2: #0f1422;
+      --bg3: #141929;
+      --border: #1e2d4a;
+      --border-bright: #2a4080;
+      --green: #00ff88;
+      --green-dim: #00cc66;
+      --blue: #4488ff;
+      --blue-dim: #2255cc;
+      --cyan: #00d4ff;
+      --yellow: #ffcc00;
+      --red: #ff4444;
+      --text: #c8d8f0;
+      --text-dim: #6080a0;
+      --text-bright: #e8f4ff;
+      --accent: #1a3060;
+      --input-bg: #080c18;
+      --glow: 0 0 20px rgba(0,255,136,0.15);
+      --glow-blue: 0 0 20px rgba(68,136,255,0.2);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Animated background grid ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,255,136,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,136,0.02) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Scanline effect ── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.05) 2px,
+        rgba(0,0,0,0.05) 4px
+      );
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    /* ── Header ── */
+    .header {
+      text-align: center;
+      padding: 40px 20px 30px;
+      position: relative;
+    }
+    .ascii-logo {
+      color: var(--green);
+      font-size: 11px;
+      line-height: 1.2;
+      text-shadow: 0 0 10px rgba(0,255,136,0.5);
+      display: inline-block;
+      letter-spacing: 0.5px;
+      margin-bottom: 20px;
+      animation: flicker 8s infinite;
+    }
+    @keyframes flicker {
+      0%, 97%, 100% { opacity: 1; }
+      98% { opacity: 0.7; }
+      99% { opacity: 0.9; }
+    }
+    .header-subtitle {
+      color: var(--text-dim);
+      font-size: 12px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .header-title {
+      color: var(--text-bright);
+      font-size: 22px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      margin-bottom: 6px;
+    }
+    .header-desc {
+      color: var(--text-dim);
+      font-size: 12px;
+      max-width: 500px;
+      margin: 0 auto;
+    }
+    .blink {
+      animation: blink 1s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* ── Status bar ── */
+    .statusbar {
+      display: flex;
+      gap: 20px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 16px;
+      margin-bottom: 24px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .status-item { display: flex; align-items: center; gap: 6px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); }
+    .status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot.warn { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+    .status-dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+
+    /* ── Tabs ── */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 0;
+    }
+    .tab {
+      padding: 10px 20px;
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 12px;
+      border: 1px solid transparent;
+      border-bottom: none;
+      border-radius: 4px 4px 0 0;
+      transition: all 0.2s;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      user-select: none;
+    }
+    .tab:hover { color: var(--text); background: var(--bg2); }
+    .tab.active {
+      color: var(--green);
+      background: var(--bg2);
+      border-color: var(--border);
+      border-bottom-color: var(--bg2);
+      text-shadow: 0 0 8px rgba(0,255,136,0.4);
+    }
+    .tab-icon { margin-right: 6px; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 16px;
+      transition: border-color 0.2s;
+    }
+    .card:hover { border-color: var(--border-bright); }
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .card-icon {
+      font-size: 18px;
+      width: 32px;
+      text-align: center;
+    }
+    .card-title {
+      color: var(--text-bright);
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 1px;
+    }
+    .card-desc {
+      color: var(--text-dim);
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    /* ── Form fields ── */
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .form-grid.single { grid-template-columns: 1fr; }
+    .subsection-title {
+      color: var(--text-bright);
+      font-size: 12px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      margin: 8px 0 4px;
+      text-transform: uppercase;
+    }
+    .node-grid {
+      display: grid;
+      grid-template-columns: 1fr 140px;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    /* Per-node cards */
+    .node-cards {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .node-card {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px 12px;
+    }
+    .node-card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .node-num {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--cyan);
+    }
+    .node-role {
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      background: rgba(68,136,255,0.12);
+      border: 1px solid rgba(68,136,255,0.25);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+    .node-main-row {
+      display: grid;
+      grid-template-columns: 1fr 130px;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .node-adv-summary {
+      font-size: 11px;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 4px 0;
+      letter-spacing: 0.5px;
+      user-select: none;
+    }
+    .node-adv-summary:hover { color: var(--cyan); }
+    .node-adv-grid {
+      display: grid;
+      grid-template-columns: 80px 120px 80px 1fr;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    /* ── Per-node resource badge ── */
+    .node-res-badge {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin: 3px 0 6px;
+    }
+    .node-res-chip {
+      font-size: 10px;
+      color: var(--cyan);
+      background: rgba(0,212,255,0.07);
+      border: 1px solid rgba(0,212,255,0.18);
+      border-radius: 10px;
+      padding: 2px 8px;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    /* ── Quick preset buttons ── */
+    .preset-row {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      margin-bottom: 8px;
+    }
+    .preset-row-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      align-self: center;
+    }
+    .preset-btn {
+      font-size: 10px;
+      font-family: inherit;
+      background: rgba(68,136,255,0.07);
+      border: 1px solid rgba(68,136,255,0.22);
+      color: var(--blue);
+      border-radius: 4px;
+      padding: 4px 10px;
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      transition: all 0.15s;
+      white-space: nowrap;
+      line-height: 1.4;
+      text-align: center;
+    }
+    .preset-btn:hover { background: rgba(68,136,255,0.18); border-color: var(--blue); }
+    /* ── CPU/RAM range sliders ── */
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .slider-row input[type=range] {
+      flex: 1;
+      padding: 0;
+      accent-color: var(--green);
+      cursor: pointer;
+    }
+    .slider-val {
+      font-size: 13px;
+      color: var(--text-bright);
+      min-width: 46px;
+      text-align: right;
+      font-weight: 600;
+    }
+    .slider-max-hint {
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-left: 4px;
+    }
+    /* ── Datastore select option styling ── */
+    .ds-select option[data-free]::after { content: attr(data-free); }
+    /* ── Advanced grid revised ── */
+    .node-adv-grid-v2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .node-adv-grid-v2 .full { grid-column: 1 / -1; }
+    @media (max-width: 500px) {
+      .node-adv-grid-v2 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .node-adv-grid { grid-template-columns: 1fr 1fr; }
+      .node-main-row { grid-template-columns: 1fr 100px; }
+    }
+    .form-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-row.full { grid-column: 1 / -1; }
+    label {
+      color: var(--cyan);
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    label .required { color: var(--red); font-size: 10px; }
+    label .help-icon { color: var(--text-dim); cursor: help; font-size: 11px; }
+    input, textarea, select {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 13px;
+      padding: 8px 12px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      width: 100%;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--green-dim);
+      box-shadow: 0 0 0 2px rgba(0,204,102,0.1);
+    }
+    input::placeholder { color: var(--text-dim); opacity: 0.6; }
+    textarea { resize: vertical; min-height: 80px; }
+    .field-hint {
+      color: var(--text-dim);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .field-hint a { color: var(--blue); text-decoration: none; }
+    .field-hint a:hover { text-decoration: underline; }
+
+    /* Password field with toggle */
+    .input-wrap { position: relative; }
+    .input-wrap input { padding-right: 36px; }
+    .toggle-pass {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 4px;
+      font-size: 14px;
+    }
+    .toggle-pass:hover { color: var(--text); }
+
+    /* ── Panels ── */
+    .panel {
+      display: none;
+    }
+    .panel.active { display: block; }
+
+    .setup-panel {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 8px 8px;
+      padding: 24px;
+    }
+
+    /* ── Buttons ── */
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 10px 24px;
+      border: 1px solid;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-primary {
+      background: rgba(0,255,136,0.1);
+      border-color: var(--green-dim);
+      color: var(--green);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: rgba(0,255,136,0.2);
+      box-shadow: var(--glow);
+    }
+    .btn-secondary {
+      background: rgba(68,136,255,0.08);
+      border-color: var(--blue-dim);
+      color: var(--blue);
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: rgba(68,136,255,0.15);
+      box-shadow: var(--glow-blue);
+    }
+    .btn-danger {
+      background: rgba(255,68,68,0.08);
+      border-color: #cc2222;
+      color: var(--red);
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: rgba(255,68,68,0.15);
+    }
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .btn-large {
+      padding: 14px 32px;
+      font-size: 15px;
+    }
+    .btn-spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Deploy panel ── */
+    .deploy-hero {
+      text-align: center;
+      padding: 20px 0 30px;
+    }
+    .deploy-hero-icon { font-size: 48px; margin-bottom: 12px; }
+    .deploy-hero-title {
+      color: var(--text-bright);
+      font-size: 20px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+    .deploy-hero-desc { color: var(--text-dim); font-size: 13px; max-width: 500px; margin: 0 auto; }
+
+    .checklist {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 16px;
+      margin: 20px 0;
+    }
+    .checklist-title {
+      color: var(--text-dim);
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 5px 0;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .check-item.ok { color: var(--text); }
+    .check-icon { font-size: 14px; width: 20px; text-align: center; }
+
+    /* ── Log terminal ── */
+    .log-terminal {
+      background: #050810;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-top: 20px;
+      overflow: hidden;
+    }
+    .log-titlebar {
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .log-dots { display: flex; gap: 6px; }
+    .log-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .log-dot.red { background: #ff5555; }
+    .log-dot.yellow { background: #ffcc00; }
+    .log-dot.green { background: #00cc44; }
+    .log-titlebar-text { color: var(--text-dim); font-size: 11px; letter-spacing: 1px; margin-left: auto; }
+    .log-body {
+      padding: 16px;
+      height: 400px;
+      overflow-y: auto;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .log-body::-webkit-scrollbar { width: 4px; }
+    .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .log-line { padding: 1px 0; }
+    .log-line.step { color: var(--cyan); font-weight: bold; }
+    .log-line.ok { color: var(--green); }
+    .log-line.warn { color: var(--yellow); }
+    .log-line.err { color: var(--red); }
+    .log-line.info { color: var(--text-dim); }
+    .log-line.dim { color: #304060; }
+    .log-cursor { display: inline-block; width: 8px; height: 14px; background: var(--green); animation: blink 1s step-end infinite; vertical-align: text-bottom; }
+
+    /* ── Progress bar ── */
+    .progress-wrap {
+      margin: 16px 0;
+    }
+    .progress-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+    .progress-bar {
+      height: 4px;
+      background: var(--bg3);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--green-dim), var(--cyan));
+      border-radius: 2px;
+      transition: width 0.5s ease;
+      width: 0%;
+      box-shadow: 0 0 8px rgba(0,255,136,0.4);
+    }
+
+    /* ── Alerts ── */
+    .alert {
+      padding: 12px 16px;
+      border-radius: 4px;
+      border: 1px solid;
+      margin: 16px 0;
+      font-size: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .alert-icon { font-size: 16px; flex-shrink: 0; }
+    .alert.info { background: rgba(68,136,255,0.08); border-color: var(--blue-dim); color: var(--text); }
+    .alert.success { background: rgba(0,255,136,0.06); border-color: var(--green-dim); color: var(--green); }
+    .alert.warning { background: rgba(255,204,0,0.06); border-color: #aa8800; color: var(--yellow); }
+    .alert.error { background: rgba(255,68,68,0.06); border-color: #cc2222; color: var(--red); }
+
+    /* ── Footer ── */
+    .footer {
+      text-align: center;
+      padding: 30px 20px;
+      color: var(--text-dim);
+      font-size: 11px;
+      border-top: 1px solid var(--border);
+      margin-top: 40px;
+    }
+
+    /* ── Tooltip ── */
+    [title] { cursor: help; }
+
+    /* ── SSH key field special styling ── */
+    .ssh-key-area {
+      font-size: 11px;
+      min-height: 100px;
+    }
+
+    /* ── Feature toggle rows ── */
+    .feature-row {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .feature-row:last-child { border-bottom: none; }
+    .feature-toggle { flex-shrink: 0; }
+    .feature-info { flex: 1; }
+    .feature-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+    .feature-desc { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 6px; }
+    .feature-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .feature-tag { font-size: 10px; padding: 2px 8px; border-radius: 3px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+    .backup-icon { font-size: 24px; opacity: 0.7; }
+
+    /* Toggle switch */
+    .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--border); border-radius: 24px; transition: 0.3s; }
+    .toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: var(--text-dim); border-radius: 50%; transition: 0.3s; }
+    input:checked + .toggle-slider { background-color: var(--green); }
+    input:checked + .toggle-slider:before { transform: translateX(20px); background-color: #fff; }
+
+    /* Backup provider options */
+    .backup-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+    @media (max-width: 540px) { .backup-options { grid-template-columns: 1fr; } }
+    .backup-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: border-color 0.2s; }
+    .backup-option:hover { border-color: var(--border-bright); }
+    .backup-option input[type="radio"] { margin-top: 3px; flex-shrink: 0; accent-color: var(--green); }
+    .backup-option:has(input:checked) { border-color: var(--green); background: rgba(80,200,120,0.06); }
+    .backup-opt-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+    .backup-opt-desc { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+    .recommended-tag { font-size: 9px; padding: 1px 6px; border-radius: 3px; background: rgba(80,200,120,0.2); color: var(--green); margin-left: 6px; vertical-align: middle; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* ── Local IP Ranges ── */
+    .ip-range-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+    .ip-range-row { display: flex; align-items: center; gap: 6px; }
+    .ip-range-row input { flex: 1; padding: 7px 10px; font-size: 12px; font-family: monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    .ip-range-row input:focus { border-color: var(--green); outline: none; }
+    .ip-range-row input.invalid { border-color: #e05252; }
+    .ip-range-btn-remove { background: none; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); cursor: pointer; padding: 5px 8px; font-size: 12px; transition: all 0.15s; flex-shrink: 0; }
+    .ip-range-btn-remove:hover { border-color: #e05252; color: #e05252; }
+    .ip-range-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .ip-range-add { padding: 5px 12px; font-size: 11px; background: none; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); cursor: pointer; transition: all 0.15s; }
+    .ip-range-add:hover { border-color: var(--green); color: var(--green); }
+    .ip-range-detect { padding: 5px 12px; font-size: 11px; background: rgba(80,200,120,0.1); border: 1px solid rgba(80,200,120,0.3); border-radius: 5px; color: var(--green); cursor: pointer; transition: all 0.15s; }
+    .ip-range-detect:hover { background: rgba(80,200,120,0.18); border-color: var(--green); }
+    .ip-range-vpn-only { margin-top: 10px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+    .ip-range-vpn-only input[type="checkbox"] { accent-color: var(--green); width: 14px; height: 14px; cursor: pointer; }
+    #ip-ranges-section { transition: opacity 0.2s; }
+    #ip-ranges-section.dim { opacity: 0.4; pointer-events: none; }
+    .ip-ranges-note { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; }
+    .ip-ranges-note code { background: var(--bg); padding: 0 3px; border-radius: 3px; font-size: 11px; }
+
+    /* ── VIP / node-IP ping-status dots ── */
+    .vip-dot { font-size: 11px; cursor: default; line-height: 1; vertical-align: middle; }
+    .ping-legend { font-size: 10px; color: var(--text-dim); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .ping-legend span { display: flex; align-items: center; gap: 3px; }
+    .vip-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+
+    /* ── SSH pubkey generated display ── */
+    .pubkey-block { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-top: 10px; }
+    .pubkey-label { color: var(--cyan); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+    .pubkey-textarea { font-size: 11px; color: var(--green-dim); background: transparent; border: none; width: 100%; resize: none; font-family: monospace; cursor: text; }
+    .pubkey-textarea:focus { outline: none; }
+
+    /* ── Auto-action rows ── */
+    .action-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+
+    /* ── Discover button ── */
+    .btn-discover { padding: 8px 18px; font-size: 12px; background: rgba(68,136,255,0.1); border: 1px solid rgba(68,136,255,0.4); border-radius: 5px; color: var(--blue); cursor: pointer; transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px; }
+    .btn-discover:hover:not(:disabled) { background: rgba(68,136,255,0.18); border-color: var(--blue); }
+    .btn-discover:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .btn-row { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <pre class="ascii-logo">
+ ██╗███╗   ██╗███████╗██████╗  █████╗ ██╗    ██╗███████╗ █████╗ ██╗   ██╗███████╗██████╗
+ ██║████╗  ██║██╔════╝██╔══██╗██╔══██╗██║    ██║██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗
+ ██║██╔██╗ ██║█████╗  ██████╔╝███████║██║ █╗ ██║█████╗  ███████║██║   ██║█████╗  ██████╔╝
+ ██║██║╚██╗██║██╔══╝  ██╔══██╗██╔══██║██║███╗██║██╔══╝  ██╔══██║╚██╗ ██╔╝██╔══╝  ██╔══██╗
+ ██║██║ ╚████║██║     ██║  ██║██║  ██║╚███╔███╔╝███████╗██║  ██║ ╚████╔╝ ███████╗██║  ██║
+ ╚═╝╚═╝  ╚═══╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝</pre>
+    <div class="header-subtitle">Platform Setup Wizard</div>
+    <div class="header-title">Configure & Deploy Your Cluster<span class="blink">_</span></div>
+    <div class="header-desc">Fill in your credentials below, then hit Deploy to provision your Talos cluster on Proxmox VE.</div>
+  </div>
+
+  <!-- Status bar -->
+  <div class="statusbar" id="statusbar">
+    <div class="status-item"><div class="status-dot" id="dot-env"></div><span id="label-env">env: loading</span></div>
+    <div class="status-item"><div class="status-dot" id="dot-proxmox"></div><span id="label-proxmox">proxmox: —</span></div>
+    <div class="status-item"><div class="status-dot" id="dot-deploy"></div><span id="label-deploy">deploy: idle</span></div>
+    <div class="status-item" style="margin-left: auto"><span id="label-version" style="color:#304060">v0.1.0</span></div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('config')" id="tab-config"><span class="tab-icon">⚙</span>Config</div>
+    <div class="tab" onclick="switchTab('deploy')" id="tab-deploy"><span class="tab-icon">🚀</span>Deploy</div>
+    <div class="tab" onclick="switchTab('redeploy')" id="tab-redeploy"><span class="tab-icon">🔄</span>Redeploy</div>
+  </div>
+
+  <!-- ═══════════════ CONFIG TAB ═══════════════ -->
+  <div class="panel active setup-panel" id="panel-config">
+
+    <!-- Domain -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🌐</div>
+        <div>
+          <div class="card-title">Domain</div>
+          <div class="card-desc">Your base domain for all platform services</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>BASE_DOMAIN <span class="required">*</span></label>
+          <input type="text" id="BASE_DOMAIN" name="BASE_DOMAIN" placeholder="yourdomain.com" />
+          <div class="field-hint">All services deploy at <code>*.yourdomain.com</code> and <code>*.int.yourdomain.com</code></div>
+        </div>
+        <div class="form-row">
+          <label>ADMIN_EMAIL <span class="required">*</span></label>
+          <input type="email" id="ADMIN_EMAIL" name="ADMIN_EMAIL" placeholder="admin@yourdomain.com" onblur="autofillAdmin()" />
+          <div class="field-hint">Used for cert-manager ACME registration, Authentik bootstrap, and console admin access</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Proxmox -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🖥</div>
+        <div>
+          <div class="card-title">Proxmox VE</div>
+          <div class="card-desc">API access for cluster provisioning via OpenTofu</div>
+        </div>
+      </div>
+
+      <!-- Mode tabs -->
+      <div style="display:flex;gap:8px;margin-bottom:18px;border-bottom:1px solid var(--border);padding-bottom:14px">
+        <button id="tab-pve-setup"  class="btn-discover" style="background:rgba(68,136,255,0.18);border-color:var(--blue)"
+                onclick="setPveMode('setup')" type="button">✨ Auto-setup (recommended)</button>
+        <button id="tab-pve-manual" class="btn-discover"
+                onclick="setPveMode('manual')" type="button">🔑 I already have a token</button>
+      </div>
+
+      <!-- ── Auto-setup mode ─────────────────────────────────────────────── -->
+      <div id="pve-setup-mode">
+        <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.2);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12px;color:var(--text-dim);line-height:1.6">
+          🔒 <strong style="color:var(--text)">Credentials are not stored.</strong>
+          They are used <em>once</em> to create a dedicated <code style="color:var(--green)">infraweaver@pve</code> API user
+          with the minimum required permissions, then immediately discarded.
+          Only the generated API token is saved to your <code>.env</code>.
+        </div>
+        <div class="form-grid single">
+          <div class="form-row">
+            <label>Proxmox Host / IP <span class="required">*</span></label>
+            <input type="text" id="pve-setup-host" placeholder="192.168.1.100"
+                   oninput="document.getElementById('PROXMOX_HOST').value=this.value" />
+            <div class="field-hint">IP or hostname of your Proxmox server (port 8006)</div>
+          </div>
+          <div class="form-row">
+            <label>Admin username <span class="required">*</span></label>
+            <input type="text" id="pve-setup-user" placeholder="root@pam" value="root@pam" />
+            <div class="field-hint">Proxmox user with administrator rights (e.g. <code>root@pam</code>)</div>
+          </div>
+          <div class="form-row">
+            <label>Password <span class="required">*</span></label>
+            <div class="input-wrap">
+              <input type="password" id="pve-setup-pass" placeholder="••••••••" autocomplete="current-password" />
+              <button class="toggle-pass" onclick="togglePass('pve-setup-pass')" type="button">👁</button>
+            </div>
+          </div>
+        </div>
+        <div class="action-row" style="margin-top:12px">
+          <button class="btn-discover" id="btn-pve-setup" onclick="setupProxmoxUser()" type="button"
+                  style="background:rgba(0,255,136,0.1);border-color:rgba(0,255,136,0.4);color:var(--green)">
+            ✨ Check access &amp; create API user
+          </button>
+        </div>
+        <div id="pve-setup-result" style="margin-top:10px;font-size:12px;min-height:16px"></div>
+
+        <!-- Success block (hidden until creation succeeds) -->
+        <div id="pve-setup-success" style="display:none;margin-top:14px;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.25);border-radius:8px;padding:14px">
+          <div style="font-size:12px;color:var(--green);font-weight:600;margin-bottom:6px">✅ infraweaver@pve created — token auto-filled below</div>
+          <div style="font-size:11px;color:var(--text-dim)">
+            Role <code>InfraWeaver</code> · User <code>infraweaver@pve</code><br>
+            Your admin credentials were not saved.
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Manual token mode ──────────────────────────────────────────── -->
+      <div id="pve-manual-mode" style="display:none">
+        <div class="form-grid single">
+          <div class="form-row">
+            <label style="color:var(--text-dim);font-size:11px">Enter your existing Proxmox API token below.</label>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Token field — always present, written by both modes ──────── -->
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+        <div class="form-row">
+          <label id="pve-token-label">PROXMOX_API_TOKEN <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="PROXMOX_API_TOKEN" name="PROXMOX_API_TOKEN"
+                   placeholder="infraweaver@pve!infraweaver=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+            <button class="toggle-pass" onclick="togglePass('PROXMOX_API_TOKEN')" type="button">👁</button>
+          </div>
+          <div id="pve-token-hint" class="field-hint">Format: <code>USER@realm!TOKENNAME=uuid</code></div>
+          <div class="action-row" style="margin-top:10px">
+            <button class="btn-discover" id="btn-discover-proxmox" onclick="discoverProxmox()" type="button">🔍 Discover node &amp; storage</button>
+            <span style="font-size:11px;color:var(--text-dim)">Auto-fills node name, storage pools &amp; free VMIDs</span>
+          </div>
+          <div id="discover-result" style="margin-top:6px;font-size:11px;min-height:14px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cluster Topology -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🖥</div>
+        <div>
+          <div class="card-title">Cluster Topology</div>
+          <div class="card-desc">Node network configuration for your Kubernetes cluster on Proxmox</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>PROXMOX_HOST</label>
+          <input type="text" id="PROXMOX_HOST" name="PROXMOX_HOST" placeholder="192.168.1.100" />
+          <div class="field-hint">Proxmox management IP or DNS name used for API + SSH access</div>
+        </div>
+        <div class="form-row">
+          <label>PROXMOX_NODE_NAME</label>
+          <select id="PROXMOX_NODE_NAME" name="PROXMOX_NODE_NAME">
+            <option value="">— run 🔍 Discover to auto-fill —</option>
+          </select>
+          <div class="field-hint">Single-node Proxmox host name or target node inside a PVE cluster</div>
+        </div>
+        <div class="form-row">
+          <label>K8S_CLUSTER_NAME</label>
+          <input type="text" id="K8S_CLUSTER_NAME" name="K8S_CLUSTER_NAME" placeholder="infraweaver-prod" />
+          <div class="field-hint">Cluster name written into Talos + kubeconfig metadata</div>
+        </div>
+        <div class="form-row">
+          <label>TALOS_DATASTORE</label>
+          <input type="text" id="TALOS_DATASTORE" name="TALOS_DATASTORE" placeholder="lvm-proxmox" />
+          <div class="field-hint">Name of PVE storage pool for VM disks</div>
+        </div>
+        <div class="form-row">
+          <label>NODE_GATEWAY</label>
+          <input type="text" id="NODE_GATEWAY" name="NODE_GATEWAY" placeholder="10.10.0.1" />
+          <div class="field-hint">Default gateway for the Talos node subnet</div>
+        </div>
+        <div class="form-row">
+          <label>NODE_SUBNET_PREFIX</label>
+          <input type="text" id="NODE_SUBNET_PREFIX" name="NODE_SUBNET_PREFIX" placeholder="24" />
+          <div class="field-hint">/24 = 255.255.255.0</div>
+        </div>
+        <div class="form-row full">
+          <div class="subsection-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Control Plane Nodes</span>
+            <button class="ip-range-detect" id="btn-suggest-nodes" onclick="suggestNodeIps()" type="button" title="Suggest IPs at .90/.91/.92 from your gateway subnet and ping-check availability">🧲 Suggest IPs from gateway</button>
+          </div>
+          <div class="ping-legend" style="margin-bottom:8px">
+            <span>Ping status:</span><span>🟢 free</span><span>🔴 in use</span><span>⚪ unchecked</span>
+          </div>
+          <div class="node-cards">
+            <!-- Node 1 -->
+            <div class="node-card">
+              <div class="node-card-header">
+                <span class="node-num">Node 1</span>
+                <span class="node-role">Control Plane</span>
+              </div>
+              <div class="node-main-row">
+                <div class="form-row">
+                  <label>IP <span id="ndot-NODE_1_IP" class="vip-dot">⚪</span></label>
+                  <input type="text" id="NODE_1_IP" name="NODE_1_IP" placeholder="10.10.0.90" onblur="pingNodeIp('NODE_1_IP')" />
+                </div>
+                <div class="form-row">
+                  <label>VM ID</label>
+                  <input type="text" id="NODE_1_VMID" name="NODE_1_VMID" placeholder="9310" />
+                </div>
+              </div>
+              <div class="form-row" style="margin-bottom:4px">
+                <label>Proxmox Host Node</label>
+                <select id="NODE_1_PVE_NODE" name="NODE_1_PVE_NODE" onchange="onPveNodeChange(1)">
+                  <option value="">— run 🔍 Discover first —</option>
+                </select>
+                <div class="node-res-badge" id="node-1-res-badge" style="display:none">
+                  <span class="node-res-chip" id="node-1-res-cpu">🖥 ? cores</span>
+                  <span class="node-res-chip" id="node-1-res-ram">🧮 ? GB RAM</span>
+                  <span class="node-res-chip" id="node-1-res-free">💾 ? GB free</span>
+                </div>
+              </div>
+              <details id="node-1-adv">
+                <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
+                <div class="preset-row">
+                  <span class="preset-row-label">Preset:</span>
+                  <button class="preset-btn" onclick="applyNodePreset(1,'minimal')" type="button">💻 Minimal<br><small style="opacity:0.7">2 CPU · 4 GB · 40 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(1,'standard')" type="button">⚡ Standard<br><small style="opacity:0.7">4 CPU · 8 GB · 80 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(1,'balanced')" type="button">🚀 Balanced<br><small style="opacity:0.7">6 CPU · 12 GB · 100 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(1,'performance')" type="button">🏎 Performance<br><small style="opacity:0.7">8 CPU · 16 GB · 150 GB</small></button>
+                </div>
+                <div class="node-adv-grid-v2">
+                  <div class="form-row">
+                    <label>CPU cores<span id="node-1-cpu-max-label" class="slider-max-hint"></span></label>
+                    <div class="slider-row">
+                      <input type="range" id="NODE_1_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(1)" />
+                      <span class="slider-val" id="node-1-cpu-val">4</span>
+                    </div>
+                    <input type="hidden" id="NODE_1_CPU" name="NODE_1_CPU" value="4" />
+                  </div>
+                  <div class="form-row">
+                    <label>RAM<span id="node-1-ram-max-label" class="slider-max-hint"></span></label>
+                    <div class="slider-row">
+                      <input type="range" id="NODE_1_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(1)" />
+                      <span class="slider-val" id="node-1-ram-val">8 GB</span>
+                    </div>
+                    <input type="hidden" id="NODE_1_MEMORY" name="NODE_1_MEMORY" value="8192" />
+                  </div>
+                  <div class="form-row">
+                    <label>Disk (GB)</label>
+                    <input type="number" id="NODE_1_DISK" name="NODE_1_DISK" value="100" min="20" />
+                  </div>
+                  <div class="form-row">
+                    <label>Datastore</label>
+                    <select id="NODE_1_DATASTORE" name="NODE_1_DATASTORE">
+                      <option value="">— discover PVE first —</option>
+                    </select>
+                    <div class="field-hint" id="node-1-ds-hint">VM disk pool — run Discover to load options</div>
+                  </div>
+                </div>
+              </details>
+            </div>
+            <!-- Node 2 -->
+            <div class="node-card">
+              <div class="node-card-header">
+                <span class="node-num">Node 2</span>
+                <span class="node-role">Control Plane</span>
+              </div>
+              <div class="node-main-row">
+                <div class="form-row">
+                  <label>IP <span id="ndot-NODE_2_IP" class="vip-dot">⚪</span></label>
+                  <input type="text" id="NODE_2_IP" name="NODE_2_IP" placeholder="10.10.0.91" onblur="pingNodeIp('NODE_2_IP')" />
+                </div>
+                <div class="form-row">
+                  <label>VM ID</label>
+                  <input type="text" id="NODE_2_VMID" name="NODE_2_VMID" placeholder="9311" />
+                </div>
+              </div>
+              <div class="form-row" style="margin-bottom:4px">
+                <label>Proxmox Host Node</label>
+                <select id="NODE_2_PVE_NODE" name="NODE_2_PVE_NODE" onchange="onPveNodeChange(2)">
+                  <option value="">— run 🔍 Discover first —</option>
+                </select>
+                <div class="node-res-badge" id="node-2-res-badge" style="display:none">
+                  <span class="node-res-chip" id="node-2-res-cpu">🖥 ? cores</span>
+                  <span class="node-res-chip" id="node-2-res-ram">🧮 ? GB RAM</span>
+                  <span class="node-res-chip" id="node-2-res-free">💾 ? GB free</span>
+                </div>
+              </div>
+              <details id="node-2-adv">
+                <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
+                <div class="preset-row">
+                  <span class="preset-row-label">Preset:</span>
+                  <button class="preset-btn" onclick="applyNodePreset(2,'minimal')" type="button">💻 Minimal<br><small style="opacity:0.7">2 CPU · 4 GB · 40 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(2,'standard')" type="button">⚡ Standard<br><small style="opacity:0.7">4 CPU · 8 GB · 80 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(2,'balanced')" type="button">🚀 Balanced<br><small style="opacity:0.7">6 CPU · 12 GB · 100 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(2,'performance')" type="button">🏎 Performance<br><small style="opacity:0.7">8 CPU · 16 GB · 150 GB</small></button>
+                </div>
+                <div class="node-adv-grid-v2">
+                  <div class="form-row">
+                    <label>CPU cores<span id="node-2-cpu-max-label" class="slider-max-hint"></span></label>
+                    <div class="slider-row">
+                      <input type="range" id="NODE_2_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(2)" />
+                      <span class="slider-val" id="node-2-cpu-val">4</span>
+                    </div>
+                    <input type="hidden" id="NODE_2_CPU" name="NODE_2_CPU" value="4" />
+                  </div>
+                  <div class="form-row">
+                    <label>RAM<span id="node-2-ram-max-label" class="slider-max-hint"></span></label>
+                    <div class="slider-row">
+                      <input type="range" id="NODE_2_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(2)" />
+                      <span class="slider-val" id="node-2-ram-val">8 GB</span>
+                    </div>
+                    <input type="hidden" id="NODE_2_MEMORY" name="NODE_2_MEMORY" value="8192" />
+                  </div>
+                  <div class="form-row">
+                    <label>Disk (GB)</label>
+                    <input type="number" id="NODE_2_DISK" name="NODE_2_DISK" value="100" min="20" />
+                  </div>
+                  <div class="form-row">
+                    <label>Datastore</label>
+                    <select id="NODE_2_DATASTORE" name="NODE_2_DATASTORE">
+                      <option value="">— discover PVE first —</option>
+                    </select>
+                    <div class="field-hint" id="node-2-ds-hint">VM disk pool — run Discover to load options</div>
+                  </div>
+                </div>
+              </details>
+            </div>
+            <!-- Node 3 -->
+            <div class="node-card">
+              <div class="node-card-header">
+                <span class="node-num">Node 3</span>
+                <span class="node-role">Control Plane</span>
+              </div>
+              <div class="node-main-row">
+                <div class="form-row">
+                  <label>IP <span id="ndot-NODE_3_IP" class="vip-dot">⚪</span></label>
+                  <input type="text" id="NODE_3_IP" name="NODE_3_IP" placeholder="10.10.0.92" onblur="pingNodeIp('NODE_3_IP')" />
+                </div>
+                <div class="form-row">
+                  <label>VM ID</label>
+                  <input type="text" id="NODE_3_VMID" name="NODE_3_VMID" placeholder="9312" />
+                </div>
+              </div>
+              <div class="form-row" style="margin-bottom:4px">
+                <label>Proxmox Host Node</label>
+                <select id="NODE_3_PVE_NODE" name="NODE_3_PVE_NODE" onchange="onPveNodeChange(3)">
+                  <option value="">— run 🔍 Discover first —</option>
+                </select>
+                <div class="node-res-badge" id="node-3-res-badge" style="display:none">
+                  <span class="node-res-chip" id="node-3-res-cpu">🖥 ? cores</span>
+                  <span class="node-res-chip" id="node-3-res-ram">🧮 ? GB RAM</span>
+                  <span class="node-res-chip" id="node-3-res-free">💾 ? GB free</span>
+                </div>
+              </div>
+              <details id="node-3-adv">
+                <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
+                <div class="preset-row">
+                  <span class="preset-row-label">Preset:</span>
+                  <button class="preset-btn" onclick="applyNodePreset(3,'minimal')" type="button">💻 Minimal<br><small style="opacity:0.7">2 CPU · 4 GB · 40 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(3,'standard')" type="button">⚡ Standard<br><small style="opacity:0.7">4 CPU · 8 GB · 80 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(3,'balanced')" type="button">🚀 Balanced<br><small style="opacity:0.7">6 CPU · 12 GB · 100 GB</small></button>
+                  <button class="preset-btn" onclick="applyNodePreset(3,'performance')" type="button">🏎 Performance<br><small style="opacity:0.7">8 CPU · 16 GB · 150 GB</small></button>
+                </div>
+                <div class="node-adv-grid-v2">
+                  <div class="form-row">
+                    <label>CPU cores<span id="node-3-cpu-max-label" class="slider-max-hint"></span></label>
+                    <div class="slider-row">
+                      <input type="range" id="NODE_3_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(3)" />
+                      <span class="slider-val" id="node-3-cpu-val">4</span>
+                    </div>
+                    <input type="hidden" id="NODE_3_CPU" name="NODE_3_CPU" value="4" />
+                  </div>
+                  <div class="form-row">
+                    <label>RAM<span id="node-3-ram-max-label" class="slider-max-hint"></span></label>
+                    <div class="slider-row">
+                      <input type="range" id="NODE_3_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(3)" />
+                      <span class="slider-val" id="node-3-ram-val">8 GB</span>
+                    </div>
+                    <input type="hidden" id="NODE_3_MEMORY" name="NODE_3_MEMORY" value="8192" />
+                  </div>
+                  <div class="form-row">
+                    <label>Disk (GB)</label>
+                    <input type="number" id="NODE_3_DISK" name="NODE_3_DISK" value="100" min="20" />
+                  </div>
+                  <div class="form-row">
+                    <label>Datastore</label>
+                    <select id="NODE_3_DATASTORE" name="NODE_3_DATASTORE">
+                      <option value="">— discover PVE first —</option>
+                    </select>
+                    <div class="field-hint" id="node-3-ds-hint">VM disk pool — run Discover to load options</div>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+          <!-- Hidden field: PVE_NODES map — auto-populated by discovery -->
+          <input type="hidden" id="PVE_NODES" name="PVE_NODES" value="" />
+        </div>
+
+        <!-- MetalLB VIP section -->
+        <div class="form-row full" style="margin-top:8px;padding-top:16px;border-top:1px solid var(--border)">
+          <div class="subsection-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>MetalLB Load Balancer VIPs</span>
+            <button class="ip-range-detect" id="btn-suggest-vips" onclick="suggestVips()" type="button" title="Calculate VIPs at offset .200 from your gateway subnet, ping-check each one">✨ Auto-suggest &amp; ping-check</button>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+            <div class="field-hint" style="margin:0">IPs MetalLB assigns to services. Must be in your node subnet, outside DHCP range.</div>
+            <div class="ping-legend"><span>🟢 free</span><span>🔴 in use</span><span>⚪ unchecked</span></div>
+          </div>
+          <div id="vip-suggest-msg" style="font-size:11px;color:var(--text-dim);min-height:16px;margin-bottom:8px"></div>
+          <div class="form-grid">
+            <div class="form-row">
+              <label>METALLB_VIP_RANGE</label>
+              <input type="text" id="METALLB_VIP_RANGE" name="METALLB_VIP_RANGE" placeholder="10.10.0.200-10.10.0.210" />
+              <div class="field-hint">Full pool range — must cover all individual VIPs below</div>
+            </div>
+            <div class="form-row">
+              <label>CLUSTER_LOCAL_DOMAIN</label>
+              <input type="text" id="CLUSTER_LOCAL_DOMAIN" name="CLUSTER_LOCAL_DOMAIN" placeholder="prod.local" />
+              <div class="field-hint">Internal Talos cluster DNS zone — only change if it conflicts with your LAN DNS</div>
+            </div>
+          </div>
+          <div class="vip-grid">
+            <div class="form-row">
+              <label><span id="vdot-METALLB_TRAEFIK_VIP" class="vip-dot">⚪</span> METALLB_TRAEFIK_VIP</label>
+              <input type="text" id="METALLB_TRAEFIK_VIP" name="METALLB_TRAEFIK_VIP" placeholder="10.10.0.200" onblur="pingVip('METALLB_TRAEFIK_VIP')" />
+              <div class="field-hint">Main ingress — all HTTP/S traffic enters here</div>
+            </div>
+            <div class="form-row">
+              <label><span id="vdot-METALLB_COREDNS_VIP" class="vip-dot">⚪</span> METALLB_COREDNS_VIP</label>
+              <input type="text" id="METALLB_COREDNS_VIP" name="METALLB_COREDNS_VIP" placeholder="10.10.0.201" onblur="pingVip('METALLB_COREDNS_VIP')" />
+              <div class="field-hint">Internal DNS — resolves <code>*.int.yourdomain.com</code></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- Admin Account -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">👤</div>
+        <div>
+          <div class="card-title">Admin Account</div>
+          <div class="card-desc">First platform administrator — auto-filled from your email above</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>ADMIN_USERNAME <span class="required">*</span></label>
+          <input type="text" id="ADMIN_USERNAME" name="ADMIN_USERNAME" placeholder="admin" />
+          <div class="field-hint">Login for Authentik &amp; ArgoCD. Lowercase, alphanumeric. <strong>Cannot be changed after first deploy.</strong></div>
+        </div>
+        <div class="form-row">
+          <label>ADMIN_NAME</label>
+          <input type="text" id="ADMIN_NAME" name="ADMIN_NAME" placeholder="Platform Admin" />
+          <div class="field-hint">Display name shown in Authentik and dashboards</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SSH Keys -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🔑</div>
+        <div>
+          <div class="card-title">SSH Key (Deployer)</div>
+          <div class="card-desc">Private key for SSH access to Proxmox host during provisioning</div>
+        </div>
+      </div>
+      <div class="form-grid single">
+        <div class="form-row">
+          <label>DEPLOYER_SSH_KEY <span class="required">*</span></label>
+          <textarea id="DEPLOYER_SSH_KEY" name="DEPLOYER_SSH_KEY" class="ssh-key-area" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----
+<paste your private key here>
+-----END OPENSSH PRIVATE KEY-----"></textarea>
+          <div class="action-row">
+            <button class="ip-range-detect" id="btn-gen-ssh" onclick="generateSshKey()" type="button">🔑 Generate new keypair</button>
+            <span style="font-size:11px;color:var(--text-dim)">Creates an ed25519 key — you add the public key to Proxmox</span>
+          </div>
+          <!-- Public key display — hidden until generated -->
+          <div id="pubkey-section" style="display:none;margin-top:12px">
+            <div class="pubkey-block">
+              <div class="pubkey-label">📋 Generated public key — add this to Proxmox:</div>
+              <textarea id="generated-pubkey" class="pubkey-textarea" readonly rows="2" onclick="this.select()"></textarea>
+              <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
+                <button class="ip-range-detect" id="btn-copy-pubkey" onclick="copyPubKey()" type="button">📋 Copy to clipboard</button>
+                <span class="field-hint" style="margin:0">Then on Proxmox host: <code>echo "KEY" >> ~/.ssh/authorized_keys</code></span>
+              </div>
+            </div>
+          </div>
+          <div class="field-hint" style="margin-top:8px">Or generate manually: <code>ssh-keygen -t ed25519 -f ~/.ssh/infraweaver -N ""</code> — paste the private key (<code>infraweaver</code> file, not .pub)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DNS Provider -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">☁</div>
+        <div>
+          <div class="card-title">DNS Provider</div>
+          <div class="card-desc">Select the cert-manager DNS-01 solver and enter provider credentials</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>DNS_PROVIDER <span class="required">*</span></label>
+          <select id="DNS_PROVIDER" name="DNS_PROVIDER" onchange="onDnsProviderChange()">
+            <option value="cloudflare">cloudflare</option>
+            <option value="route53">route53</option>
+            <option value="azure">azure</option>
+            <option value="digitalocean">digitalocean</option>
+            <option value="hetzner">hetzner</option>
+            <option value="none">none (HTTP-01 only)</option>
+          </select>
+          <div class="field-hint" id="dns-provider-help">Cloudflare token for cert-manager DNS-01 wildcard certificates.</div>
+        </div>
+        <div class="form-row">
+          <label>&nbsp;</label>
+          <div class="action-row" style="margin-top:28px">
+            <button class="ip-range-detect" id="btn-check-dns" onclick="checkDnsProvider()" type="button">✅ Verify provider</button>
+            <span id="dns-verify-result" style="font-size:11px;color:var(--text-dim)"></span>
+          </div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row dns-provider-fields" data-provider="cloudflare">
+          <label>CLOUDFLARE_API_TOKEN <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="CLOUDFLARE_API_TOKEN" name="CLOUDFLARE_API_TOKEN" placeholder="cloudflare api token" />
+            <button class="toggle-pass" onclick="togglePass('CLOUDFLARE_API_TOKEN')" type="button">👁</button>
+          </div>
+          <div class="field-hint">Cloudflare → My Profile → API Tokens → Edit Zone DNS template</div>
+        </div>
+
+        <div class="form-row dns-provider-fields" data-provider="route53" style="display:none">
+          <label>AWS_ACCESS_KEY_ID <span class="required">*</span></label>
+          <input type="text" id="AWS_ACCESS_KEY_ID" name="AWS_ACCESS_KEY_ID" placeholder="AKIA..." />
+          <div class="field-hint">IAM user needs Route53 change/get/list permissions for the hosted zone</div>
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="route53" style="display:none">
+          <label>AWS_SECRET_ACCESS_KEY <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="AWS_SECRET_ACCESS_KEY" name="AWS_SECRET_ACCESS_KEY" placeholder="aws secret access key" />
+            <button class="toggle-pass" onclick="togglePass('AWS_SECRET_ACCESS_KEY')" type="button">👁</button>
+          </div>
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="route53" style="display:none">
+          <label>AWS_HOSTED_ZONE_ID</label>
+          <input type="text" id="AWS_HOSTED_ZONE_ID" name="AWS_HOSTED_ZONE_ID" placeholder="optional hosted zone id" />
+          <div class="field-hint">Optional but recommended when the account can see multiple hosted zones</div>
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="route53" style="display:none">
+          <label>AWS_REGION</label>
+          <input type="text" id="AWS_REGION" name="AWS_REGION" placeholder="us-east-1" value="us-east-1" />
+        </div>
+
+        <div class="form-row dns-provider-fields" data-provider="azure" style="display:none">
+          <label>AZURE_CLIENT_ID <span class="required">*</span></label>
+          <input type="text" id="AZURE_CLIENT_ID" name="AZURE_CLIENT_ID" placeholder="service principal client id" />
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="azure" style="display:none">
+          <label>AZURE_CLIENT_SECRET <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="AZURE_CLIENT_SECRET" name="AZURE_CLIENT_SECRET" placeholder="azure client secret" />
+            <button class="toggle-pass" onclick="togglePass('AZURE_CLIENT_SECRET')" type="button">👁</button>
+          </div>
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="azure" style="display:none">
+          <label>AZURE_SUBSCRIPTION_ID <span class="required">*</span></label>
+          <input type="text" id="AZURE_SUBSCRIPTION_ID" name="AZURE_SUBSCRIPTION_ID" placeholder="subscription id" />
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="azure" style="display:none">
+          <label>AZURE_TENANT_ID <span class="required">*</span></label>
+          <input type="text" id="AZURE_TENANT_ID" name="AZURE_TENANT_ID" placeholder="tenant id" />
+        </div>
+        <div class="form-row dns-provider-fields" data-provider="azure" style="display:none">
+          <label>AZURE_RESOURCE_GROUP <span class="required">*</span></label>
+          <input type="text" id="AZURE_RESOURCE_GROUP" name="AZURE_RESOURCE_GROUP" placeholder="dns zone resource group" />
+          <div class="field-hint">Grant the service principal DNS Zone Contributor on the zone resource</div>
+        </div>
+
+        <div class="form-row dns-provider-fields" data-provider="digitalocean" style="display:none">
+          <label>DIGITALOCEAN_TOKEN <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="DIGITALOCEAN_TOKEN" name="DIGITALOCEAN_TOKEN" placeholder="digitalocean api token" />
+            <button class="toggle-pass" onclick="togglePass('DIGITALOCEAN_TOKEN')" type="button">👁</button>
+          </div>
+          <div class="field-hint">Personal access token with write scope</div>
+        </div>
+
+        <div class="form-row dns-provider-fields" data-provider="hetzner" style="display:none">
+          <label>HETZNER_DNS_API_KEY <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="HETZNER_DNS_API_KEY" name="HETZNER_DNS_API_KEY" placeholder="hetzner dns api key" />
+            <button class="toggle-pass" onclick="togglePass('HETZNER_DNS_API_KEY')" type="button">👁</button>
+          </div>
+          <div class="field-hint">Create token at https://dns.hetzner.com/settings/api-token</div>
+        </div>
+
+        <div class="form-row dns-provider-fields" data-provider="none" style="display:none;grid-column:1/-1">
+          <label>HTTP-01 only</label>
+          <div class="field-hint">No DNS credentials needed. Wildcard certificates are disabled when DNS_PROVIDER=none.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Email / SMTP -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">📧</div>
+        <div>
+          <div class="card-title">Email / SMTP</div>
+          <div class="card-desc">For welcome emails and alert notifications</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>SMTP_USERNAME <span class="required">*</span></label>
+          <input type="email" id="SMTP_USERNAME" name="SMTP_USERNAME" placeholder="you@outlook.com" />
+          <div class="field-hint">Outlook: <code>smtp-mail.outlook.com:587</code></div>
+        </div>
+        <div class="form-row">
+          <label>SMTP_PASSWORD <span class="required">*</span></label>
+          <div class="input-wrap">
+            <input type="password" id="SMTP_PASSWORD" name="SMTP_PASSWORD" placeholder="app password" />
+            <button class="toggle-pass" onclick="togglePass('SMTP_PASSWORD')" type="button">👁</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>SMTP_TO</label>
+          <input type="email" id="SMTP_TO" name="SMTP_TO" placeholder="alerts@yourdomain.com" />
+          <div class="field-hint">Alert and deployment summary emails sent here — auto-filled from your admin email</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GitHub -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🐙</div>
+        <div>
+          <div class="card-title">Repository & GitHub</div>
+          <div class="card-desc">Repository metadata plus optional GitHub Actions integration</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>GITHUB_REPO <span class="required">*</span></label>
+          <input type="text" id="GITHUB_REPO" name="GITHUB_REPO" placeholder="your-org/your-repo" oninput="onGithubRepoChange()" />
+          <div class="field-hint">Repository slug used for GitHub API links in the console and API</div>
+        </div>
+        <div class="form-row">
+          <label>GIT_REPO_URL <span class="required">*</span></label>
+          <input type="text" id="GIT_REPO_URL" name="GIT_REPO_URL" placeholder="https://github.com/your-org/your-repo" />
+          <div class="field-hint">HTTPS repository URL — auto-filled when you enter the repo slug above</div>
+        </div>
+        <div class="form-row">
+          <label>GITHUB_PAT</label>
+          <div class="input-wrap">
+            <input type="password" id="GITHUB_PAT" name="GITHUB_PAT" placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" />
+            <button class="toggle-pass" onclick="togglePass('GITHUB_PAT')" type="button">👁</button>
+          </div>
+          <div class="field-hint">Optional. Leave blank for standard local deployments.</div>
+        </div>
+        <div class="form-row">
+          <label>RUNNER_REGISTRATION_TOKEN</label>
+          <input type="text" id="RUNNER_REGISTRATION_TOKEN" name="RUNNER_REGISTRATION_TOKEN" placeholder="AXXXXXXXXXXXXXXXXXXXXXXXXXX" />
+          <div class="field-hint">Optional. Only needed together with GITHUB_PAT for GitHub Actions integration.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Environment -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🏗</div>
+        <div>
+          <div class="card-title">Environment</div>
+          <div class="card-desc">Which cluster configuration to deploy</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>ENV_NAME</label>
+          <select id="ENV_NAME" name="ENV_NAME">
+            <option value="productie">productie (production)</option>
+            <option value="ontwikkel">ontwikkel (development)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>LETSENCRYPT_ENV</label>
+          <select id="LETSENCRYPT_ENV" name="LETSENCRYPT_ENV">
+            <option value="production">production (trusted certs)</option>
+            <option value="staging">staging (no rate limits, untrusted)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Features ─────────────────────────────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">⚙</div>
+        <div>
+          <div class="card-title">Optional Features</div>
+          <div class="card-desc">Select which optional components to deploy alongside the core platform</div>
+        </div>
+      </div>
+
+      <!-- Monitoring -->
+      <div class="feature-row" id="feat-monitoring">
+        <div class="feature-toggle">
+          <label class="toggle-switch">
+            <input type="checkbox" id="ENABLE_MONITORING" onchange="onFeatureToggle('ENABLE_MONITORING', this.checked)" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="feature-info">
+          <div class="feature-title">📊 Monitoring Stack</div>
+          <div class="feature-desc">kube-prometheus-stack — Prometheus metrics collection, Grafana dashboards, and AlertManager. Enables monitoring features in the InfraWeaver console. Not required for core platform operation.</div>
+          <div class="feature-tags"><span class="feature-tag">Resources: ~2GB RAM, ~4GB storage</span><span class="feature-tag">Includes: Prometheus, Grafana, AlertManager</span></div>
+        </div>
+      </div>
+
+      <!-- External DNS -->
+      <div class="feature-row" id="feat-external-dns">
+        <div class="feature-toggle">
+          <label class="toggle-switch">
+            <input type="checkbox" id="ENABLE_EXTERNAL_DNS" onchange="onFeatureToggle('ENABLE_EXTERNAL_DNS', this.checked)" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="feature-info">
+          <div class="feature-title">🌐 External DNS (Cloudflare only)</div>
+          <div class="feature-desc">Automatically creates and updates DNS records in Cloudflare when new ingress routes are added. Requires DNS_PROVIDER=cloudflare; other DNS providers are cert-manager only.</div>
+          <div class="feature-tags"><span class="feature-tag">Requires: DNS_PROVIDER=cloudflare + CLOUDFLARE_API_TOKEN</span></div>
+        </div>
+      </div>
+
+      <!-- Backup Provider -->
+      <div class="feature-row" id="feat-backup" style="align-items:flex-start">
+        <div class="feature-toggle" style="padding-top:4px">
+          <div class="backup-icon">💾</div>
+        </div>
+        <div class="feature-info">
+          <div class="feature-title">💾 Backup Provider</div>
+          <div class="feature-desc">Choose how cluster data is backed up. Longhorn provides block-level PVC backup to your TrueNAS/NFS. Velero adds full Kubernetes configuration backup (deployments, secrets, services).</div>
+          <div class="backup-options" id="backup-options">
+            <label class="backup-option">
+              <input type="radio" name="BACKUP_PROVIDER" value="none" onchange="onBackupChange('none')" />
+              <div class="backup-opt-content">
+                <div class="backup-opt-title">None</div>
+                <div class="backup-opt-desc">No automated backups</div>
+              </div>
+            </label>
+            <label class="backup-option">
+              <input type="radio" name="BACKUP_PROVIDER" value="longhorn" onchange="onBackupChange('longhorn')" checked />
+              <div class="backup-opt-content">
+                <div class="backup-opt-title">Longhorn <span class="recommended-tag">Recommended</span></div>
+                <div class="backup-opt-desc">Block-level PVC backup to TrueNAS/NFS. Lightweight, built into storage layer.</div>
+              </div>
+            </label>
+            <label class="backup-option">
+              <input type="radio" name="BACKUP_PROVIDER" value="velero" onchange="onBackupChange('velero')" />
+              <div class="backup-opt-content">
+                <div class="backup-opt-title">Velero + MinIO</div>
+                <div class="backup-opt-desc">Full K8s backup: deployments, services, secrets + PVC snapshots to local MinIO S3. Enables point-in-time cluster restore.</div>
+              </div>
+            </label>
+            <label class="backup-option">
+              <input type="radio" name="BACKUP_PROVIDER" value="both" onchange="onBackupChange('both')" />
+              <div class="backup-opt-content">
+                <div class="backup-opt-title">Longhorn + Velero</div>
+                <div class="backup-opt-desc">Full protection. Longhorn for data, Velero for cluster state. Highest resource usage.</div>
+              </div>
+            </label>
+          </div>
+          <div class="feature-tags" id="backup-resources-tag">
+            <span class="feature-tag" id="backup-resource-label">Resources: minimal (NFS only)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Local Network Access -->
+      <div class="feature-row" id="feat-local-ip" style="flex-direction:column;align-items:stretch;gap:10px">
+        <div style="display:flex;align-items:flex-start;gap:14px">
+          <div class="feature-toggle" style="padding-top:2px">
+            <div style="font-size:22px">🏠</div>
+          </div>
+          <div class="feature-info">
+            <div class="feature-title">🏠 Local Network Access</div>
+            <div class="feature-desc">IP ranges allowed to access internal-tier services (e.g. your homelab LAN, home network). System ranges (K8s nodes, pod CIDR, localhost) are always included automatically.</div>
+
+            <!-- VPN-only toggle -->
+            <div class="ip-range-vpn-only" style="margin-bottom:10px;margin-top:8px">
+              <input type="checkbox" id="vpn-only-toggle" onchange="onVpnOnlyToggle(this.checked)" />
+              <label for="vpn-only-toggle" style="cursor:pointer">VPN Only — require VPN for all internal services (disables LAN access)</label>
+            </div>
+
+            <div id="ip-ranges-section">
+              <div class="ip-range-list" id="ip-range-list"></div>
+              <div class="ip-range-actions">
+                <button class="ip-range-add" onclick="addIpRange('')">＋ Add range</button>
+                <button class="ip-range-detect" id="detect-btn" onclick="detectSubnets()">🔍 Auto-detect</button>
+              </div>
+              <div class="ip-ranges-note">
+                Enter CIDR ranges to allow for <em>internal</em> services. Examples: <code>192.168.1.0/24</code> (subnet), <code>192.168.1.42/32</code> (specific IP), <code>10.0.0.0/24</code> (home LAN).
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="saveEnv()">💾 Save .env</button>
+      <button class="btn btn-secondary" onclick="validateProxmox()">🔍 Validate Proxmox</button>
+      <button class="btn btn-secondary" onclick="loadEnv()">📂 Load existing .env</button>
+    </div>
+
+    <div id="config-alert"></div>
+  </div>
+
+  <!-- ═══════════════ DEPLOY TAB ═══════════════ -->
+  <div class="panel setup-panel" id="panel-deploy">
+    <div class="deploy-hero">
+      <div class="deploy-hero-icon">🚀</div>
+      <div class="deploy-hero-title">Deploy InfraWeaver Platform</div>
+      <div class="deploy-hero-desc">This will provision your Talos cluster on Proxmox, bootstrap all services, and configure the full platform stack.</div>
+    </div>
+
+    <div class="checklist" id="deploy-checklist">
+      <div class="checklist-title">Pre-flight checks</div>
+      <div class="check-item" id="chk-env"><div class="check-icon">⬜</div><span>.env file saved</span></div>
+      <div class="check-item" id="chk-proxmox"><div class="check-icon">⬜</div><span>Proxmox API reachable</span></div>
+      <div class="check-item" id="chk-ssh"><div class="check-icon">⬜</div><span>SSH key configured</span></div>
+      <div class="check-item" id="chk-domain"><div class="check-icon">⬜</div><span>Domain configured</span></div>
+      <div class="check-item" id="chk-dns"><div class="check-icon">⬜</div><span>DNS provider configured</span></div>
+    </div>
+
+    <div class="progress-wrap" id="deploy-progress-wrap" style="display:none">
+      <div class="progress-label">
+        <span id="progress-step">Provisioning cluster...</span>
+        <span id="progress-pct">0%</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    </div>
+
+    <div class="alert info" id="deploy-info">
+      <div class="alert-icon">ℹ</div>
+      <div>Deployment takes approximately <strong>15–25 minutes</strong>. The log below shows real-time progress. Do not close this tab during deployment.</div>
+    </div>
+
+    <div id="deploy-result"></div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary btn-large" id="btn-deploy" onclick="startDeploy('deploy')">
+        <span>🚀</span> Deploy Cluster
+      </button>
+      <button class="btn btn-secondary" onclick="switchTab('config')">⚙ Edit Config</button>
+    </div>
+
+    <div class="log-terminal" id="deploy-log" style="display:none">
+      <div class="log-titlebar">
+        <div class="log-dots">
+          <div class="log-dot red"></div>
+          <div class="log-dot yellow"></div>
+          <div class="log-dot green"></div>
+        </div>
+        <div class="log-titlebar-text">deploy-local.sh — InfraWeaver Platform</div>
+      </div>
+      <div class="log-body" id="deploy-log-body">
+        <div class="log-line dim">Waiting for deployment to start...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ REDEPLOY TAB ═══════════════ -->
+  <div class="panel setup-panel" id="panel-redeploy">
+    <div class="alert warning">
+      <div class="alert-icon">⚠</div>
+      <div>
+        <strong>FULL REDEPLOYMENT</strong> — This will <strong>destroy all cluster VMs</strong> (9300–9312), 
+        wipe all Kubernetes data, and redeploy from scratch. Your <code>.env</code> and <code>users.yaml</code> are preserved.
+        <br><br>This is irreversible. All persistent volumes and cluster state will be lost.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon">🔄</div>
+        <div>
+          <div class="card-title">Redeploy Options</div>
+        </div>
+      </div>
+      <div class="form-grid single">
+        <div class="form-row">
+          <label>Confirmation</label>
+          <input type="text" id="redeploy-confirm" placeholder="Type DESTROY to confirm" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-danger btn-large" id="btn-redeploy" onclick="startRedeploy()">
+          <span>💣</span> Full Redeploy
+        </button>
+      </div>
+    </div>
+
+    <div id="redeploy-result"></div>
+
+    <div class="log-terminal" id="redeploy-log" style="display:none">
+      <div class="log-titlebar">
+        <div class="log-dots">
+          <div class="log-dot red"></div>
+          <div class="log-dot yellow"></div>
+          <div class="log-dot green"></div>
+        </div>
+        <div class="log-titlebar-text">redeploy-local.sh — InfraWeaver Platform</div>
+      </div>
+      <div class="log-body" id="redeploy-log-body"></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    InfraWeaver Platform — Local Init Console &nbsp;|&nbsp;
+    <a id="repo-link" href="https://github.com/your-org/your-repo" style="color: var(--blue-dim); text-decoration: none">GitHub</a>
+  </div>
+</div>
+
+<script>
+const FIELDS = [
+  'BASE_DOMAIN','ADMIN_EMAIL','GITHUB_REPO','GIT_REPO_URL','PROXMOX_API_TOKEN',
+  'PROXMOX_HOST','PROXMOX_NODE_NAME','K8S_CLUSTER_NAME',
+  'NODE_GATEWAY','NODE_SUBNET_PREFIX','TALOS_DATASTORE',
+  'NODE_1_IP','NODE_1_VMID','NODE_1_PVE_NODE','NODE_1_DATASTORE','NODE_1_CPU','NODE_1_MEMORY','NODE_1_DISK',
+  'NODE_2_IP','NODE_2_VMID','NODE_2_PVE_NODE','NODE_2_DATASTORE','NODE_2_CPU','NODE_2_MEMORY','NODE_2_DISK',
+  'NODE_3_IP','NODE_3_VMID','NODE_3_PVE_NODE','NODE_3_DATASTORE','NODE_3_CPU','NODE_3_MEMORY','NODE_3_DISK',
+  'PVE_NODES',
+  'METALLB_VIP_RANGE','METALLB_TRAEFIK_VIP','METALLB_COREDNS_VIP',
+  'CLUSTER_LOCAL_DOMAIN','ADMIN_USERNAME','ADMIN_NAME',
+  'DEPLOYER_SSH_KEY','DNS_PROVIDER','CLOUDFLARE_API_TOKEN',
+  'AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_HOSTED_ZONE_ID','AWS_REGION',
+  'AZURE_CLIENT_ID','AZURE_CLIENT_SECRET','AZURE_SUBSCRIPTION_ID','AZURE_TENANT_ID','AZURE_RESOURCE_GROUP',
+  'DIGITALOCEAN_TOKEN','HETZNER_DNS_API_KEY',
+  'SMTP_USERNAME','SMTP_PASSWORD','SMTP_TO','GITHUB_PAT',
+  'RUNNER_REGISTRATION_TOKEN','ENV_NAME','LETSENCRYPT_ENV'
+];
+
+const FEATURE_FIELDS = ['ENABLE_MONITORING','ENABLE_EXTERNAL_DNS','BACKUP_PROVIDER','LOCAL_IP_RANGES'];
+const DNS_PROVIDER_FIELDS = {
+  cloudflare: ['CLOUDFLARE_API_TOKEN'],
+  route53: ['AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY'],
+  azure: ['AZURE_CLIENT_ID','AZURE_CLIENT_SECRET','AZURE_SUBSCRIPTION_ID','AZURE_TENANT_ID','AZURE_RESOURCE_GROUP'],
+  digitalocean: ['DIGITALOCEAN_TOKEN'],
+  hetzner: ['HETZNER_DNS_API_KEY'],
+  none: [],
+};
+const DNS_PROVIDER_HELP = {
+  cloudflare: 'Cloudflare token for cert-manager DNS-01 wildcard certificates.',
+  route53: 'AWS Route53 credentials for cert-manager DNS-01 challenge records.',
+  azure: 'Azure DNS service principal details for cert-manager DNS-01 challenges.',
+  digitalocean: 'DigitalOcean personal access token for cert-manager DNS-01 challenges.',
+  hetzner: 'Hetzner DNS API key for the cert-manager Hetzner webhook solver.',
+  none: 'HTTP-01 only. No wildcard certificates will be issued.',
+};
+
+// ── Tab switching ──
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+  if (name === 'deploy') refreshChecklist();
+}
+
+function updateRepoLink() {
+  const repo = document.getElementById('GITHUB_REPO')?.value?.trim() || 'your-org/your-repo';
+  const link = document.getElementById('repo-link');
+  if (link) link.href = `https://github.com/${repo}`;
+}
+
+// ── Password toggle ──
+function togglePass(id) {
+  const el = document.getElementById(id);
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+function getSelectedDnsProvider() {
+  return document.getElementById('DNS_PROVIDER')?.value || 'cloudflare';
+}
+
+function collectDnsCredentials(provider = getSelectedDnsProvider()) {
+  const credentials = {};
+  (DNS_PROVIDER_FIELDS[provider] || []).forEach(field => {
+    const el = document.getElementById(field);
+    credentials[field] = el ? el.value.trim() : '';
+  });
+  ['AWS_HOSTED_ZONE_ID','AWS_REGION'].forEach(field => {
+    const el = document.getElementById(field);
+    if (el) credentials[field] = el.value.trim();
+  });
+  return credentials;
+}
+
+function getMissingDnsFields(data) {
+  const provider = data.DNS_PROVIDER || 'cloudflare';
+  if (provider === 'none') return [];
+  return (DNS_PROVIDER_FIELDS[provider] || []).filter(field => !data[field]);
+}
+
+function onDnsProviderChange(resetResult = true) {
+  const provider = getSelectedDnsProvider();
+  document.querySelectorAll('.dns-provider-fields').forEach(el => {
+    el.style.display = el.dataset.provider === provider ? '' : 'none';
+  });
+  const help = document.getElementById('dns-provider-help');
+  if (help) help.textContent = DNS_PROVIDER_HELP[provider] || '';
+  const result = document.getElementById('dns-verify-result');
+  if (resetResult && result) {
+    result.textContent = '';
+    result.style.color = 'var(--text-dim)';
+  }
+}
+
+// ── Show alert ──
+function showAlert(containerId, type, msg) {
+  const icons = {info:'ℹ',success:'✅',warning:'⚠',error:'✗'};
+  document.getElementById(containerId).innerHTML =
+    `<div class="alert ${type}"><div class="alert-icon">${icons[type]||'ℹ'}</div><div>${msg}</div></div>`;
+}
+
+// ── Feature toggle handlers ──
+function onFeatureToggle(field, checked) {
+  // Visual feedback when toggling
+}
+
+function onBackupChange(value) {
+  const resourceLabels = {
+    none: 'Resources: none',
+    longhorn: 'Resources: minimal (NFS only)',
+    velero: 'Resources: ~2GB RAM, ~10GB storage (Velero + MinIO)',
+    both: 'Resources: ~3GB RAM, ~15GB storage (Longhorn + Velero + MinIO)',
+  };
+  const el = document.getElementById('backup-resource-label');
+  if (el) el.textContent = resourceLabels[value] || '';
+}
+
+// ── Local IP Ranges ──
+let ipRanges = [];
+
+function renderIpRangeList() {
+  const list = document.getElementById('ip-range-list');
+  list.innerHTML = '';
+  if (ipRanges.length === 0) {
+    addIpRange('');
+    return;
+  }
+  ipRanges.forEach((val, idx) => {
+    const row = document.createElement('div');
+    row.className = 'ip-range-row';
+    row.innerHTML = `
+      <input type="text" value="${val}" placeholder="e.g. 192.168.1.0/24 or 192.168.1.42/32"
+        oninput="ipRanges[${idx}]=this.value;validateCidrInput(this)"
+        onblur="validateCidrInput(this)" />
+      <button class="ip-range-btn-remove" onclick="removeIpRange(${idx})" title="Remove">✕</button>
+    `;
+    list.appendChild(row);
+    const input = row.querySelector('input');
+    if (val) validateCidrInput(input);
+  });
+}
+
+function addIpRange(val) {
+  ipRanges.push(val || '');
+  renderIpRangeList();
+  // Focus the last input
+  setTimeout(() => {
+    const inputs = document.querySelectorAll('#ip-range-list .ip-range-row input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }, 50);
+}
+
+function removeIpRange(idx) {
+  ipRanges.splice(idx, 1);
+  if (ipRanges.length === 0) ipRanges = [''];
+  renderIpRangeList();
+}
+
+function validateCidrInput(input) {
+  const val = input.value.trim();
+  if (!val) { input.classList.remove('invalid'); return; }
+  const cidrRe = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
+  if (!cidrRe.test(val)) {
+    input.classList.add('invalid');
+    input.title = 'Invalid CIDR — use format like 10.25.0.0/24';
+  } else {
+    input.classList.remove('invalid');
+    input.title = '';
+  }
+}
+
+function onVpnOnlyToggle(checked) {
+  const section = document.getElementById('ip-ranges-section');
+  if (checked) {
+    section.classList.add('dim');
+  } else {
+    section.classList.remove('dim');
+  }
+}
+
+async function detectSubnets() {
+  const btn = document.getElementById('detect-btn');
+  btn.textContent = '⏳ Detecting…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/detect-subnet');
+    const j = await r.json();
+    if (j.ok && j.subnets && j.subnets.length > 0) {
+      // Add detected subnets that aren't already in the list
+      const existing = new Set(ipRanges.filter(x => x.trim()));
+      let added = 0;
+      j.subnets.forEach(s => {
+        if (!existing.has(s.cidr)) {
+          // Replace empty entries first
+          const emptyIdx = ipRanges.findIndex(x => !x.trim());
+          if (emptyIdx >= 0) {
+            ipRanges[emptyIdx] = s.cidr;
+          } else {
+            ipRanges.push(s.cidr);
+          }
+          added++;
+        }
+      });
+      renderIpRangeList();
+      btn.textContent = added > 0 ? `✅ Added ${added} subnet${added>1?'s':''}` : '✅ Already up-to-date';
+    } else {
+      btn.textContent = '⚠ None detected';
+    }
+  } catch(e) {
+    btn.textContent = '✗ Error';
+  }
+  setTimeout(() => { btn.textContent = '🔍 Auto-detect'; btn.disabled = false; }, 2000);
+}
+
+// ── MetalLB VIP auto-suggest ──
+async function suggestVips() {
+  const gw = document.getElementById('NODE_GATEWAY')?.value?.trim();
+  const prefix = parseInt(document.getElementById('NODE_SUBNET_PREFIX')?.value?.trim() || '24');
+  const msg = document.getElementById('vip-suggest-msg');
+  if (!gw) { if (msg) { msg.textContent = '⚠ Fill in NODE_GATEWAY first'; msg.style.color = 'var(--yellow)'; } return; }
+  const btn = document.getElementById('btn-suggest-vips');
+  btn.textContent = '⏳ Scanning…'; btn.disabled = true;
+  if (msg) { msg.textContent = 'Calculating VIPs and ping-checking…'; msg.style.color = 'var(--text-dim)'; }
+  try {
+    const r = await fetch('/api/suggest-vips', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({gateway: gw, prefix})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      if (j.range) document.getElementById('METALLB_VIP_RANGE').value = j.range;
+      let allFree = true;
+      j.vips.forEach(v => {
+        const el = document.getElementById(v.var);
+        if (el) el.value = v.ip;
+        setVipDot(v.var, v.free);
+        if (!v.free) allFree = false;
+      });
+      if (msg) {
+        msg.textContent = allFree
+          ? `✅ All ${j.vips.length} VIPs are free — range ${j.range}`
+          : `⚠ Some VIPs may be in use — check 🔴 entries and adjust`;
+        msg.style.color = allFree ? 'var(--green)' : 'var(--yellow)';
+      }
+    } else {
+      if (msg) { msg.textContent = '✗ ' + (j.error || 'Could not suggest VIPs'); msg.style.color = 'var(--red)'; }
+    }
+  } catch(e) {
+    if (msg) { msg.textContent = '✗ Error: ' + e.message; msg.style.color = 'var(--red)'; }
+  }
+  btn.textContent = '✨ Auto-suggest & ping-check'; btn.disabled = false;
+}
+
+function setVipDot(fieldId, free) {
+  const dot = document.getElementById('vdot-' + fieldId);
+  if (!dot) return;
+  if (free === null || free === undefined) { dot.textContent = '⚪'; dot.title = 'Unchecked'; }
+  else if (free) { dot.textContent = '🟢'; dot.title = 'Free — no ping response'; }
+  else { dot.textContent = '🔴'; dot.title = 'In use — IP responded to ping!'; }
+}
+
+async function pingVip(fieldId) {
+  const ip = document.getElementById(fieldId)?.value?.trim();
+  if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return;
+  const dot = document.getElementById('vdot-' + fieldId);
+  if (dot) { dot.textContent = '⏳'; dot.title = 'Checking…'; }
+  try {
+    const r = await fetch(`/api/ping-check?ip=${encodeURIComponent(ip)}`);
+    const j = await r.json();
+    if (j.ok) setVipDot(fieldId, j.free);
+  } catch(e) {}
+}
+
+async function pingNodeIp(fieldId) {
+  const ip = document.getElementById(fieldId)?.value?.trim();
+  if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return;
+  const dot = document.getElementById('ndot-' + fieldId);
+  if (dot) { dot.textContent = '⏳'; dot.title = 'Checking…'; }
+  try {
+    const r = await fetch(`/api/ping-check?ip=${encodeURIComponent(ip)}`);
+    const j = await r.json();
+    if (j.ok && dot) {
+      dot.textContent = j.free ? '🟢' : '🔴';
+      dot.title = j.free ? 'Free — safe to use as node IP' : 'Already in use — pick a different IP';
+    }
+  } catch(e) {}
+}
+
+async function suggestNodeIps() {
+  const gw = document.getElementById('NODE_GATEWAY')?.value?.trim();
+  const prefix = parseInt(document.getElementById('NODE_SUBNET_PREFIX')?.value?.trim() || '24');
+  if (!gw) return;
+  const btn = document.getElementById('btn-suggest-nodes');
+  if (btn) { btn.textContent = '⏳ Checking…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/suggest-node-ips', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({gateway: gw, prefix})
+    });
+    const j = await r.json();
+    if (j.ok && j.suggestions) {
+      ['NODE_1_IP','NODE_2_IP','NODE_3_IP'].forEach((fid, i) => {
+        const s = j.suggestions[i];
+        if (!s) return;
+        const el = document.getElementById(fid);
+        if (el && !el.value) el.value = s.ip;
+        const dot = document.getElementById('ndot-' + fid);
+        if (dot) { dot.textContent = s.free ? '🟢' : '🔴'; dot.title = s.free ? 'Free' : 'Already in use'; }
+      });
+    }
+  } catch(e) {}
+  if (btn) { btn.textContent = '🧲 Suggest IPs from gateway'; btn.disabled = false; }
+}
+
+// ── Proxmox Discovery ──
+// ── Proxmox mode switcher ──
+function setPveMode(mode) {
+  const isSetup = mode === 'setup';
+  document.getElementById('pve-setup-mode').style.display  = isSetup ? '' : 'none';
+  document.getElementById('pve-manual-mode').style.display = isSetup ? 'none' : '';
+
+  const tabSetup  = document.getElementById('tab-pve-setup');
+  const tabManual = document.getElementById('tab-pve-manual');
+  tabSetup.style.background  = isSetup ? 'rgba(68,136,255,0.18)' : '';
+  tabSetup.style.borderColor = isSetup ? 'var(--blue)' : '';
+  tabManual.style.background  = isSetup ? '' : 'rgba(68,136,255,0.18)';
+  tabManual.style.borderColor = isSetup ? '' : 'var(--blue)';
+
+  const tokenField = document.getElementById('PROXMOX_API_TOKEN');
+  const tokenHint  = document.getElementById('pve-token-hint');
+  if (!isSetup) {
+    tokenField.readOnly = false;
+    tokenField.style.color = '';
+    if (tokenHint) tokenHint.innerHTML = 'Proxmox UI → Datacenter → Permissions → API Tokens → Add. Format: <code>USER@realm!TOKENNAME=uuid</code>';
+  }
+}
+
+// ── Proxmox auto-setup (create infraweaver@pve user + token) ──
+async function setupProxmoxUser() {
+  const host = (document.getElementById('pve-setup-host')?.value || '').trim();
+  const user = (document.getElementById('pve-setup-user')?.value || '').trim();
+  const pass = (document.getElementById('pve-setup-pass')?.value || '');
+  const resultEl = document.getElementById('pve-setup-result');
+  const successEl = document.getElementById('pve-setup-success');
+  const btn = document.getElementById('btn-pve-setup');
+
+  if (!host) { showAlert('config-alert', 'warning', 'Enter Proxmox host / IP first'); return; }
+  if (!user) { showAlert('config-alert', 'warning', 'Enter admin username'); return; }
+  if (!pass) { showAlert('config-alert', 'warning', 'Enter admin password'); return; }
+
+  resultEl.textContent = '';
+  if (successEl) successEl.style.display = 'none';
+  btn.innerHTML = '<div class="btn-spinner" style="border-color:var(--green);border-top-color:transparent"></div> Connecting…';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch('/api/setup-proxmox-user', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ host, username: user, password: pass })
+    });
+    const j = await r.json();
+
+    if (j.ok) {
+      // Populate the shared token field
+      const tokenField = document.getElementById('PROXMOX_API_TOKEN');
+      tokenField.value    = j.token;
+      tokenField.readOnly = true;
+      tokenField.style.color = 'var(--green)';
+      // Also populate PROXMOX_HOST if not set
+      const hostField = document.getElementById('PROXMOX_HOST');
+      if (hostField && !hostField.value) hostField.value = host;
+
+      if (successEl) successEl.style.display = '';
+      resultEl.innerHTML = '';
+      updateStatus('dot-proxmox', 'ok', 'proxmox: ✅');
+      showAlert('config-alert', 'success', '✅ infraweaver@pve created! Token auto-filled. Click "Discover node &amp; storage" to continue.');
+
+      // Clear credentials from DOM immediately
+      document.getElementById('pve-setup-pass').value = '';
+    } else {
+      resultEl.innerHTML = `<span style="color:var(--red)">✗ ${j.error || 'Unknown error'}</span>`;
+      updateStatus('dot-proxmox', 'err', 'proxmox: ✗');
+      showAlert('config-alert', 'error', '✗ Setup failed: ' + (j.error || 'check host and credentials'));
+    }
+  } catch(e) {
+    resultEl.innerHTML = `<span style="color:var(--red)">✗ ${e.message}</span>`;
+    showAlert('config-alert', 'error', 'Request error: ' + e.message);
+  }
+  btn.innerHTML = '✨ Check access &amp; create API user';
+  btn.disabled = false;
+}
+
+// Module-level store for discovered Proxmox data (used by onPveNodeChange)
+let _discoveredDatastoresByNode = {};
+let _discoveredNodeResources = {};
+
+async function discoverProxmox() {
+  const token = document.getElementById('PROXMOX_API_TOKEN')?.value?.trim();
+  const host  = (document.getElementById('PROXMOX_HOST')?.value?.trim()) ||
+                (document.getElementById('pve-setup-host')?.value?.trim());
+  const resultEl = document.getElementById('discover-result');
+  if (!token) { showAlert('config-alert', 'warning', 'Enter PROXMOX_API_TOKEN first'); return; }
+  if (!host) { showAlert('config-alert', 'warning', 'Enter PROXMOX_HOST first'); return; }
+  const btn = document.getElementById('btn-discover-proxmox');
+  btn.innerHTML = '<div class="btn-spinner" style="border-color:var(--blue);border-top-color:transparent"></div> Discovering…';
+  btn.disabled = true;
+  if (resultEl) resultEl.textContent = '';
+  try {
+    const r = await fetch('/api/discover-proxmox', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({host, token})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      // Primary node name
+      if (j.node_name) {
+        const pn = document.getElementById('PROXMOX_NODE_NAME');
+        if (pn && !pn.value) pn.value = j.node_name;
+      }
+      // Global Talos image datastore (first node's first pool) — datastores is now [{name,free_gb,...}]
+      if (j.datastores?.length) {
+        const el = document.getElementById('TALOS_DATASTORE');
+        const firstDs = typeof j.datastores[0] === 'object' ? j.datastores[0].name : j.datastores[0];
+        if (el && !el.value) el.value = firstDs;
+        const hint = el?.closest('.form-row')?.querySelector('.field-hint');
+        const names = j.datastores.map(d => typeof d === 'object' ? `${d.name} (${d.free_gb} GB free)` : d);
+        if (hint) hint.textContent = `Available: ${names.join(' · ')}`;
+      }
+      // VMID suggestions
+      if (j.vmid_suggestions?.length >= 3) {
+        ['NODE_1_VMID','NODE_2_VMID','NODE_3_VMID'].forEach((fid, i) => {
+          const el = document.getElementById(fid);
+          if (el && !el.value) el.value = j.vmid_suggestions[i];
+        });
+      }
+      // Per-node PVE selectors, datastores, and PVE_NODES hidden field
+      if (j.datastores_by_node) _discoveredDatastoresByNode = j.datastores_by_node;
+      if (j.node_resources_by_node) _discoveredNodeResources = j.node_resources_by_node;
+      if (j.all_nodes) populatePveNodeDropdowns(j.all_nodes, j.datastores_by_node || {}, j.node_resources_by_node || {});
+      if (j.pve_nodes_str) {
+        const pveField = document.getElementById('PVE_NODES');
+        if (pveField) pveField.value = j.pve_nodes_str;
+      }
+      updateStatus('dot-proxmox', 'ok', 'proxmox: ✅');
+      const nodesList = j.all_nodes?.join(', ') || j.node_name || '–';
+      const cpuInfo = j.node_resources_by_node?.[j.node_name];
+      const resStr = cpuInfo ? ` · ${cpuInfo.cpu_cores} cores · ${Math.round(cpuInfo.mem_total_mb/1024)} GB RAM` : '';
+      const summary = `✅ Nodes: <strong>${nodesList}</strong>${resStr} · VMIDs: <strong>${j.vmid_suggestions?.slice(0,3).join(', ')||'–'}</strong>`;
+      if (resultEl) { resultEl.innerHTML = summary; resultEl.style.color = 'var(--green)'; }
+      showAlert('config-alert', 'success', '✅ Proxmox discovered! Node, storage &amp; VMIDs auto-filled.');
+    } else {
+      updateStatus('dot-proxmox', 'err', 'proxmox: ✗');
+      if (resultEl) { resultEl.textContent = '✗ ' + (j.error || 'check host and token'); resultEl.style.color = 'var(--red)'; }
+      showAlert('config-alert', 'error', '✗ Proxmox discovery failed: ' + (j.error || 'check host and API token'));
+    }
+  } catch(e) {
+    if (resultEl) { resultEl.textContent = '✗ ' + e.message; resultEl.style.color = 'var(--red)'; }
+    showAlert('config-alert', 'error', 'Discovery error: ' + e.message);
+  }
+  btn.innerHTML = '🔍 Discover from Proxmox'; btn.disabled = false;
+}
+
+function populatePveNodeDropdowns(allNodes, datastoresByNode, nodeResourcesByNode) {
+  nodeResourcesByNode = nodeResourcesByNode || {};
+
+  // Populate PROXMOX_NODE_NAME select
+  const pveNameSel = document.getElementById('PROXMOX_NODE_NAME');
+  if (pveNameSel) {
+    const cur = pveNameSel.value;
+    pveNameSel.innerHTML = allNodes.map(n => `<option value="${n}">${n}</option>`).join('');
+    if (cur && allNodes.includes(cur)) pveNameSel.value = cur;
+    else if (!pveNameSel.value) pveNameSel.value = allNodes[0] || '';
+  }
+
+  for (let n = 1; n <= 3; n++) {
+    const pveSel = document.getElementById(`NODE_${n}_PVE_NODE`);
+    if (!pveSel) continue;
+
+    // Populate the <select> options
+    const prevVal = pveSel.value;
+    pveSel.innerHTML = `<option value="">— select node —</option>` +
+      allNodes.map(nd => `<option value="${nd}">${nd}</option>`).join('');
+
+    // Auto-select: restore prior value, or default to first node
+    if (prevVal && allNodes.includes(prevVal)) pveSel.value = prevVal;
+    else if (!pveSel.value) pveSel.value = allNodes[0] || '';
+
+    const pveNode = pveSel.value;
+    // Update resource badge for this node
+    _updateNodeResBadge(n, pveNode, nodeResourcesByNode);
+    // Populate datastore <select>
+    _populateDatastoreSelect(n, pveNode, datastoresByNode);
+    // Update CPU/RAM slider max
+    _updateNodeSliderLimits(n, pveNode, nodeResourcesByNode);
+  }
+}
+
+function _updateNodeResBadge(n, pveNode, nodeResourcesByNode) {
+  const badge = document.getElementById(`node-${n}-res-badge`);
+  const res = (nodeResourcesByNode || _discoveredNodeResources)[pveNode];
+  if (!badge) return;
+  if (!res || !pveNode) { badge.style.display = 'none'; return; }
+  badge.style.display = 'flex';
+  const cpuEl = document.getElementById(`node-${n}-res-cpu`);
+  const ramEl = document.getElementById(`node-${n}-res-ram`);
+  const freeEl = document.getElementById(`node-${n}-res-free`);
+  if (cpuEl) cpuEl.textContent = `🖥 ${res.cpu_cores} cores`;
+  if (ramEl) ramEl.textContent = `🧮 ${Math.round(res.mem_total_mb / 1024)} GB RAM`;
+  if (freeEl) freeEl.textContent = `💾 ${Math.round(res.mem_free_mb / 1024)} GB free`;
+}
+
+function _populateDatastoreSelect(n, pveNode, datastoresByNode) {
+  datastoresByNode = datastoresByNode || _discoveredDatastoresByNode;
+  const dsSel = document.getElementById(`NODE_${n}_DATASTORE`);
+  if (!dsSel) return;
+  const stores = (datastoresByNode[pveNode]) || datastoresByNode[Object.keys(datastoresByNode)[0]] || [];
+  const prevDs = dsSel.value;
+  if (stores.length === 0) {
+    dsSel.innerHTML = `<option value="">— discover PVE first —</option>`;
+    const hint = document.getElementById(`node-${n}-ds-hint`);
+    if (hint) hint.textContent = 'No datastores found — run Discover';
+    return;
+  }
+  dsSel.innerHTML = stores.map(s => {
+    const name = typeof s === 'object' ? s.name : s;
+    const freeGb = typeof s === 'object' ? s.free_gb : null;
+    const label = freeGb != null ? `${name}  (${freeGb} GB free)` : name;
+    return `<option value="${name}">${label}</option>`;
+  }).join('');
+  // Restore or auto-select
+  if (prevDs && dsSel.querySelector(`option[value="${prevDs}"]`)) dsSel.value = prevDs;
+  else dsSel.value = (typeof stores[0] === 'object' ? stores[0].name : stores[0]) || '';
+  // Update hint
+  const hint = document.getElementById(`node-${n}-ds-hint`);
+  if (hint) hint.textContent = `${stores.length} datastore${stores.length > 1 ? 's' : ''} available on ${pveNode}`;
+}
+
+function _updateNodeSliderLimits(n, pveNode, nodeResourcesByNode) {
+  nodeResourcesByNode = nodeResourcesByNode || _discoveredNodeResources;
+  const res = nodeResourcesByNode[pveNode];
+  if (!res) return;
+  const cpuMax = res.cpu_cores || 16;
+  const ramMaxMb = res.mem_total_mb || 32768;
+
+  const cpuSlider = document.getElementById(`NODE_${n}_CPU_SLIDER`);
+  const ramSlider = document.getElementById(`NODE_${n}_MEM_SLIDER`);
+  const cpuLabel = document.getElementById(`node-${n}-cpu-max-label`);
+  const ramLabel = document.getElementById(`node-${n}-ram-max-label`);
+
+  if (cpuSlider) { cpuSlider.max = cpuMax; }
+  if (ramSlider) { ramSlider.max = ramMaxMb; }
+  if (cpuLabel) cpuLabel.textContent = `/ ${cpuMax} max`;
+  if (ramLabel) ramLabel.textContent = `/ ${Math.round(ramMaxMb/1024)} GB max`;
+}
+
+function onPveNodeChange(n) {
+  const pveSel = document.getElementById(`NODE_${n}_PVE_NODE`);
+  const pveNode = pveSel?.value?.trim();
+  if (!pveNode) return;
+  _updateNodeResBadge(n, pveNode, _discoveredNodeResources);
+  _populateDatastoreSelect(n, pveNode, _discoveredDatastoresByNode);
+  _updateNodeSliderLimits(n, pveNode, _discoveredNodeResources);
+  // Also sync PROXMOX_NODE_NAME if all nodes share same PVE node
+  const allSame = [1,2,3].every(i => {
+    const s = document.getElementById(`NODE_${i}_PVE_NODE`);
+    return s && (s.value === pveNode || s.value === '');
+  });
+  if (allSame) {
+    const masterSel = document.getElementById('PROXMOX_NODE_NAME');
+    if (masterSel && masterSel.querySelector(`option[value="${pveNode}"]`)) masterSel.value = pveNode;
+  }
+}
+
+// ── CPU slider sync ──
+function syncCpuSlider(n) {
+  const slider = document.getElementById(`NODE_${n}_CPU_SLIDER`);
+  const hidden = document.getElementById(`NODE_${n}_CPU`);
+  const display = document.getElementById(`node-${n}-cpu-val`);
+  if (!slider) return;
+  const v = parseInt(slider.value, 10);
+  if (hidden) hidden.value = v;
+  if (display) display.textContent = v;
+}
+
+// ── RAM slider sync ──
+function syncRamSlider(n) {
+  const slider = document.getElementById(`NODE_${n}_MEM_SLIDER`);
+  const hidden = document.getElementById(`NODE_${n}_MEMORY`);
+  const display = document.getElementById(`node-${n}-ram-val`);
+  if (!slider) return;
+  const v = parseInt(slider.value, 10);
+  if (hidden) hidden.value = v;
+  if (display) display.textContent = `${Math.round(v / 1024)} GB`;
+}
+
+// ── Sync all sliders from hidden inputs (called after loadEnv) ──
+function syncAllSlidersFromValues() {
+  for (let n = 1; n <= 3; n++) {
+    const cpu = document.getElementById(`NODE_${n}_CPU`);
+    const mem = document.getElementById(`NODE_${n}_MEMORY`);
+    const cpuSlider = document.getElementById(`NODE_${n}_CPU_SLIDER`);
+    const memSlider = document.getElementById(`NODE_${n}_MEM_SLIDER`);
+    if (cpu && cpuSlider) {
+      cpuSlider.value = cpu.value || 4;
+      const d = document.getElementById(`node-${n}-cpu-val`);
+      if (d) d.textContent = cpu.value || 4;
+    }
+    if (mem && memSlider) {
+      memSlider.value = mem.value || 8192;
+      const d = document.getElementById(`node-${n}-ram-val`);
+      if (d) d.textContent = `${Math.round((parseInt(mem.value) || 8192) / 1024)} GB`;
+    }
+  }
+}
+
+// ── Quick preset: fill CPU/RAM/Disk for a node ──
+const NODE_PRESETS = {
+  minimal:     { cpu: 2,  mem: 4096,  disk: 40  },
+  standard:    { cpu: 4,  mem: 8192,  disk: 80  },
+  balanced:    { cpu: 6,  mem: 12288, disk: 100 },
+  performance: { cpu: 8,  mem: 16384, disk: 150 },
+};
+
+function applyNodePreset(n, preset) {
+  const p = NODE_PRESETS[preset];
+  if (!p) return;
+  // hidden inputs
+  const cpu = document.getElementById(`NODE_${n}_CPU`);
+  const mem = document.getElementById(`NODE_${n}_MEMORY`);
+  const disk = document.getElementById(`NODE_${n}_DISK`);
+  if (cpu) cpu.value = p.cpu;
+  if (mem) mem.value = p.mem;
+  if (disk) disk.value = p.disk;
+  // sliders
+  const cpuSlider = document.getElementById(`NODE_${n}_CPU_SLIDER`);
+  const memSlider = document.getElementById(`NODE_${n}_MEM_SLIDER`);
+  if (cpuSlider) cpuSlider.value = p.cpu;
+  if (memSlider) memSlider.value = p.mem;
+  // display values
+  const cpuVal = document.getElementById(`node-${n}-cpu-val`);
+  const ramVal = document.getElementById(`node-${n}-ram-val`);
+  if (cpuVal) cpuVal.textContent = p.cpu;
+  if (ramVal) ramVal.textContent = `${Math.round(p.mem / 1024)} GB`;
+  // flash preset button
+  const btns = document.querySelectorAll(`#node-${n}-adv .preset-btn`);
+  btns.forEach(b => b.style.borderColor = '');
+  event?.target?.closest('.preset-btn')?.style && (event.target.closest('.preset-btn').style.borderColor = 'var(--green)');
+  setTimeout(() => btns.forEach(b => b.style.borderColor = ''), 1500);
+}
+
+// ── SSH key generation ──
+async function generateSshKey() {
+  const btn = document.getElementById('btn-gen-ssh');
+  btn.innerHTML = '<div class="btn-spinner" style="border-color:var(--green);border-top-color:transparent"></div> Generating…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/generate-ssh-key', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const j = await r.json();
+    if (j.ok) {
+      document.getElementById('DEPLOYER_SSH_KEY').value = j.private_key;
+      const pubField = document.getElementById('generated-pubkey');
+      const pubSection = document.getElementById('pubkey-section');
+      if (pubField) pubField.value = j.public_key;
+      if (pubSection) pubSection.style.display = 'block';
+      showAlert('config-alert', 'success', '🔑 Keypair generated! Copy the public key below and add it to your Proxmox host (<code>~/.ssh/authorized_keys</code>).');
+    } else {
+      showAlert('config-alert', 'error', 'SSH keygen failed: ' + j.error);
+    }
+  } catch(e) { showAlert('config-alert', 'error', 'Error: ' + e.message); }
+  btn.innerHTML = '🔑 Generate new keypair'; btn.disabled = false;
+}
+
+function copyPubKey() {
+  const el = document.getElementById('generated-pubkey');
+  if (!el) return;
+  navigator.clipboard.writeText(el.value).then(() => {
+    const btn = document.getElementById('btn-copy-pubkey');
+    if (btn) { const orig = btn.textContent; btn.textContent = '✅ Copied!'; setTimeout(() => btn.textContent = orig, 2500); }
+  }).catch(() => { el.select(); document.execCommand('copy'); });
+}
+
+// ── DNS provider verify ──
+async function checkDnsProvider() {
+  const provider = getSelectedDnsProvider();
+  const resultEl = document.getElementById('dns-verify-result');
+  const credentials = collectDnsCredentials(provider);
+  const missing = getMissingDnsFields({ DNS_PROVIDER: provider, ...credentials });
+  if (missing.length) { showAlert('config-alert', 'warning', 'Missing DNS provider fields: ' + missing.join(', ')); return; }
+  const btn = document.getElementById('btn-check-dns');
+  btn.innerHTML = '<div class="btn-spinner" style="border-color:var(--green);border-top-color:transparent"></div>';
+  btn.disabled = true;
+  if (resultEl) resultEl.textContent = provider === 'none' ? 'Skipping verification…' : 'Checking…';
+  try {
+    const r = await fetch('/api/check-dns-provider', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({provider, credentials})});
+    const j = await r.json();
+    if (j.ok) {
+      const status = j.status || 'verified';
+      if (resultEl) { resultEl.textContent = `✅ ${provider} — ${status}`; resultEl.style.color = 'var(--green)'; }
+      showAlert('config-alert', 'success', `✅ ${provider} verification succeeded (${status})`);
+    } else {
+      if (resultEl) { resultEl.textContent = '✗ ' + (j.error || 'invalid'); resultEl.style.color = 'var(--red)'; }
+      showAlert('config-alert', 'error', `✗ ${provider} verification failed: ` + (j.error || 'check credentials'));
+    }
+  } catch(e) {
+    if (resultEl) { resultEl.textContent = '✗ ' + e.message; resultEl.style.color = 'var(--red)'; }
+  }
+  btn.innerHTML = '✅ Verify provider'; btn.disabled = false;
+}
+
+// ── Auto-fill admin fields from email ──
+function autofillAdmin() {
+  const email = document.getElementById('ADMIN_EMAIL')?.value?.trim();
+  if (!email || !email.includes('@')) return;
+  const usernameFld = document.getElementById('ADMIN_USERNAME');
+  const nameFld = document.getElementById('ADMIN_NAME');
+  const smtpTo = document.getElementById('SMTP_TO');
+  if (usernameFld && !usernameFld.value) {
+    usernameFld.value = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  }
+  if (nameFld && !nameFld.value) {
+    const prefix = email.split('@')[0];
+    nameFld.value = prefix.replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+  if (smtpTo && !smtpTo.value) smtpTo.value = email;
+}
+
+// ── Auto-derive GIT_REPO_URL from GITHUB_REPO ──
+function onGithubRepoChange() {
+  const repo = document.getElementById('GITHUB_REPO')?.value?.trim();
+  const urlFld = document.getElementById('GIT_REPO_URL');
+  if (repo && repo.includes('/') && urlFld && !urlFld.value) {
+    urlFld.value = `https://github.com/${repo}`;
+  }
+  updateRepoLink();
+}
+function collectEnv() {
+  const data = {};
+  FIELDS.forEach(f => {
+    const el = document.getElementById(f);
+    if (el) data[f] = el.value.trim();
+  });
+  // Feature flags: checkboxes → "true"/"false"
+  ['ENABLE_MONITORING','ENABLE_EXTERNAL_DNS'].forEach(f => {
+    const el = document.getElementById(f);
+    if (el) data[f] = el.checked ? 'true' : 'false';
+  });
+  // Backup provider radio
+  const bpEl = document.querySelector('input[name="BACKUP_PROVIDER"]:checked');
+  if (bpEl) data['BACKUP_PROVIDER'] = bpEl.value;
+  // Local IP ranges
+  const vpnOnly = document.getElementById('vpn-only-toggle');
+  data['LOCAL_IP_RANGES'] = (vpnOnly?.checked) ? '' : ipRanges.filter(r => r.trim()).join(',');
+  return data;
+}
+
+// ── Save .env ──
+async function saveEnv() {
+  const data = collectEnv();
+  const missing = ['BASE_DOMAIN','ADMIN_EMAIL','GITHUB_REPO','GIT_REPO_URL','PROXMOX_API_TOKEN','DEPLOYER_SSH_KEY','DNS_PROVIDER','SMTP_USERNAME','SMTP_PASSWORD']
+    .filter(k => !data[k]);
+  const missingDns = getMissingDnsFields(data);
+  if (missingDns.length) missing.push(...missingDns);
+  if (missing.length) {
+    showAlert('config-alert', 'warning', 'Missing required fields: ' + missing.join(', '));
+    return;
+  }
+  try {
+    const r = await fetch('/api/save-env', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const j = await r.json();
+    if (j.ok) {
+      showAlert('config-alert', 'success', '.env saved ✅ — Ready to deploy');
+      updateStatus('dot-env', 'ok', 'env: configured');
+      refreshChecklist();
+    } else {
+      showAlert('config-alert', 'error', 'Failed to save .env: ' + (j.error || 'unknown'));
+    }
+  } catch(e) {
+    showAlert('config-alert', 'error', 'Network error: ' + e.message);
+  }
+}
+
+// ── Load existing .env ──
+async function loadEnv() {
+  try {
+    const r = await fetch('/api/load-env');
+    const j = await r.json();
+    if (j.ok && j.data) {
+      Object.entries(j.data).forEach(([k, v]) => {
+        const el = document.getElementById(k);
+        if (el) {
+          if (el.type === 'checkbox') { el.checked = v === 'true'; }
+          else if (el.tagName === 'SELECT' && v) {
+            const selector = 'option[value="' + (((window.CSS && CSS.escape) ? CSS.escape(v) : v).replace(/"/g, '\\"')) + '"]';
+            if (!el.querySelector(selector)) {
+              const opt = document.createElement('option');
+              opt.value = v; opt.textContent = v;
+              el.appendChild(opt);
+            }
+            el.value = v;
+          } else { el.value = v; }
+        }
+        if (k === 'BACKUP_PROVIDER') {
+          const radio = document.querySelector(`input[name="BACKUP_PROVIDER"][value="${v}"]`);
+          if (radio) { radio.checked = true; onBackupChange(v); }
+        }
+        if (k === 'LOCAL_IP_RANGES') {
+          const vpnOnlyToggle = document.getElementById('vpn-only-toggle');
+          if (!v || !v.trim()) {
+            if (vpnOnlyToggle) { vpnOnlyToggle.checked = true; onVpnOnlyToggle(true); }
+            ipRanges = [''];
+          } else {
+            if (vpnOnlyToggle) { vpnOnlyToggle.checked = false; onVpnOnlyToggle(false); }
+            ipRanges = v.split(',').map(x => x.trim()).filter(x => x);
+            if (!ipRanges.length) ipRanges = [''];
+          }
+          renderIpRangeList();
+        }
+      });
+      // Restore VIP dot states from loaded values (show as unchecked — user can re-ping)
+['METALLB_TRAEFIK_VIP','METALLB_COREDNS_VIP'].forEach(f => setVipDot(f, null));
+      updateRepoLink();
+      onDnsProviderChange(false);
+      showAlert('config-alert', 'success', 'Loaded existing .env ✅');
+      updateStatus('dot-env', 'ok', 'env: configured');
+      syncAllSlidersFromValues();
+    } else {
+      showAlert('config-alert', 'info', 'No existing .env found — fill in the form to get started');
+    }
+  } catch(e) {
+    showAlert('config-alert', 'error', 'Could not load .env: ' + e.message);
+  }
+}
+async function validateProxmox() {
+  const data = collectEnv();
+  if (!data.PROXMOX_API_TOKEN) {
+    showAlert('config-alert', 'warning', 'Enter your PROXMOX_API_TOKEN first');
+    return;
+  }
+  showAlert('config-alert', 'info', '🔍 Testing Proxmox API connectivity...');
+  try {
+    const r = await fetch('/api/validate-proxmox', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const j = await r.json();
+    if (j.ok) {
+      showAlert('config-alert', 'success', '✅ Proxmox API reachable! Nodes: ' + (j.nodes || '(listed in logs)'));
+      updateStatus('dot-proxmox', 'ok', 'proxmox: ✅');
+    } else {
+      showAlert('config-alert', 'error', '✗ Proxmox unreachable: ' + (j.error || 'check token and IP'));
+      updateStatus('dot-proxmox', 'err', 'proxmox: ✗');
+    }
+  } catch(e) {
+    showAlert('config-alert', 'error', 'Validation failed: ' + e.message);
+  }
+}
+
+// ── Status updates ──
+function updateStatus(dotId, cls, label) {
+  const dot = document.getElementById(dotId);
+  dot.className = 'status-dot ' + cls;
+  // Find the label next to this dot
+  const item = dot.closest('.status-item');
+  if (item) {
+    const span = item.querySelector('span');
+    if (span) span.textContent = label;
+  }
+}
+
+// ── Checklist refresh ──
+async function refreshChecklist() {
+  try {
+    const r = await fetch('/api/status');
+    const j = await r.json();
+    setCheck('chk-env', j.env_saved, '.env file saved');
+    setCheck('chk-ssh', j.ssh_key, 'SSH key configured');
+    setCheck('chk-domain', j.domain, 'Domain configured');
+    setCheck('chk-dns', j.dns_provider_configured, `DNS provider configured (${j.dns_provider || 'cloudflare'})`);
+    setCheck('chk-proxmox', j.proxmox, 'Proxmox API reachable');
+    if (j.env_saved) updateStatus('dot-env', 'ok', 'env: configured');
+  } catch(e) {}
+}
+
+function setCheck(id, ok, label) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.querySelector('.check-icon').textContent = ok ? '✅' : '⬜';
+  el.querySelector('span').textContent = label;
+  el.className = 'check-item' + (ok ? ' ok' : '');
+}
+
+// ── Deploy ──
+async function startDeploy(mode) {
+  const btn = document.getElementById('btn-deploy');
+  const logDiv = document.getElementById('deploy-log');
+  const logBody = document.getElementById('deploy-log-body');
+  const progressWrap = document.getElementById('deploy-progress-wrap');
+
+  btn.disabled = true;
+  btn.innerHTML = '<div class="btn-spinner"></div> Deploying...';
+  logDiv.style.display = 'block';
+  progressWrap.style.display = 'block';
+  logBody.innerHTML = '';
+  updateStatus('dot-deploy', 'warn', 'deploy: running');
+
+  const STEPS = [
+    'Installing tools', 'Destroying old VMs', 'Provisioning Talos VMs',
+    'Bootstrapping cluster', 'Waiting for CRDs', 'Deploying ArgoCD',
+    'Bootstrapping OpenBao', 'Configuring DNS', 'Applying MetalLB',
+    'Configuring TLS', 'Configuring Authentik',
+    'Running post-deploy tests', 'Complete'
+  ];
+  let currentStep = 0;
+
+  const appendLog = (text, cls='') => {
+    const line = document.createElement('div');
+    line.className = 'log-line ' + cls;
+    line.textContent = text;
+    logBody.appendChild(line);
+    logBody.scrollTop = logBody.scrollHeight;
+  };
+
+  const updateProgress = (pct, stepText) => {
+    document.getElementById('progress-fill').style.width = pct + '%';
+    document.getElementById('progress-pct').textContent = pct + '%';
+    if (stepText) document.getElementById('progress-step').textContent = stepText;
+  };
+
+  try {
+    const resp = await fetch('/api/deploy', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    if (!resp.ok || !resp.body) throw new Error('Deploy API failed');
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw) continue;
+        let evt;
+        try { evt = JSON.parse(raw); } catch { appendLog(raw); continue; }
+
+        if (evt.type === 'log') {
+          let cls = 'info';
+          if (evt.text.match(/✅|✓|SUCCESS|complete/i)) cls = 'ok';
+          else if (evt.text.match(/⚠|warn/i)) cls = 'warn';
+          else if (evt.text.match(/✗|error|fail|FAIL/i)) cls = 'err';
+          else if (evt.text.match(/^==>|^\[|Step \d/i)) cls = 'step';
+          appendLog(evt.text, cls);
+        } else if (evt.type === 'progress') {
+          updateProgress(evt.pct, evt.step);
+          currentStep = evt.pct;
+        } else if (evt.type === 'done') {
+          updateProgress(100, 'Complete!');
+          appendLog('', '');
+          appendLog('════════════════════════════════════════════', 'ok');
+          appendLog('  ✅ Deployment complete!', 'ok');
+          appendLog('════════════════════════════════════════════', 'ok');
+          if (evt.summary) appendLog(evt.summary, 'ok');
+          btn.disabled = false;
+          btn.innerHTML = '✅ Deploy Complete';
+          updateStatus('dot-deploy', 'ok', 'deploy: done ✅');
+          document.getElementById('deploy-result').innerHTML =
+            `<div class="alert success"><div class="alert-icon">✅</div><div>${evt.summary || 'Platform deployed successfully!'}</div></div>`;
+        } else if (evt.type === 'error') {
+          appendLog('✗ Error: ' + evt.text, 'err');
+          btn.disabled = false;
+          btn.innerHTML = '🚀 Retry Deploy';
+          updateStatus('dot-deploy', 'err', 'deploy: failed');
+          document.getElementById('deploy-result').innerHTML =
+            `<div class="alert error"><div class="alert-icon">✗</div><div>Deploy failed: ${evt.text}</div></div>`;
+        }
+      }
+    }
+  } catch(e) {
+    appendLog('Connection error: ' + e.message, 'err');
+    btn.disabled = false;
+    btn.innerHTML = '🚀 Retry Deploy';
+  }
+}
+
+// ── Redeploy ──
+async function startRedeploy() {
+  const conf = document.getElementById('redeploy-confirm').value;
+  if (conf !== 'DESTROY') {
+    document.getElementById('redeploy-result').innerHTML =
+      '<div class="alert error"><div class="alert-icon">✗</div><div>Type DESTROY in the confirmation field to proceed</div></div>';
+    return;
+  }
+
+  const btn = document.getElementById('btn-redeploy');
+  const logDiv = document.getElementById('redeploy-log');
+  const logBody = document.getElementById('redeploy-log-body');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="btn-spinner"></div> Redeploying...';
+  logDiv.style.display = 'block';
+  logBody.innerHTML = '';
+
+  const appendLog = (text, cls='') => {
+    const line = document.createElement('div');
+    line.className = 'log-line ' + cls;
+    line.textContent = text;
+    logBody.appendChild(line);
+    logBody.scrollTop = logBody.scrollHeight;
+  };
+
+  appendLog('⚠ Starting full redeployment — destroying all cluster VMs...', 'warn');
+
+  try {
+    const resp = await fetch('/api/deploy', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'redeploy'})});
+    if (!resp.ok || !resp.body) throw new Error('Redeploy API failed');
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw) continue;
+        let evt;
+        try { evt = JSON.parse(raw); } catch { appendLog(raw); continue; }
+        if (evt.type === 'log') {
+          let cls = 'info';
+          if (evt.text.match(/✅|✓|SUCCESS/i)) cls = 'ok';
+          else if (evt.text.match(/⚠|warn/i)) cls = 'warn';
+          else if (evt.text.match(/✗|error|fail/i)) cls = 'err';
+          else if (evt.text.match(/^==>|Step \d/)) cls = 'step';
+          appendLog(evt.text, cls);
+        } else if (evt.type === 'done') {
+          appendLog('✅ Redeployment complete!', 'ok');
+          btn.disabled = false;
+          btn.innerHTML = '✅ Redeploy Complete';
+        } else if (evt.type === 'error') {
+          appendLog('✗ ' + evt.text, 'err');
+          btn.disabled = false;
+          btn.innerHTML = '💣 Retry Redeploy';
+        }
+      }
+    }
+  } catch(e) {
+    appendLog('Error: ' + e.message, 'err');
+    btn.disabled = false;
+    btn.innerHTML = '💣 Retry Redeploy';
+  }
+}
+
+// ── Init on load ──
+window.addEventListener('load', () => {
+  // GITHUB_REPO → derive GIT_REPO_URL + update footer link
+  document.getElementById('GITHUB_REPO')?.addEventListener('input', onGithubRepoChange);
+  updateRepoLink();
+
+  // ADMIN_EMAIL → auto-fill username, name, smtp_to on blur
+  document.getElementById('ADMIN_EMAIL')?.addEventListener('blur', autofillAdmin);
+
+  // NODE_GATEWAY blur → prompt suggestion (non-blocking, just enable hint)
+  document.getElementById('NODE_GATEWAY')?.addEventListener('blur', () => {
+    const msg = document.getElementById('vip-suggest-msg');
+    const gw = document.getElementById('NODE_GATEWAY')?.value?.trim();
+    if (gw && msg && !msg.textContent) {
+      msg.textContent = '💡 Gateway set — click "Auto-suggest & ping-check" to generate VIPs';
+      msg.style.color = 'var(--text-dim)';
+    }
+  });
+
+  // Initialize IP range list
+  if (ipRanges.length === 0) { ipRanges = ['']; renderIpRangeList(); }
+  onDnsProviderChange(false);
+  loadEnv().catch(() => { renderIpRangeList(); updateRepoLink(); onDnsProviderChange(false); });
+  refreshChecklist().catch(() => {});
+  updateStatus('dot-env', 'warn', 'env: checking...');
+});
+</script>
+</body>
+</html>

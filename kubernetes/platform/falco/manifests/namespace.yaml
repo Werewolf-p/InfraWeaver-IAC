@@ -1,0 +1,16 @@
+---
+# Falco runtime security namespace.
+# pod-security: privileged — Falco requires kernel-level access via eBPF
+# probes or kernel module to monitor syscalls. This is intentional and required.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: falco
+  labels:
+    app.kubernetes.io/name: falco
+    infraweaver.io/type: platform-app
+    # PSA: privileged required — Falco DaemonSet needs hostPID, hostNetwork,
+    # and kernel module / eBPF probe access
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

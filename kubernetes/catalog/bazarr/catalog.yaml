@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/bazarr
+name: bazarr
+description: "Bazarr(https://www.bazarr.media/) is a companion application to Sonarr and Radarr. It can manage and download subtitles based on your requirements. You define your preferences by TV show or movie and "
+namespace: bazarr
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/bazarr
+categories:
+  - "MediaServer-Video"
+  - "Tools-Utilities"
+ingressroute:
+  host: bazarr.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:41:59.112Z

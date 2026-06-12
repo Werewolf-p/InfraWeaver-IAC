@@ -1,0 +1,44 @@
+---
+# ArgoCD Config Management Plugin — envsubst (design: docs/gitops-cmp-substitution.md §4b)
+#
+# Mounted into the cmp-envsubst sidecar at
+# /home/argocd/cmp-server/config/plugin.yaml (see core/argocd/values.yaml §4c).
+# Renders each app (kustomize build if a kustomization.yaml is present, else the
+# raw YAML), runs envsubst over ONLY the allowlisted config vars ($ALLOWED_VARS,
+# injected from argocd-cmp-substitutions), then fails the sync closed if any
+# secret-class ${TOKEN} survived — so a secret can never be sourced from a plain
+# ConfigMap nor leak as a literal placeholder.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmp-envsubst-plugin
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: argocd
+data:
+  plugin.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: ConfigManagementPlugin
+    metadata:
+      name: envsubst
+    spec:
+      version: v1.0
+      # Explicit opt-in for the first migration wave (design §4d, §5.3): apps name
+      # the plugin via spec.source.plugin.name=envsubst-v1.0. No `discover` block,
+      # so apps that do NOT opt in are untouched and keep imperative ownership.
+      generate:
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -eu
+            if [ -f kustomization.yaml ]; then
+              RENDER="$(kustomize build --enable-helm .)"
+            else
+              RENDER="$(find . -name '*.yaml' -type f | sort | xargs cat)"
+            fi
+            OUT="$(printf '%s' "$RENDER" | envsubst "$ALLOWED_VARS")"
+            if printf '%s' "$OUT" | grep -Eq '\$\{[A-Za-z0-9_]*(PASSWORD|TOKEN|SECRET|KEY|LOGIN|CREDENTIAL)[A-Za-z0-9_]*\}'; then
+              echo "envsubst CMP: secret-class placeholder survived substitution — refusing to sync" >&2
+              exit 1
+            fi
+            printf '%s' "$OUT"

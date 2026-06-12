@@ -1,0 +1,290 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraweaver-console
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-console
+spec:
+  # NOTE: spec.replicas is intentionally omitted — the HorizontalPodAutoscaler
+  # (hpa.yaml) is the sole owner of the replica count. Declaring it here would
+  # cause an ArgoCD/HPA drift war (selfHeal resets it, HPA scales it back).
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  # minReadySeconds ensures a new pod must be stable for 30s before old pod terminates.
+  # This prevents silent startup failures from causing a brief outage.
+  minReadySeconds: 30
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: infraweaver-console
+  template:
+    metadata:
+      labels:
+        app: infraweaver-console
+    spec:
+      priorityClassName: platform-high
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: infraweaver-console
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # MUST remain true — console uses in-cluster k8s API (game-hub, apps, cluster
+      # info, etc.) via /var/run/secrets/kubernetes.io/serviceaccount/. Setting false
+      # breaks ALL k8s features and makes everything show "unknown" in the UI.
+      automountServiceAccountToken: true
+      imagePullSecrets:
+      - name: ghcr-pull-secret
+      # Zot pull secret so ephemeral feedback PREVIEW pods (and Zot-released prod
+      # images after Publish) can pull from registry.int.${BASE_DOMAIN}.
+      - name: registry-pull-secret
+      # Spread replicas across nodes so a single Flannel disruption
+      # doesn't take down both console pods simultaneously
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: infraweaver-console
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: infraweaver-console
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: console
+        # Tag intentionally omitted — overlays/prod/kustomization.yaml is the
+        # single source of truth for the image tag (images[].newTag).
+        image: registry.int.${BASE_DOMAIN}/infraweaver-console
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "HOSTNAME=0.0.0.0 node server.js"]
+        # NOTE: the container securityContext is defined once, below (near
+        # volumeMounts). A duplicate minimal block used to sit here and was
+        # silently shadowed by the fuller one — removed to fix the dup key.
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        # Platform base domain for server-side domain resolution (lib/domain.ts).
+        # Without this the genericized console defaults to example.com at runtime.
+        # NEXT_PUBLIC_BASE_DOMAIN is also injected at BUILD time (see Dockerfile);
+        # this runtime copy covers server components. ${BASE_DOMAIN} is rendered.
+        - name: BASE_DOMAIN
+          value: ${BASE_DOMAIN}
+        - name: NEXT_PUBLIC_BASE_DOMAIN
+          value: ${BASE_DOMAIN}
+        # AUTH_URL must include /api/auth so Auth.js v5 derives basePath="/api/auth"
+        # and correctly parses actions from /api/auth/signin/authentik etc.
+        # Without the path, basePath="/" and the regex extracts "api" as the action → UnknownAction.
+        - name: AUTH_URL
+          value: https://infraweaver.int.${BASE_DOMAIN}/api/auth
+        - name: NEXTAUTH_URL
+          value: https://infraweaver.int.${BASE_DOMAIN}
+        - name: CONSOLE_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-api-console-secret
+              key: CONSOLE_API_SECRET
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: nextauth-secret
+        - name: AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: nextauth-secret
+        - name: AUTHENTIK_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: oidc-client-id
+        - name: AUTHENTIK_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: oidc-client-secret
+        - name: AUTHENTIK_ISSUER
+          value: https://auth.${BASE_DOMAIN}/application/o/infraweaver-console/
+        - name: ARGOCD_SERVER
+          value: http://argocd-server.argocd.svc.cluster.local:80
+        - name: ARGOCD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: argocd-token
+        # Optional: GitHub PAT for pipeline listing, pelican eggs, and workflow dispatch.
+        # Seed in OpenBao: openbao kv patch secret/platform/infraweaver-console github-token=<pat>
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: github-token
+              optional: true
+        - name: GITHUB_REPO
+          value: ${GITHUB_REPO}
+        - name: GIT_PROVIDER
+          value: onedev
+        - name: ONEDEV_URL
+          value: http://onedev.onedev.svc.cluster.local
+        - name: ONEDEV_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: onedev-token
+        - name: ONEDEV_PROJECT_ID
+          value: "2"
+        - name: ONEDEV_PROJECT_PATH
+          value: "InfraWeaver-platform"
+        - name: ONEDEV_BRANCH
+          value: main
+        - name: ONEDEV_USERNAME
+          value: infraweaver
+        - name: GIT_WORKTREE_ROOT
+          value: /git-cache
+        - name: GATUS_URL
+          value: http://gatus.gatus.svc.cluster.local:8080
+        - name: CLUSTER_CONTEXTS
+          value: '[{"id":"homelab-prod","displayName":"Production","isLocal":true,"tags":["production"]}]'
+        - name: LONGHORN_API
+          value: http://longhorn-frontend.longhorn-system.svc.cluster.local:80
+        - name: PROMETHEUS_URL
+          value: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        - name: NODE_ENV
+          value: production
+        - name: INFRAWEAVER_API_URL
+          value: http://infraweaver-api.infraweaver-console.svc.cluster.local:3001
+        - name: AUTHENTIK_URL
+          value: http://authentik-server.authentik.svc.cluster.local
+        - name: AUTHENTIK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: authentik-token
+        - name: CLOUDFLARE_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: cloudflare-api-token
+        - name: CF_ZONE_ID
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: cf-zone-id
+        - name: DNS_PROVIDER
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: dns-provider
+        - name: ADMIN_EMAILS
+          value: admin@${BASE_DOMAIN}
+        - name: AUTH_TRUST_HOST
+          value: "true"
+        # Feedback pipeline (Phase 3): the console calls the dispatch service
+        # directly (no n8n). Dispatch runs on the runner (${RUNNER_IP}:9876) and
+        # only accepts 10.x/loopback callers, which in-cluster pod IPs satisfy.
+        - name: DISPATCH_URL
+          value: http://${RUNNER_IP}:9876
+        # Shared HMAC secret (C-3): the console signs every mutating dispatch POST
+        # (/approve, /validate, /publish, /pipeline, /specialists/refresh) with this.
+        # Must match the DISPATCH_SECRET in the dispatch systemd unit on the runner.
+        # Sourced from OpenBao (secret/platform/infraweaver-console#dispatch-secret).
+        - name: DISPATCH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: dispatch-secret
+        # Domain gate: the feedback review dashboard + its mutating/run-log APIs
+        # only act on this canonical host, never inside a reused preview image.
+        - name: FEEDBACK_DASHBOARD_HOST
+          value: infraweaver.int.${BASE_DOMAIN}
+        # NAS provider configuration — for Synology/TrueNAS share management
+        - name: SYNOLOGY_HOST
+          value: "${SYNOLOGY_HOST}"
+        - name: SYNOLOGY_PORT
+          value: "5001"
+        - name: SYNOLOGY_USER
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: synology-user
+              optional: true
+        - name: SYNOLOGY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: synology-password
+              optional: true
+        - name: TRUENAS_HOST
+          value: "${TRUENAS_HOST}"
+        - name: TRUENAS_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: truenas-api-key
+              optional: true
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        startupProbe:
+          httpGet:
+            path: /api/ping
+            port: 3000
+          failureThreshold: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/ping
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/ping
+            port: 3000
+          initialDelaySeconds: 0
+          periodSeconds: 30
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 10"]
+        volumeMounts:
+        # Next.js needs a writable cache dir at runtime (readOnlyRootFilesystem prevents direct writes)
+        - name: nextjs-cache
+          mountPath: /app/.next/cache
+        - name: git-cache
+          mountPath: /git-cache
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+      volumes:
+      - name: nextjs-cache
+        emptyDir: {}
+      - name: git-cache
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}

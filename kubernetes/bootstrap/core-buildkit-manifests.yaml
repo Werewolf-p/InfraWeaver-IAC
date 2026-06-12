@@ -1,0 +1,37 @@
+---
+# ArgoCD Application for the in-cluster BuildKit daemon (kubernetes/core/buildkit).
+# The dispatch service (on the runner) drives `buildctl` against this daemon to
+# build the console image and push it to the Zot registry — no GitHub Actions
+# minutes, no ghcr pull limits.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-buildkit-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/buildkit
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: build
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

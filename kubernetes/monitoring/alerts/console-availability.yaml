@@ -1,0 +1,71 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: console-availability-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: console.availability
+      rules:
+        - alert: ConsolePodCountLow
+          expr: |
+            kube_deployment_status_replicas_available{namespace="infraweaver-console", deployment="infraweaver-console"} < 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "InfraWeaver Console has no available pods"
+            description: >-
+              The infraweaver-console deployment has had fewer than 1 available replica for 2 minutes.
+              Check pod status: kubectl get pods -n infraweaver-console
+
+        - alert: ConsoleHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(nginx_ingress_controller_request_duration_seconds_bucket{
+                namespace="infraweaver-console"
+              }[5m])) by (le, ingress)
+            ) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "InfraWeaver Console P95 latency > 5s"
+            description: >-
+              The 95th percentile response time for infraweaver-console has exceeded 5 seconds
+              for 5 minutes. Investigate slow queries or resource contention.
+
+        - alert: ConsoleHighErrorRate
+          expr: |
+            (
+              sum(rate(nginx_ingress_controller_requests{
+                namespace="infraweaver-console",
+                status=~"5.."
+              }[5m]))
+              /
+              sum(rate(nginx_ingress_controller_requests{
+                namespace="infraweaver-console"
+              }[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "InfraWeaver Console error rate > 5%"
+            description: >-
+              More than 5% of requests to infraweaver-console are returning 5xx errors.
+              Duration: 5 minutes. Check application logs and error boundaries.
+
+        - alert: ApiPodCountLow
+          expr: |
+            kube_deployment_status_replicas_available{namespace="infraweaver-console", deployment="infraweaver-api"} < 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "InfraWeaver API has no available pods"
+            description: >-
+              The infraweaver-api deployment has had fewer than 1 available replica for 2 minutes.

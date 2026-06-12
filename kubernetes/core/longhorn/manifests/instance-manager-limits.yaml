@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: longhorn-instance-manager-limits
+  namespace: longhorn-system
+spec:
+  limits:
+  - type: Container
+    default:
+      # Conservative limit: actual instance-manager usage is ~50-100Mi
+      memory: 256Mi
+    defaultRequest:
+      memory: 50Mi

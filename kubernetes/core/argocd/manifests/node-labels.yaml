@@ -1,0 +1,73 @@
+---
+# Ensures persistent node class labels on all cluster nodes.
+# Run: kubectl get nodes -L infraweaver.io/node-class
+# CP1/CP2 (18GB RAM) = standard, CP3 (6.6GB RAM, microserver) = small
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-label-enforcer
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: node-label-enforcer
+    infraweaver.io/automation: node-config
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: node-label-enforcer
+        spec:
+          serviceAccountName: cluster-automation
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: labeler
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  # Determine allocatable memory per node and assign node-class labels
+                  # Nodes with >15GB allocatable = standard; <=15GB = small
+                  while IFS= read -r node; do
+                    mem_ki=$(kubectl get node "$node" -o jsonpath='{.status.allocatable.memory}' | sed 's/Ki//')
+                    mem_gi=$(( mem_ki / 1024 / 1024 ))
+                    current_class=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.infraweaver\.io/node-class}' 2>/dev/null || echo "")
+
+                    if [ "$mem_gi" -ge 15 ]; then
+                      desired_class="standard"
+                    else
+                      desired_class="small"
+                    fi
+
+                    if [ "$current_class" != "$desired_class" ]; then
+                      echo "Labeling $node: infraweaver.io/node-class=$desired_class (${mem_gi}GB allocatable)"
+                      kubectl label node "$node" "infraweaver.io/node-class=${desired_class}" --overwrite
+                    fi
+                  done < <(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n')
+
+                  echo "Node label enforcement complete"
+                  kubectl get nodes -L infraweaver.io/node-class

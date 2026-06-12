@@ -1,0 +1,368 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-automation
+  namespace: argocd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-automation
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["replicationcontrollers", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets", "daemonsets"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-automation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-automation
+subjects:
+  - kind: ServiceAccount
+    name: cluster-automation
+    namespace: argocd
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-notready-remediator
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: node-notready-remediator
+    infraweaver.io/automation: self-healing
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: node-notready-remediator
+        spec:
+          serviceAccountName: cluster-automation
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: remediator
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: NOT_READY_SECONDS
+                  value: "600"
+                - name: COOLDOWN_SECONDS
+                  value: "3600"
+                - name: DRAIN_TIMEOUT
+                  value: "180s"
+                - name: DRAIN_GRACE_PERIOD
+                  value: "30"
+                - name: DISCORD_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: argocd-discord-secret
+                      key: webhook-url
+                      optional: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 128Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  now_epoch=$(date -u +%s)
+                  webhook="${DISCORD_WEBHOOK_URL:-}"
+                  actions=0
+
+                  notify() {
+                    local message="$1"
+                    [ -z "$webhook" ] && return 0
+                    curl -sS --max-time 15 --retry 2 -X POST "$webhook" \
+                      -H 'Content-Type: application/json' \
+                      -d "{\"content\":\"${message}\"}" >/dev/null 2>&1 || true
+                  }
+
+                  # Auto-uncordon nodes that were cordoned by our automation and have since recovered.
+                  for node in $(kubectl get nodes -o name | cut -d/ -f2); do
+                    ready_status=$(kubectl get node "$node" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}')
+                    unschedulable=$(kubectl get node "$node" -o jsonpath='{.spec.unschedulable}')
+                    our_result=$(kubectl get node "$node" -o jsonpath='{.metadata.annotations.infraweaver\.io/notready-remediation-result}' 2>/dev/null || true)
+
+                    [ "$ready_status" != "True" ] && continue
+                    [ "$unschedulable" != "true" ] && continue
+                    [ -z "$our_result" ] && continue
+
+                    echo "Auto-uncordoning $node (Ready + was cordoned by automation: $our_result)"
+                    kubectl uncordon "$node" >/dev/null 2>&1 || true
+                    kubectl annotate node "$node" \
+                      infraweaver.io/notready-remediation-result- \
+                      infraweaver.io/notready-remediated-at- \
+                      --overwrite >/dev/null 2>&1 || true
+                    actions=$((actions + 1))
+                    notify "✅ **Node recovered** — \`$node\` auto-uncordoned after returning to Ready."
+                  done
+
+                  for node in $(kubectl get nodes -o name | cut -d/ -f2); do
+                    ready_info=$(kubectl get node "$node" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{"\t"}{.lastTransitionTime}{end}')
+                    ready_status=$(echo "$ready_info" | awk -F '\t' '{print $1}')
+                    last_transition=$(echo "$ready_info" | awk -F '\t' '{print $2}')
+
+                    if [ "$ready_status" = "True" ]; then
+                      continue
+                    fi
+
+                    # This is a CP-only cluster — we handle CP nodes too.
+                    # Only cordon/drain if at least 2 other nodes are Ready (etcd quorum safe).
+                    ready_others=$(kubectl get nodes --no-headers | awk -v node="$node" '$1 != node && $2 ~ /^Ready/ {count++} END {print count+0}')
+                    if [ "$ready_others" -lt 2 ]; then
+                      echo "Only $ready_others other Ready node(s) — refusing remediation to preserve quorum"
+                      continue
+                    fi
+
+                    if [ -z "$last_transition" ]; then
+                      echo "Node $node has no Ready transition timestamp; skipping"
+                      continue
+                    fi
+
+                    transition_epoch=$(date -u -d "$last_transition" +%s 2>/dev/null || echo 0)
+                    down_for=$((now_epoch - transition_epoch))
+                    if [ "$down_for" -lt "$NOT_READY_SECONDS" ]; then
+                      echo "Node $node has been NotReady for ${down_for}s (< ${NOT_READY_SECONDS}s); waiting"
+                      continue
+                    fi
+
+                    last_action=$(kubectl get node "$node" -o jsonpath='{.metadata.annotations.infraweaver\.io/notready-remediated-at}' 2>/dev/null || true)
+                    if [ -n "$last_action" ]; then
+                      last_action_epoch=$(date -u -d "$last_action" +%s 2>/dev/null || echo 0)
+                      if [ $((now_epoch - last_action_epoch)) -lt "$COOLDOWN_SECONDS" ]; then
+                        echo "Node $node already remediated recently; skipping"
+                        continue
+                      fi
+                    fi
+
+                    echo "Cordoning $node after ${down_for}s NotReady"
+                    kubectl cordon "$node" >/dev/null 2>&1 || true
+
+                    if kubectl drain "$node" \
+                      --ignore-daemonsets \
+                      --delete-emptydir-data \
+                      --grace-period="$DRAIN_GRACE_PERIOD" \
+                      --timeout="$DRAIN_TIMEOUT" \
+                      --force; then
+                      result="cordoned-and-drained"
+                    else
+                      result="cordoned-drain-blocked"
+                    fi
+
+                    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    kubectl annotate node "$node" \
+                      infraweaver.io/notready-remediated-at="$timestamp" \
+                      infraweaver.io/notready-remediation-result="$result" \
+                      --overwrite >/dev/null 2>&1 || true
+
+                    actions=$((actions + 1))
+                    notify "⚠️ **Node remediation** cordoned \`$node\` after ${down_for}s NotReady (${result})."
+                  done
+
+                  echo "node-notready-remediator complete (actions=${actions})"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-memory-rebalancer
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: node-memory-rebalancer
+    infraweaver.io/automation: self-healing
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: node-memory-rebalancer
+        spec:
+          serviceAccountName: cluster-automation
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rebalancer
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: HIGH_THRESHOLD
+                  value: "85"
+                - name: LOW_THRESHOLD
+                  value: "75"
+                - name: MIN_DIFF_PERCENT
+                  value: "10"
+                - name: MIN_POD_MEMORY_MI
+                  value: "256"
+                - name: REBALANCE_COOLDOWN_SECONDS
+                  value: "7200"
+                - name: DISCORD_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: argocd-discord-secret
+                      key: webhook-url
+                      optional: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 128Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  webhook="${DISCORD_WEBHOOK_URL:-}"
+                  notify() {
+                    local message="$1"
+                    [ -z "$webhook" ] && return 0
+                    curl -sS --max-time 15 --retry 2 -X POST "$webhook" \
+                      -H 'Content-Type: application/json' \
+                      -d "{\"content\":\"${message}\"}" >/dev/null 2>&1 || true
+                  }
+
+                  high_node=$(kubectl top nodes --no-headers 2>/dev/null | awk -v limit="$HIGH_THRESHOLD" '{gsub("%", "", $5); if ($5+0 >= limit) print $5" "$1}' | sort -rn | head -1 | awk '{print $2}')
+                  high_mem=$(kubectl top nodes --no-headers 2>/dev/null | awk -v limit="$HIGH_THRESHOLD" '{gsub("%", "", $5); if ($5+0 >= limit) print $5" "$1}' | sort -rn | head -1 | awk '{print $1}')
+                  # Find least-loaded node (not the high node), regardless of LOW_THRESHOLD
+                  target_node=$(kubectl top nodes --no-headers 2>/dev/null | awk -v h="$high_node" '{gsub("%", "", $5); if ($1 != h) print $5" "$1}' | sort -n | head -1 | awk '{print $2}')
+                  target_mem=$(kubectl top nodes --no-headers 2>/dev/null | awk -v h="$high_node" '{gsub("%", "", $5); if ($1 != h) print $5" "$1}' | sort -n | head -1 | awk '{print $1}')
+                  diff=$(( ${high_mem:-0} - ${target_mem:-0} ))
+
+                  if [ -z "$high_node" ] || [ -z "$target_node" ] || [ "$high_node" = "$target_node" ]; then
+                    echo "No memory rebalance needed (no node above ${HIGH_THRESHOLD}%)"
+                    exit 0
+                  fi
+                  if [ "$diff" -lt "${MIN_DIFF_PERCENT:-10}" ]; then
+                    echo "No memory rebalance needed (${high_node}=${high_mem}%, ${target_node}=${target_mem}%, diff=${diff}% < min ${MIN_DIFF_PERCENT:-10}%)"
+                    exit 0
+                  fi
+
+                  candidate=""
+                  candidate_memory=0
+                  while IFS=$'\t' read -r namespace pod opt_in owner_kind owner_name; do
+                    [ -z "$namespace" ] && continue
+                    [ "$opt_in" != "true" ] && continue
+                    case "$namespace" in
+                      kube-system|kube-public|kube-node-lease|argocd|longhorn-system|openbao|external-secrets|velero)
+                        continue
+                        ;;
+                    esac
+                    memory_raw=$(kubectl top pod "$pod" -n "$namespace" --no-headers 2>/dev/null | awk '{print $3}')
+                    [ -z "$memory_raw" ] && continue
+                    memory_mi=$(echo "$memory_raw" | sed 's/Ki$//' | awk '{print int($1/1024)}')
+                    if echo "$memory_raw" | grep -q 'Mi$'; then
+                      memory_mi=$(echo "$memory_raw" | sed 's/Mi$//')
+                    elif echo "$memory_raw" | grep -q 'Gi$'; then
+                      memory_mi=$(echo "$memory_raw" | sed 's/Gi$//' | awk '{print int($1*1024)}')
+                    fi
+                    [ "$memory_mi" -lt "$MIN_POD_MEMORY_MI" ] && continue
+                    if [ "$memory_mi" -gt "$candidate_memory" ]; then
+                      candidate="$namespace|$pod|$owner_kind|$owner_name"
+                      candidate_memory=$memory_mi
+                    fi
+                  done < <(kubectl get pods -A --field-selector "spec.nodeName=${high_node},status.phase=Running" \
+                    -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.annotations.infraweaver\.io/rebalance-memory}{"\t"}{.metadata.ownerReferences[0].kind}{"\t"}{.metadata.ownerReferences[0].name}{"\n"}{end}')
+
+                  if [ -z "$candidate" ]; then
+                    echo "No opt-in pods available for rebalancing on $high_node"
+                    exit 0
+                  fi
+
+                  namespace=$(echo "$candidate" | cut -d'|' -f1)
+                  pod=$(echo "$candidate" | cut -d'|' -f2)
+                  owner_kind=$(echo "$candidate" | cut -d'|' -f3)
+                  owner_name=$(echo "$candidate" | cut -d'|' -f4)
+
+                  if [ "$owner_kind" = "ReplicaSet" ]; then
+                    deployment_name=$(kubectl get rs "$owner_name" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="Deployment")].name}' 2>/dev/null || true)
+                    owner_kind="Deployment"
+                    owner_name="$deployment_name"
+                  fi
+
+                  if [ -z "$owner_name" ] || { [ "$owner_kind" != "Deployment" ] && [ "$owner_kind" != "StatefulSet" ]; }; then
+                    echo "Selected pod $namespace/$pod is not controlled by a supported workload"
+                    exit 0
+                  fi
+
+                  resource=$(echo "$owner_kind" | tr '[:upper:]' '[:lower:]')
+
+                  # Per-deployment cooldown: skip if this workload was rebalanced recently
+                  last_rebalance=$(kubectl get "$resource" "$owner_name" -n "$namespace" \
+                    -o jsonpath='{.spec.template.metadata.annotations.infraweaver\.io/last-memory-rebalance-at}' 2>/dev/null || true)
+                  if [ -n "$last_rebalance" ]; then
+                    last_epoch=$(date -u -d "$last_rebalance" +%s 2>/dev/null || echo 0)
+                    now_epoch=$(date -u +%s)
+                    elapsed=$(( now_epoch - last_epoch ))
+                    if [ "$elapsed" -lt "${REBALANCE_COOLDOWN_SECONDS:-7200}" ]; then
+                      echo "Skipping $namespace/$owner_name: last rebalanced ${elapsed}s ago (cooldown=${REBALANCE_COOLDOWN_SECONDS:-7200}s)"
+                      exit 0
+                    fi
+                  fi
+
+                  patch=$(cat <<PATCH
+                  {"spec":{"template":{"metadata":{"annotations":{"infraweaver.io/last-memory-rebalance-at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","infraweaver.io/last-memory-rebalance-target":"${target_node}"}},"spec":{"affinity":{"nodeAffinity":{"preferredDuringSchedulingIgnoredDuringExecution":[{"weight":100,"preference":{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["${target_node}"]}]}}]}}}}}}
+                  PATCH
+                  )
+
+                  kubectl patch "$resource" "$owner_name" -n "$namespace" --type merge -p "$patch"
+                  kubectl delete pod "$pod" -n "$namespace" --wait=false
+
+                  notify "🧠 **Memory rebalance** moved \`${namespace}/${pod}\` toward \`${target_node}\` after \`${high_node}\` crossed ${HIGH_THRESHOLD}% memory."
+                  echo "Requested rebalance for $namespace/$pod (${candidate_memory}Mi) from $high_node to $target_node"

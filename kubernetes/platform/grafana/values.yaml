@@ -1,0 +1,80 @@
+# ── How to configure your app ────────────────────────────────────────────────
+# This is a standard Grafana Helm values override.
+# All Helm chart values can be overridden here.
+# See: https://github.com/grafana/helm-charts/tree/main/charts/grafana
+
+# Admin credentials from OpenBao via ExternalSecret (grafana-admin-secret)
+# admin.existingSecret is the correct grafana chart key (top-level existingSecret = LDAP)
+admin:
+  existingSecret: grafana-admin-secret
+  userKey: admin-user
+  passwordKey: admin-password
+
+# ── Persistence ──────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClassName: longhorn   # HA: 3 replicas (dashboards from ConfigMaps, rebuild-able)
+
+# Disable default init container (fails with overlayfs-style mounts on Talos/local-path)
+# Grafana user (472) will handle its own directory setup
+initChownData:
+  enabled: false
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  hosts:
+    - grafana.prod.local
+  paths:
+    - /
+  pathType: Prefix
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-forward-auth@kubernetescrd
+  tls:
+    - secretName: grafana-tls
+      hosts:
+        - grafana.prod.local
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Mount OIDC client secret as env var (pulled from grafana-oidc-secret ExternalSecret)
+envFromSecret: grafana-oidc-secret
+
+# ── Extra config ──────────────────────────────────────────────────────────────
+grafana.ini:
+  analytics:
+    check_for_updates: false
+  server:
+    root_url: "https://grafana.int.${BASE_DOMAIN}"
+  # ── Authentik OIDC login ────────────────────────────────────────────────────
+  auth.generic_oauth:
+    enabled: true
+    name: Authentik
+    icon: signin
+    client_id: grafana
+    # GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET injected from grafana-oidc-secret
+    client_secret: "${GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET}"
+    scopes: openid profile email
+    auth_url: "https://auth.${BASE_DOMAIN}/application/o/authorize/"
+    token_url: "https://auth.${BASE_DOMAIN}/application/o/token/"
+    api_url: "https://auth.${BASE_DOMAIN}/application/o/userinfo/"
+    # Map Authentik groups to Grafana roles
+    role_attribute_path: >-
+      contains(groups[*], 'platform-admins') && 'Admin'
+      || contains(groups[*], 'platform-viewers') && 'Viewer'
+      || 'Viewer'
+    allow_sign_up: true
+    # Allow local admin login as fallback
+    allow_assign_grafana_admin: true
+    skip_org_role_sync: false

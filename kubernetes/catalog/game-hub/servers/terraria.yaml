@@ -1,0 +1,3 @@
+# terraria-server was removed from static management.
+# Deploy via Game Hub UI: Game Hub → New Server → Pelican → Terraria (TShock)
+# The Game Hub API will create the deployment and write back this file automatically.

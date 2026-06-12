@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/prowlarr
+name: prowlarr
+description: "Prowlarr(https://github.com/Prowlarr/Prowlarr) is a indexer manager/proxy built on the popular arr .net/reactjs base stack to integrate with your various PVR apps. Prowlarr supports both Torrent Track"
+namespace: prowlarr
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/prowlarr
+categories:
+  - "Downloaders"
+  - "MediaApp-Other"
+ingressroute:
+  host: prowlarr.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:57:51.934Z

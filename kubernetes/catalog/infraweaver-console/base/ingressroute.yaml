@@ -1,0 +1,8 @@
+# IngressRoute for infraweaver.int.${BASE_DOMAIN} is managed in:
+#   kubernetes/platform/external-routes/manifests/10-routes-vpn-only.yaml
+#
+# It was moved there to follow the centralized routing pattern and to avoid
+# forward-auth middleware (InfraWeaver uses Authentik OAuth2 internally, not proxy auth).
+#
+# This file is intentionally empty to avoid ArgoCD recreating the old broken IngressRoute
+# that had forward-auth referencing a non-existent Proxy Provider.

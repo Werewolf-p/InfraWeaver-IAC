@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infraweaver-cluster-registry
+  namespace: infraweaver-system
+data:
+  clusters: |
+    [
+      {
+        "id": "local",
+        "name": "Local Cluster",
+        "description": "Cluster hosting infraweaver-api",
+        "endpoint": "https://kubernetes.default.svc",
+        "tags": ["local"],
+        "isLocal": true
+      },
+      {
+        "id": "default",
+        "name": "Default Cluster",
+        "description": "Local cluster (alias for local)",
+        "endpoint": "https://kubernetes.default.svc",
+        "tags": ["local"],
+        "isLocal": true
+      }
+    ]

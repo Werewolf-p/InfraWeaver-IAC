@@ -1,0 +1,37 @@
+# MetalLB configuration - native speaker mode (no FRR BGP)
+
+# Self-healing: ensure MetalLB components are never evicted
+controller:
+  priorityClassName: platform-critical
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+speaker:
+  priorityClassName: platform-critical
+  frr:
+    enabled: false
+  # Kubernetes 1.33+ auto-adds node.kubernetes.io/exclude-from-external-load-balancers
+  # to all control-plane nodes. On a control-plane-only cluster this prevents L2 announcements.
+  # This flag tells MetalLB speakers to ignore that label.
+  ignoreExcludeLB: true
+  # Fix liveness/readiness probes: on Talos Linux with VIP, the speaker binds metrics to the
+  # host IP (not 127.0.0.1). Remove explicit host so probes hit any interface.
+  livenessProbe:
+    initialDelaySeconds: 30
+    timeoutSeconds: 5
+    periodSeconds: 15
+    failureThreshold: 5
+  readinessProbe:
+    initialDelaySeconds: 30
+    timeoutSeconds: 5
+    periodSeconds: 15
+    failureThreshold: 5
+
+# Disable frrk8s BGP backend (we only use L2 mode)
+frrk8s:
+  enabled: false

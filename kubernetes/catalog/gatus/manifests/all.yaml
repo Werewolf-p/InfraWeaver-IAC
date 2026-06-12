@@ -1,0 +1,354 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gatus
+  labels:
+    app.kubernetes.io/name: gatus
+    infraweaver.io/type: catalog-app
+---
+# Gatus config — AUTO-GENERATED from platform.yaml
+# DO NOT edit this ConfigMap manually. Run:
+#   python3 scripts/generate-gatus-config.py
+# to regenerate after changing platform.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gatus-config
+  namespace: gatus
+data:
+  config.yaml: |
+    web:
+      port: 8080
+
+    storage:
+      type: memory
+
+    alerting:
+      discord:
+        webhook-url: "${DISCORD_WEBHOOK_URL}"
+        default-alert:
+          description: "InfraWeaver platform health alert"
+          send-on-resolved: true
+          failure-threshold: 5
+          success-threshold: 2
+
+    endpoints:
+      - name: ArgoCD
+        url: https://argocd.int.${BASE_DOMAIN}
+        interval: 60s
+        group: core
+        client:
+          insecure: true
+        conditions:
+          - "[STATUS] == 200"
+          - "[RESPONSE_TIME] < 2000"
+        alerts:
+          - type: discord
+            description: "ArgoCD is unreachable via VPN"
+
+      - name: Traefik
+        url: http://traefik-dashboard.traefik.svc.cluster.local:8080/ping
+        interval: 60s
+        group: core
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Traefik ingress is unreachable — all internal services affected"
+
+      - name: OpenBao
+        url: https://openbao.int.${BASE_DOMAIN}/v1/sys/health
+        interval: 60s
+        group: core
+        client:
+          insecure: true
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].initialized == true"
+          - "[BODY].sealed == false"
+        alerts:
+          - type: discord
+            description: "OpenBao is sealed or unreachable — secrets unavailable"
+
+      - name: Authentik SSO
+        url: https://auth.${BASE_DOMAIN}/-/health/ready/
+        interval: 60s
+        group: platform
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Authentik SSO is down — all platform logins affected"
+
+
+      - name: Grafana
+        url: https://grafana.int.${BASE_DOMAIN}/api/health
+        interval: 60s
+        group: platform
+        client:
+          insecure: true
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Grafana is unreachable"
+
+      - name: Prometheus
+        url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
+        interval: 60s
+        group: monitoring
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Prometheus is unreachable — metrics collection stopped"
+
+      - name: Loki
+        url: http://loki.monitoring.svc.cluster.local:3100/ready
+        interval: 120s
+        group: monitoring
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Loki is unreachable — log aggregation stopped"
+
+      - name: Stirling PDF
+        url: https://stirling-pdf.int.${BASE_DOMAIN}
+        interval: 120s
+        group: catalog
+        client:
+          insecure: true
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Stirling PDF is unreachable"
+
+      - name: OneDev (Git + CI)
+        url: https://onedev.${BASE_DOMAIN}
+        interval: 120s
+        group: catalog
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "OneDev is unreachable"
+
+      - name: InfraWeaver Console
+        url: https://infraweaver.int.${BASE_DOMAIN}/api/ping
+        interval: 60s
+        group: catalog
+        client:
+          insecure: true
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].status == ok"
+        alerts:
+          - type: discord
+            description: "InfraWeaver Console is unreachable"
+
+      - name: Container Registry
+        url: https://registry.int.${BASE_DOMAIN}/v2/
+        interval: 120s
+        group: catalog
+        client:
+          insecure: true
+        conditions:
+          - "[STATUS] < 500"
+        alerts:
+          - type: discord
+            description: "Container registry is unreachable"
+
+      - name: Cloudflare DNS
+        url: https://cloudflare.com
+        interval: 300s
+        group: external
+        conditions:
+          - "[STATUS] < 500"
+        alerts:
+          - type: discord
+            description: "Cloudflare unreachable — external DNS may be failing"
+
+      - name: Let's Encrypt ACME
+        url: https://acme-v02.api.letsencrypt.org/directory
+        interval: 300s
+        group: external
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: discord
+            description: "Let's Encrypt ACME unreachable — cert renewal may fail"
+---
+# ExternalSecret — pulls Discord webhook URL from OpenBao
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: gatus-discord-secret
+  namespace: gatus
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: gatus-discord-secret
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: DISCORD_WEBHOOK_URL
+      remoteRef:
+        key: secret/platform/discord
+        property: webhook_url
+        conversionStrategy: Default
+        decodingStrategy: None
+        metadataPolicy: None
+---
+# Deployment — Gatus status page
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gatus
+  namespace: gatus
+  labels:
+    app.kubernetes.io/name: gatus
+    app.kubernetes.io/instance: gatus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gatus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gatus
+      annotations:
+        config-version: "1"
+    spec:
+      priorityClassName: platform-standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Resolve *.int.${BASE_DOMAIN} to Traefik ClusterIP so health checks work
+      # from inside the cluster (MetalLB VIP ${METALLB_TRAEFIK_VIP} has hairpin NAT limitations).
+      hostAliases:
+        - ip: "10.108.119.231"
+          hostnames:
+            - "infraweaver.int.${BASE_DOMAIN}"
+            - "argocd.int.${BASE_DOMAIN}"
+            - "registry.int.${BASE_DOMAIN}"
+            - "stirling-pdf.int.${BASE_DOMAIN}"
+            - "grafana.int.${BASE_DOMAIN}"
+            - "openbao.int.${BASE_DOMAIN}"
+      containers:
+        - name: gatus
+          image: twinproduction/gatus:v5.12.1
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DISCORD_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gatus-discord-secret
+                  key: DISCORD_WEBHOOK_URL
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: gatus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gatus
+  namespace: gatus
+  labels:
+    app.kubernetes.io/name: gatus
+spec:
+  selector:
+    app.kubernetes.io/name: gatus
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+---
+# IngressRoute — status.int.${BASE_DOMAIN} (VPN-only, Authentik forward-auth)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: gatus
+  namespace: gatus
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`status.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: authentik-forward-auth
+          namespace: authentik
+        - name: security-headers
+          namespace: traefik
+      services:
+        - name: gatus
+          port: 8080
+  tls:
+    secretName: platform-int-wildcard-tls  # *.int.${BASE_DOMAIN} cert (was the non-existent platform-wildcard-int-tls)
+---
+# NetworkPolicy for Gatus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gatus-ingress
+  namespace: gatus
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gatus
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080

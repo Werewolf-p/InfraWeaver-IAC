@@ -1,0 +1,247 @@
+---
+# IngressRoutes for *.int.${BASE_DOMAIN} — internal platform services.
+#
+# Security model:
+#   DNS:  *.int.${BASE_DOMAIN} wildcard → public ingress (${PUBLIC_INGRESS_IP}), Cloudflare-proxied.
+#         Reachable from anywhere; the perimeter is identity, not network.
+#   Auth: forward-auth middleware on ALL browser-facing .int routes. Every request is
+#         validated by the Authentik embedded outpost (login + per-app group policy).
+#         No Authentik session = no access; wrong group = 403.
+#   Exception: api.int is internal-cluster-only (server-side callers, no browser/session).
+#
+# TLS: platform-int-wildcard-tls (wildcard cert via letsencrypt-dns DNS-01)
+
+# ── ArgoCD ────────────────────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: argocd-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`argocd.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: argocd-server
+          port: 80
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ── Grafana ───────────────────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`grafana.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: grafana-apps
+          port: 80
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ── Longhorn ──────────────────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: longhorn-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`longhorn.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: longhorn-frontend
+          port: 80
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ── OpenBao (Vault) ───────────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: openbao-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`openbao.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: openbao
+          port: 8200
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ── InfraWeaver Console ───────────────────────────────────────────────────────
+# Next.js management UI — perimeter via forward-auth (Authentik). The console also
+# runs its own Authentik OAuth2; the shared Authentik session means a single login.
+#
+# RSC-download fix: strip stale RSC headers on document navigations so Next.js
+# always returns text/html. Sec-Fetch-Mode:navigate covers iOS Safari.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-rsc-on-document
+  namespace: traefik
+spec:
+  headers:
+    customRequestHeaders:
+      RSC: ""
+      Next-Router-Prefetch: ""
+      Next-Router-State-Tree: ""
+      Next-Router-Segment-Prefetch: ""
+      Next-Url: ""
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: infraweaver-console-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`infraweaver.int.${BASE_DOMAIN}`) && (Header(`Sec-Fetch-Dest`, `document`) || Header(`Sec-Fetch-Mode`, `navigate`))
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+        - name: strip-rsc-on-document
+          namespace: traefik
+      services:
+        - name: infraweaver-console
+          port: 3000
+    - match: Host(`infraweaver.int.${BASE_DOMAIN}`)
+      kind: Rule
+      priority: 1
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: infraweaver-console
+          port: 3000
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ── InfraWeaver Hub API — internal cluster callers only ───────────────────────
+# Called server-side by the console pod via internal cluster DNS. No browser, no
+# Authentik session → forward-auth would break it. Gated to in-cluster sources only
+# and intentionally NOT published to public DNS.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: infraweaver-api-int
+  namespace: traefik
+  labels:
+    infraweaver.io/access-tier: internal-cluster
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`api.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: internal-cluster-only
+          namespace: traefik
+        - name: secure-headers
+          namespace: traefik
+      services:
+        - name: infraweaver-api
+          namespace: infraweaver-console
+          port: 3001
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# ── N8N Automation Platform ────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: n8n-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`n8n.int.${BASE_DOMAIN}`)
+      kind: Rule
+      # Gate at the edge with the Authentik embedded outpost via forward-auth
+      # (proxy provider "N8N Forward-Auth Provider" / app slug n8n-fwd), the same
+      # pattern every other *.int service uses. oauth2-proxy's cross-subdomain
+      # OIDC flow returned invalid_request, so forward-auth → n8n-api directly.
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: n8n-api
+          namespace: n8n-prod
+          port: 8080
+  tls:
+    secretName: platform-int-wildcard-tls

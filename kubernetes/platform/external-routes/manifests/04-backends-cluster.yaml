@@ -1,0 +1,149 @@
+---
+# ExternalName Services — allow IngressRoutes in traefik namespace to reach K8s services
+# in other namespaces without cross-namespace service references.
+
+# ArgoCD
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-server
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: argocd-server.argocd.svc.cluster.local
+  ports:
+    - port: 80
+      name: http
+---
+# Grafana (apps-grafana)
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-apps
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: grafana.apps-grafana.svc.cluster.local
+  ports:
+    - port: 80
+      name: http
+---
+# Longhorn
+apiVersion: v1
+kind: Service
+metadata:
+  name: longhorn-frontend
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: longhorn-frontend.longhorn-system.svc.cluster.local
+  ports:
+    - port: 80
+      name: http
+---
+# OpenBao
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: openbao.openbao.svc.cluster.local
+  ports:
+    - port: 8200
+      name: http
+---
+# Test website
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-website
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: test-website.test-website.svc.cluster.local
+  ports:
+    - port: 80
+      name: http
+---
+# Authentik (SSO/OIDC identity provider)
+apiVersion: v1
+kind: Service
+metadata:
+  name: authentik-server
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: authentik-server.authentik.svc.cluster.local
+  ports:
+    - port: 80
+      name: http
+---
+# Homepage (homelab dashboard)
+apiVersion: v1
+kind: Service
+metadata:
+  name: homepage
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: homepage.apps-homepage.svc.cluster.local
+  ports:
+    - port: 3000
+      name: http
+---
+# Traefik dashboard (ClusterIP — selects the Traefik pod directly for dashboard access)
+# In Traefik v3 (Helm chart v34+), the "traefik" entrypoint (API/dashboard/ping) runs on
+# container port 8080 by default. This service bridges the conventional port 8080 to 8080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik-dashboard
+  namespace: traefik
+spec:
+  selector:
+    app.kubernetes.io/name: traefik
+  ports:
+    - name: dashboard
+      port: 8080
+      targetPort: 8080
+---
+# Wazuh Dashboard (HTTPS — ExternalName to wazuh namespace)
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-dashboard
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: wazuh-dashboard.wazuh.svc.cluster.local
+  ports:
+    - port: 5601
+      name: https
+---
+# Wazuh Indexer (HTTPS — ExternalName to wazuh namespace)
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-indexer-svc
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: wazuh-indexer-svc.wazuh.svc.cluster.local
+  ports:
+    - port: 9200
+      name: https
+---
+# InfraWeaver Console (platform management UI)
+apiVersion: v1
+kind: Service
+metadata:
+  name: infraweaver-console
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: infraweaver-console.infraweaver-console.svc.cluster.local
+  ports:
+    - port: 3000
+      name: http

@@ -1,0 +1,193 @@
+---
+# ── InfraWeaver Branding Blueprint ───────────────────────────────────────────
+# Applies the InfraWeaver Space Aurora theme to Authentik 2026+.
+# Uses ::part() shadow DOM selectors + --ak-* / --pf-c-* CSS variable overrides.
+# These variables propagate into shadow DOM (CSS custom property inheritance).
+# Class selectors that target .pf-c-login__main etc. do NOT work in 2026 —
+# those elements moved into ak-flow-executor's shadow DOM.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-branding
+  namespace: authentik
+data:
+  branding.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Branding
+    entries:
+      # Create a recovery flow so password reset emails can be sent
+      - model: authentik_flows.flow
+        state: present
+        identifiers:
+          slug: default-recovery-flow
+        attrs:
+          name: Default Recovery Flow
+          title: Account Recovery
+          designation: recovery
+
+      # Bind password-change-prompt stage (order 0) — shows new-password form
+      - model: authentik_flows.flowstagebinding
+        state: present
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-recovery-flow]]
+          stage: !Find [authentik_stages_prompt.promptstage, [name, default-password-change-prompt]]
+        attrs:
+          order: 0
+
+      # Bind user-write stage (order 10) — persists new password
+      - model: authentik_flows.flowstagebinding
+        state: present
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-recovery-flow]]
+          stage: !Find [authentik_stages_user_write.userwritestage, [name, default-password-change-write]]
+        attrs:
+          order: 10
+
+      # Show username AND password on a single login form (no two-step flow).
+      # Setting password_stage on the default identification stage makes Authentik
+      # render the password field inline instead of asking for the identifier
+      # first and the password on a separate page.
+      # NOTE: user_fields MUST be resent here — patching the identification stage
+      # without it fails with "When no user fields are selected, at least one
+      # source must be selected".
+      - model: authentik_stages_identification.identificationstage
+        state: present
+        identifiers:
+          name: default-authentication-identification
+        attrs:
+          user_fields:
+            - email
+            - username
+          password_stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+
+      # Remove the standalone password stage binding so the password is not
+      # prompted a SECOND time after the inline field above (goauthentik #5407).
+      # GUARDRAIL: this removes ONLY the binding, never the password stage itself —
+      # the password is still collected/validated via the inline password_stage,
+      # so the flow always retains a password step.
+      - model: authentik_flows.flowstagebinding
+        state: absent
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+          stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+
+      # Update the default brand with InfraWeaver theme + recovery flow
+      - model: authentik_brands.brand
+        state: present
+        identifiers:
+          domain: authentik-default
+        attrs:
+          branding_title: "${BASE_DOMAIN}"
+          branding_logo: "/static/dist/assets/icons/banner.jpg"
+          branding_favicon: "/static/dist/assets/icons/favicon.png"
+          ui_user_settings_enabled: true
+          default: true
+          default_application: null
+          flow_recovery: !Find [authentik_flows.flow, [slug, default-recovery-flow]]
+          branding_custom_css: |
+            /* ── InfraWeaver Space Aurora Theme — Authentik 2026+ ──────────── */
+            /* Architecture: ak-flow-executor uses LitElement Shadow DOM.       */
+            /* Styling uses three techniques that work across shadow DOM:        */
+            /*   1. CSS custom properties on :root (inherited into shadow DOM)  */
+            /*   2. ::part() selectors for exported shadow parts                */
+            /*   3. Light-DOM element selectors for the html/body/outer frame   */
+
+            /* ── 1. CSS variable overrides (:root propagates into shadow DOM) ─ */
+            :root {
+              /* Authentik 2026 ak-* background family */
+              --ak-dark-background:         #070b14;
+              --ak-dark-background-light:   #0d1123;
+              --ak-dark-background-lighter: #151b2e;
+              --ak-dark-foreground:         #e2e8f0;
+              /* Accent — indigo replacing the default orange-red */
+              --ak-accent: #6366f1;
+
+              /* PatternFly global vars (still referenced by PF components) */
+              --pf-global--BackgroundColor--100:     #0d1123;
+              --pf-global--BackgroundColor--200:     #070b14;
+              --pf-global--primary-color--100:       #6366f1;
+              --pf-global--primary-color--200:       #4f46e5;
+              --pf-global--active-color--100:        #818cf8;
+              --pf-global--Color--100:               #e2e8f0;
+              --pf-global--Color--200:               #94a3b8;
+              --pf-global--Color--300:               #64748b;
+              --pf-global--link--Color:              #818cf8;
+              --pf-global--link--Color--hover:       #a5b4fc;
+              --pf-global--link--Color--visited:     #6366f1;
+              --pf-global--success-color--100:       #22c55e;
+              --pf-global--danger-color--100:        #ef4444;
+              --pf-global--warning-color--100:       #f59e0b;
+              --pf-global--BorderColor--100:         rgba(99,102,241,0.2);
+              --pf-global--BorderColor--200:         rgba(99,102,241,0.15);
+              --pf-global--BoxShadow--sm:            0 0 20px rgba(99,102,241,0.12);
+              --pf-global--BoxShadow--md:            0 20px 60px rgba(0,0,0,0.5);
+              --pf-global--BorderRadius--lg:         12px;
+
+              /* PF component-level vars — propagate into shadow DOM for buttons/forms */
+              --pf-c-button--m-primary--BackgroundColor:        #6366f1;
+              --pf-c-button--m-primary--hover--BackgroundColor: #4f46e5;
+              --pf-c-button--m-primary--focus--BackgroundColor: #4f46e5;
+              --pf-c-button--m-primary--active--BackgroundColor:#4338ca;
+              --pf-c-button--m-primary--Color:                  #ffffff;
+              --pf-c-button--m-primary--hover--Color:           #ffffff;
+              --pf-c-button--m-primary--focus--Color:           #ffffff;
+              --pf-c-card--BackgroundColor: rgba(10, 14, 30, 0.78);
+            }
+
+            /* ── 2. Light DOM: deep space base + aurora gradient ─────────────── */
+            html {
+              background-color: #070b14 !important;
+              min-height: 100vh;
+            }
+            body,
+            .pf-c-page__drawer,
+            .pf-c-background-image {
+              background-color: transparent !important;
+              background-image: none !important;
+            }
+            html::before {
+              content: '';
+              position: fixed;
+              inset: 0;
+              background:
+                radial-gradient(ellipse 70% 55% at 10% 5%,  rgba(99,102,241,0.22) 0%, transparent 60%),
+                radial-gradient(ellipse 55% 45% at 88% 92%, rgba(139,92,246,0.20)  0%, transparent 60%),
+                radial-gradient(ellipse 50% 60% at 92% 8%,  rgba(59,130,246,0.12)  0%, transparent 55%),
+                radial-gradient(ellipse 40% 40% at 5%  90%, rgba(16,185,129,0.07)  0%, transparent 50%),
+                radial-gradient(ellipse 60% 30% at 50% 50%, rgba(10,14,30,0.95)    0%, transparent 100%);
+              pointer-events: none;
+              z-index: 0;
+            }
+            .pf-c-login {
+              background: transparent !important;
+              position: relative;
+              z-index: 1;
+            }
+
+            /* ── 3. Shadow DOM card via ::part() selectors ───────────────────── */
+            /* ak-flow-executor exports: main, content, branding, footer         */
+            ak-flow-executor::part(main) {
+              background: rgba(10, 14, 30, 0.82) !important;
+              border: 1px solid rgba(99, 102, 241, 0.25) !important;
+              border-radius: 14px !important;
+              backdrop-filter: blur(28px) saturate(1.4) !important;
+              -webkit-backdrop-filter: blur(28px) saturate(1.4) !important;
+              box-shadow:
+                0 0 0 1px rgba(255,255,255,0.04) inset,
+                0 24px 64px rgba(0,0,0,0.65),
+                0 0 60px rgba(99,102,241,0.08) !important;
+              overflow: hidden !important;
+            }
+            ak-flow-executor::part(branding) {
+              background: rgba(5, 8, 18, 0.5) !important;
+              border-bottom: 1px solid rgba(99, 102, 241, 0.15) !important;
+              padding: 0 !important;
+            }
+            ak-flow-executor::part(content) {
+              background: transparent !important;
+            }
+            ak-flow-executor::part(footer) {
+              background: rgba(5, 8, 18, 0.6) !important;
+              border-top: 1px solid rgba(99, 102, 241, 0.08) !important;
+            }

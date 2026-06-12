@@ -1,0 +1,41 @@
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: game-hub-quota
+  namespace: game-hub
+spec:
+  hard:
+    # CPU/memory caps: prevent game servers from starving infra services.
+    # With 3 nodes at ~8 CPU / 11Gi each, cap game-hub at ~40% total cluster memory.
+    requests.memory: "16Gi"
+    requests.cpu: "12"
+    limits.memory: "32Gi"
+    limits.cpu: "24"
+    count/pods: "20"
+    persistentvolumeclaims: "20"
+    # Storage cap prevents unbounded PVC creation from filling disks
+    requests.storage: "500Gi"
+    longhorn-game.storageclass.storage.k8s.io/requests.storage: "400Gi"
+    longhorn.storageclass.storage.k8s.io/requests.storage: "100Gi"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: game-hub-limits
+  namespace: game-hub
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        memory: "1Gi"
+        cpu: "500m"
+      default:
+        memory: "4Gi"
+        cpu: "2"
+      max:
+        memory: "12Gi"
+        cpu: "6"
+      min:
+        memory: "256Mi"
+        cpu: "100m"

@@ -1,0 +1,44 @@
+---
+# PVC for "Config" → /config
+# Default path on Unraid: /mnt/user/appdata/audiobookshelf/config/
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audiobookshelf-data-0
+  namespace: audiobookshelf
+  labels:
+    app.kubernetes.io/name: audiobookshelf
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/mnt/user/appdata/audiobookshelf/config/"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+# PVC for "Metadata" → /metadata
+# Default path on Unraid: /mnt/user/appdata/audiobookshelf/metadata/
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audiobookshelf-data-1
+  namespace: audiobookshelf
+  labels:
+    app.kubernetes.io/name: audiobookshelf
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/mnt/user/appdata/audiobookshelf/metadata/"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

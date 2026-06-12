@@ -1,0 +1,36 @@
+---
+# ArgoCD Application for local-path StorageClass extras (local-path-retain).
+# The local-path provisioner itself ships with Talos — this app only manages
+# the additional StorageClass variants that live in this repository.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-local-path-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/local-path
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

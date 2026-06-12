@@ -1,0 +1,6 @@
+# IngressRoute for api.int.${BASE_DOMAIN} is managed in:
+#   kubernetes/platform/external-routes/manifests/10-routes-vpn-only.yaml
+#
+# It uses the centralized routing pattern with internal-cluster-only middleware.
+# WebSocket connections (wss://) for node agents are routed through the same IngressRoute.
+# URL: https://api.int.${BASE_DOMAIN} (internal/VPN only)

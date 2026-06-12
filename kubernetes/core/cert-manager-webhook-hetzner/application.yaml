@@ -1,0 +1,5 @@
+repoURL: https://vadimkim.github.io/cert-manager-webhook-hetzner
+targetRevision: "1.4.2"
+chart: cert-manager-webhook-hetzner
+releaseName: cert-manager-webhook-hetzner
+namespace: cert-manager

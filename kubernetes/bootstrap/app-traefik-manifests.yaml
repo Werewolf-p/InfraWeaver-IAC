@@ -1,0 +1,37 @@
+---
+# Standalone ArgoCD Application for Traefik extra manifests.
+# The Traefik Helm chart (core-traefik) manages the ingress controller.
+# This Application deploys supplementary manifests (e.g. shared IPAllowList Middlewares).
+#
+# NOTE: This is NOT picked up by the ApplicationSet (which is Helm-only).
+# It is applied by the bootstrap loop in the platform.yml workflow:
+#   for f in kubernetes/bootstrap/*.yaml; do kubectl apply -f "$f"; done
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-traefik-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/traefik/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

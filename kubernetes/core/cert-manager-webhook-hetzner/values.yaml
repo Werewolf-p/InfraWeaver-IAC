@@ -1,0 +1,23 @@
+groupName: acme.hetzner.cloud
+
+certManager:
+  namespace: cert-manager
+  serviceAccountName: cert-manager
+
+secretName:
+  - dns-provider-credentials
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+priorityClassName: platform-critical

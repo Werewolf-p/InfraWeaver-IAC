@@ -1,0 +1,59 @@
+---
+# Longhorn RecurringJob — daily backup to TrueNAS NFS for all persistent volumes
+# in the "truenas-backup" group. Any PVC annotated with:
+#   recurring-job-group.longhorn.io/truenas-backup: "enabled"
+# will be included in this backup schedule.
+#
+# Prerequisite: Longhorn backupTarget configured to nfs://${TRUENAS_HOST}/mnt/Main/k8s-longhorn-backups
+# TrueNAS NFS share is already configured with network access for ${NODE_SUBNET_CIDR}.
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: truenas-backup-daily
+  namespace: longhorn-system
+spec:
+  name: truenas-backup-daily
+  cron: "0 1 * * *"        # 01:00 nightly
+  task: backup
+  groups:
+    - truenas-backup
+  retain: 7                 # 7 daily backups per volume
+  concurrency: 2
+  labels:
+    infraweaver.io/backup: truenas
+    infraweaver.io/schedule: daily
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: truenas-backup-weekly
+  namespace: longhorn-system
+spec:
+  name: truenas-backup-weekly
+  cron: "0 2 * * 0"        # 02:00 every Sunday
+  task: backup
+  groups:
+    - truenas-backup
+  retain: 4                 # 4 weekly backups per volume
+  concurrency: 2
+  labels:
+    infraweaver.io/backup: truenas
+    infraweaver.io/schedule: weekly
+---
+# Local snapshot before the NFS backup — allows fast rollback without TrueNAS
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: local-snapshot-daily
+  namespace: longhorn-system
+spec:
+  name: local-snapshot-daily
+  cron: "0 0 * * *"        # midnight, before NFS backup
+  task: snapshot
+  groups:
+    - truenas-backup
+  retain: 3
+  concurrency: 4
+  labels:
+    infraweaver.io/backup: local
+    infraweaver.io/schedule: daily

@@ -1,0 +1,13 @@
+---
+# TLSStore default — sets *.int.${BASE_DOMAIN} wildcard as the default TLS certificate.
+# All catalog IngressRoutes use this cert via fallback when no namespace-local secret exists.
+# External routes (*.${BASE_DOMAIN}) explicitly specify platform-wildcard-tls in their routes.
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: traefik
+spec:
+  defaultCertificate:
+    secretName: platform-int-wildcard-tls
+# Any HTTPS IngressRoute without an explicit cert will use the *.int.${BASE_DOMAIN} wildcard.

@@ -1,0 +1,27 @@
+---
+# IngressRoutes for public K8s cluster apps on *.${BASE_DOMAIN}
+# Internal-only apps (argocd, grafana, longhorn, openbao) use *.int.${BASE_DOMAIN}
+# via 10-routes-vpn-only.yaml. Only public apps remain here.
+
+# ── Test website (public) ─────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: test-website-platform
+  namespace: traefik
+  labels:
+    infraweaver.io/access-tier: public
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`test.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+      services:
+        - name: test-website
+          port: 80
+  tls:
+    secretName: platform-wildcard-tls  # public *.${BASE_DOMAIN} cert (was the non-existent platform-wildcard-int-tls)

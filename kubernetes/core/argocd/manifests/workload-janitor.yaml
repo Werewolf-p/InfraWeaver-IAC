@@ -1,0 +1,92 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: workload-janitor
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: workload-janitor
+    infraweaver.io/automation: hygiene
+spec:
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: workload-janitor
+        spec:
+          serviceAccountName: cluster-automation
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: janitor
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: SUCCESS_TTL_SECONDS
+                  value: "21600"
+                - name: FAILED_TTL_SECONDS
+                  value: "43200"
+                - name: EVICTED_TTL_SECONDS
+                  value: "7200"
+              resources:
+                requests:
+                  cpu: 30m
+                  memory: 48Mi
+                limits:
+                  cpu: 150m
+                  memory: 96Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  now_epoch=$(date -u +%s)
+                  cleaned=0
+
+                  while IFS=$'\t' read -r keep namespace name succeeded failed completion created; do
+                    [ -z "$namespace" ] && continue
+                    # Honor opt-out: never reap Jobs labeled infraweaver.io/janitor-keep=true
+                    # (e.g. one-shot bootstrap Jobs that selfHeal would otherwise resurrect).
+                    [ "$keep" = "true" ] && continue
+                    timestamp="$completion"
+                    [ -z "$timestamp" ] && timestamp="$created"
+                    [ -z "$timestamp" ] && continue
+                    item_epoch=$(date -u -d "$timestamp" +%s 2>/dev/null || echo 0)
+                    age=$((now_epoch - item_epoch))
+                    if [[ "${succeeded:-0}" =~ ^[0-9]+$ ]] && [ "${succeeded:-0}" -gt 0 ] && [ "$age" -gt "$SUCCESS_TTL_SECONDS" ]; then
+                      kubectl delete job "$name" -n "$namespace" --ignore-not-found >/dev/null 2>&1 || true
+                      cleaned=$((cleaned + 1))
+                      continue
+                    fi
+                    if [[ "${failed:-0}" =~ ^[0-9]+$ ]] && [ "${failed:-0}" -gt 0 ] && [ "$age" -gt "$FAILED_TTL_SECONDS" ]; then
+                      kubectl delete job "$name" -n "$namespace" --ignore-not-found >/dev/null 2>&1 || true
+                      cleaned=$((cleaned + 1))
+                    fi
+                  done < <(kubectl get jobs -A -o jsonpath='{range .items[*]}{.metadata.labels.infraweaver\.io/janitor-keep}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.succeeded}{"\t"}{.status.failed}{"\t"}{.status.completionTime}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}')
+
+                  while IFS=$'\t' read -r namespace name reason created; do
+                    [ -z "$namespace" ] && continue
+                    [ "$reason" != "Evicted" ] && continue
+                    item_epoch=$(date -u -d "$created" +%s 2>/dev/null || echo 0)
+                    age=$((now_epoch - item_epoch))
+                    if [ "$age" -gt "$EVICTED_TTL_SECONDS" ]; then
+                      kubectl delete pod "$name" -n "$namespace" --ignore-not-found >/dev/null 2>&1 || true
+                      cleaned=$((cleaned + 1))
+                    fi
+                  done < <(kubectl get pods -A --field-selector=status.phase=Failed -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.reason}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}')
+
+                  echo "workload-janitor complete (cleaned=${cleaned})"

@@ -1,0 +1,54 @@
+---
+# catalog-game-hub-servers.yaml — ArgoCD Application for game hub server manifests.
+# Tracks kubernetes/catalog/game-hub/servers/ — each file is a game server definition.
+# Operational state (replicas, annotations) is excluded from diff so start/stop
+# actions taken via the console do not cause ArgoCD drift.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-game-hub-servers
+  namespace: argocd
+  labels:
+    infraweaver.io/type: game-server
+    infraweaver.io/source: game-hub
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/game-hub/servers
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: game-hub
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # Without this, ArgoCD still re-applies ignoreDifferences fields from git on
+      # every sync — so a console stop (live replicas -> 0) is overwritten back to
+      # the git desired state and the pod auto-restarts (stopped -> starting ->
+      # running). RespectIgnoreDifferences makes /spec/replicas cluster-owned, so
+      # the console's start/stop scaling is the source of truth and sticks.
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+      jqPathExpressions:
+        - '.metadata.annotations["infraweaver.io/last-started"]'
+        - '.metadata.annotations["infraweaver.io/last-stopped"]'
+        - '.metadata.annotations["infraweaver/maintenance"]'
+        - '.metadata.annotations["infraweaver/notes"]'
+        - '.metadata.annotations["infraweaver/player-history"]'
+        - '.spec.template.metadata.annotations["infraweaver.io/last-started"]'

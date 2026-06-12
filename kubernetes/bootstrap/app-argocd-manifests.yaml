@@ -1,0 +1,43 @@
+---
+# Standalone ArgoCD Application for extra ArgoCD ingress manifests.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-argocd-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/argocd/manifests
+    # Render this directory through the envsubst CMP (design: docs/gitops-cmp-substitution.md
+    # §4d, §5.4) so cmp-substitutions.yaml's ${PLACEHOLDER} tokens resolve to the real
+    # config values the sidecar sources at sync time. Without this, selfHeal would clobber
+    # the imperatively-applied (emit-cmp-substitutions.sh) ConfigMap with literal ${...}.
+    plugin:
+      name: envsubst-v1.0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jqPathExpressions:
+        - .status
+        - .metadata.annotations["argocd.argoproj.io/tracking-id"]

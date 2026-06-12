@@ -1,0 +1,101 @@
+name: build-cmp-tools
+
+# Builds & publishes the argocd-cmp-envsubst sidecar image to ghcr.io and pins the
+# resulting digest into kubernetes/core/argocd/values.yaml — the automated,
+# reproducible replacement for the manual `docker/argocd-cmp-tools/build.sh --push`
+# host step.
+#
+# DORMANT UNTIL CONFIGURED (mirrors sync-to-public.yml): this account's GITHUB_TOKEN
+# is denied `write_package` on ghcr (account-level restriction), so publishing needs
+# an explicit credential. One-time setup:
+#   1. Create a PAT with `write:packages` (classic) on this account.
+#   2. Add it as repo secret  GHCR_PAT.
+#   3. Set repo variable      PUBLISH_CMP_TOOLS = "true".
+# Until PUBLISH_CMP_TOOLS is set the job is skipped, so the workflow is never red.
+#
+# ARGOCD_VERSION is auto-detected from the deployed argo-cd chart appVersion
+# (chart "9.5.*" -> v3.4.3) so the sidecar's argocd binary matches the repo-server.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "docker/argocd-cmp-tools/**"
+      - ".github/workflows/build-cmp-tools.yml"
+
+permissions:
+  contents: write   # commit the repinned digest back
+  packages: write   # (GHCR_PAT does the push; kept for completeness)
+
+concurrency:
+  group: build-cmp-tools
+  cancel-in-progress: false
+
+jobs:
+  build-push-pin:
+    runs-on: ubuntu-latest
+    # Guard: only run once a publishing credential has been provisioned.
+    if: ${{ vars.PUBLISH_CMP_TOOLS == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Resolve argocd appVersion from chart 9.5.*
+        id: ver
+        run: |
+          helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
+          helm repo update argo >/dev/null
+          appv="$(helm show chart argo/argo-cd --version '9.5.*' \
+            | awk '/^appVersion:/ {gsub(/"/,"",$2); print $2}')"
+          [[ "$appv" == v* ]] || appv="v${appv}"
+          echo "argocd_version=$appv" >> "$GITHUB_OUTPUT"
+          echo "==> argo-cd chart 9.5.* -> argocd $appv"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Account-level restriction blocks GITHUB_TOKEN package writes; use the PAT.
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Build, push, and capture digest
+        id: build
+        env:
+          ARGOCD_VERSION: ${{ steps.ver.outputs.argocd_version }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"   # ghcr requires a lowercase path
+          image="ghcr.io/${owner}/argocd-cmp-envsubst"
+          docker build \
+            --build-arg "ARGOCD_VERSION=${ARGOCD_VERSION}" \
+            -t "${image}:latest" docker/argocd-cmp-tools
+          # Fail closed if the built image doesn't carry the intended argocd version.
+          built="$(docker run --rm --entrypoint argocd "${image}:latest" version --client --short | awk '{print $2}')"
+          echo "==> built image reports argocd ${built}"
+          [[ "$built" == "${ARGOCD_VERSION}" ]] || { echo "::error::built argocd $built != expected ${ARGOCD_VERSION}"; exit 1; }
+          docker push "${image}:latest"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${image}:latest")"
+          echo "==> published ${digest}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          { echo "### argocd-cmp-envsubst published"; echo "- argocd: \`${built}\`"; echo "- digest: \`${digest}\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pin digest in values.yaml and commit
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          f=kubernetes/core/argocd/values.yaml
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          # Name-agnostic: replace whatever argocd-cmp-* image is currently pinned
+          # (old name/tag/digest) with the freshly published digest.
+          sed -i -E "s#image: ghcr.io/${owner}/argocd-cmp[^[:space:]]*#image: ${DIGEST}#" "$f"
+          if git diff --quiet -- "$f"; then
+            echo "==> digest unchanged; nothing to commit"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$f"
+          git commit -m "chore(argocd-cmp): pin published sidecar digest ${DIGEST##*@}"
+          git push

@@ -1,0 +1,38 @@
+---
+# ArgoCD Application for kube-prometheus-stack raw manifests (NetworkPolicies, etc.)
+# These are K8s raw manifests that complement the Helm chart deployed via ApplicationSet.
+# Deployed to the monitoring namespace alongside kube-prometheus-stack.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-kube-prometheus-stack-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: HEAD
+    path: kubernetes/monitoring/kube-prometheus-stack/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /metadata/finalizers

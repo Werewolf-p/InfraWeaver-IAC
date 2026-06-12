@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infraweaver-api-traefik-reader
+  labels:
+    app.kubernetes.io/managed-by: infraweaver
+rules:
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps", "middlewares"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infraweaver-api-traefik-reader
+  labels:
+    app.kubernetes.io/managed-by: infraweaver
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-api
+    namespace: infraweaver-console
+roleRef:
+  kind: ClusterRole
+  name: infraweaver-api-traefik-reader
+  apiGroup: rbac.authorization.k8s.io

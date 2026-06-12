@@ -1,0 +1,149 @@
+deployment:
+  replicas: 3  # one per control-plane node (DoNotSchedule spread below) so externalTrafficPolicy:Local
+               # always has a local Traefik endpoint on whichever node MetalLB announces ${METALLB_TRAEFIK_VIP} from
+
+# Single replica: remove topology spread that required 2 nodes
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: traefik
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+          topologyKey: kubernetes.io/hostname
+
+service:
+  type: LoadBalancer
+  loadBalancerIP: "${METALLB_TRAEFIK_VIP}"
+  spec:
+    # Local preserves the real client source IP. REQUIRED for the ipAllowList
+    # middlewares (lan-only, internal-cluster-only) to work: under Cluster, kube-proxy
+    # SNATs every request to a node IP in ${NODE_SUBNET_CIDR} (an allowed range), so the
+    # allowlists would see all traffic as internal and admit it. With one Traefik pod
+    # per node (replicas:3 + DoNotSchedule spread) Local keeps HA across node reboots.
+    externalTrafficPolicy: Local
+
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+
+# Traefik API + Dashboard — enabled for internal access via traefik-dashboard ClusterIP service
+# The traefik entrypoint (port 9000) serves /api, /dashboard and /ping.
+# NOT exposed externally — only accessible via traefik.int.${BASE_DOMAIN} (internal-only middleware).
+api:
+  dashboard: true
+  insecure: false
+
+# Enable /ping endpoint on the traefik entrypoint (port 9000)
+ping:
+  entryPoint: "traefik"
+
+providers:
+  kubernetesCRD:
+    enabled: true
+    allowCrossNamespace: true      # Allow IngressRoutes to reference services in other namespaces
+    allowExternalNameServices: true # Allow routing to ExternalName services (cluster app proxying)
+  kubernetesIngress:
+    enabled: true
+    allowExternalNameServices: true
+
+rbac:
+  enabled: true
+
+# Allow Traefik to connect to backends with self-signed TLS certs (Proxmox, TrueNAS, Portainer, etc.)
+# Redirect HTTP to HTTPS at the entrypoint level (v34+ syntax via args)
+additionalArguments:
+  - "--serversTransport.insecureSkipVerify=true"
+  # Connection pool tuning — reduces overhead for keep-alive connections
+  - "--serversTransport.maxIdleConnsPerHost=200"
+  # Response buffer — prevents backends from being held while client downloads (important for slow VPN clients)
+  - "--api.disableDashboardAd=true"
+
+# Enable access logging so we can see source IPs for debugging IP allowlist issues
+logs:
+  access:
+    enabled: true
+    format: json
+    fields:
+      headers:
+        defaultMode: drop
+        names:
+          X-Forwarded-For: keep
+          X-Real-Ip: keep
+
+ports:
+  web:
+    port: 8000
+    expose:
+      default: true
+    exposedPort: 80
+    protocol: TCP
+  websecure:
+    port: 8443
+    expose:
+      default: true
+    exposedPort: 443
+    protocol: TCP
+    tls:
+      enabled: true
+    transport:
+      respondingTimeouts:
+        readTimeout: "0s"    # Disable read timeout for WebSocket / streaming backends
+        idleTimeout: "0s"    # Disable idle timeout — keeps gRPC streaming connections alive indefinitely
+      lifeCycle:
+        graceTimeOut: "30s"
+  # GitLab container registry
+  registry:
+    port: 5005
+    expose:
+      default: true
+    exposedPort: 5005
+    protocol: TCP
+  # Bitwarden / extra NodePort
+  extra-port:
+    port: 30032
+    expose:
+      default: true
+    exposedPort: 30032
+    protocol: TCP
+  # Teleport Auth
+  teleport-auth:
+    port: 3025
+    expose:
+      default: true
+    exposedPort: 3025
+    protocol: TCP
+  # Teleport Node
+  teleport-node:
+    port: 3023
+    expose:
+      default: true
+    exposedPort: 3023
+    protocol: TCP
+  # Teleport Proxy SSH
+  teleport-proxy:
+    port: 3024
+    expose:
+      default: true
+    exposedPort: 3024
+    protocol: TCP
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# Self-healing: ensure Traefik is never evicted under resource pressure
+priorityClassName: platform-critical

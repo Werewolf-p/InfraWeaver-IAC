@@ -1,0 +1,15 @@
+# Community app installed from Unraid AppFeed
+# Source: louislam/uptime-kuma
+name: uptimekuma
+description: "Self-hosted monitoring tool like 'Uptime Robot'. Monitoring uptime for HTTP(s) / TCP / Ping. Fancy, Reactive, Fast UI/UX.Notifications via Webhook, Telegram, Discord, Gotify, Slack, Pushover, Email (S"
+namespace: uptimekuma
+source: community-apps
+tier: simple
+image: louislam/uptime-kuma
+categories:
+  - "Productivity"
+  - "Tools-Utilities"
+  - "Network-Other"
+ingressroute:
+  host: uptimekuma.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T20:12:24.463Z

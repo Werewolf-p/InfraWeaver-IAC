@@ -1,0 +1,115 @@
+# VictoriaMetrics K8s Stack — lightweight replacement for kube-prometheus-stack
+#
+# RAM comparison (approximate, 3-node cluster):
+#   kube-prometheus-stack:   Prometheus ~500Mi + operator ~100Mi = ~600Mi
+#   victoria-metrics-k8s-stack: VMSingle ~200Mi + VMOperator ~80Mi = ~280Mi
+#   Net savings: ~320Mi
+#
+# VictoriaMetrics is PromQL-compatible so all existing Grafana dashboards work
+# without changes. The Grafana datasource must be updated:
+#   Old: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+#   New: http://vmsingle-victoria-metrics-k8s-stack.monitoring.svc:8429
+
+# ── VMSingle (lightweight Prometheus replacement) ──────────────────────────────
+vmsingle:
+  enabled: true
+  spec:
+    retentionPeriod: "3d"
+    storage:
+      storageClassName: local-path
+      resources:
+        requests:
+          storage: 20Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 200Mi
+      limits:
+        cpu: 500m
+        memory: 600Mi
+    # Prefer CP3 to stay off CP1 (kube-apiserver + etcd heavy)
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 80
+            preference:
+              matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                    - talos-prod-cp3
+
+# ── VMAgent (scraping agent — replaces Prometheus scraper) ────────────────────
+vmagent:
+  enabled: true
+  spec:
+    scrapeInterval: 60s
+    resources:
+      requests:
+        cpu: 50m
+        memory: 100Mi
+      limits:
+        cpu: 300m
+        memory: 300Mi
+
+# ── VMAlert (rule evaluation — replaces prometheus rules evaluation) ──────────
+vmalert:
+  enabled: true
+  spec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 50Mi
+      limits:
+        cpu: 200m
+        memory: 150Mi
+    datasource:
+      url: "http://vmsingle-victoria-metrics-k8s-stack.monitoring.svc:8429"
+    notifier:
+      url: "http://vmalertmanager-victoria-metrics-k8s-stack.monitoring.svc:9093"
+
+# ── VMAlertManager (same role as AlertManager in kube-prometheus-stack) ───────
+vmalertmanager:
+  enabled: true
+  spec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 1Gi
+    resources:
+      requests:
+        cpu: 25m
+        memory: 50Mi
+      limits:
+        cpu: 100m
+        memory: 150Mi
+
+# ── VMOperator (controller for VictoriaMetrics CRDs) ─────────────────────────
+victoria-metrics-operator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 50Mi
+    limits:
+      cpu: 200m
+      memory: 150Mi
+
+# ── Component toggles ─────────────────────────────────────────────────────────
+# Keep kube-state-metrics and node-exporter (same as kube-prometheus-stack)
+kube-state-metrics:
+  enabled: true
+prometheus-node-exporter:
+  enabled: true
+
+# Grafana is disabled — we use the standalone Grafana in platform/grafana
+grafana:
+  enabled: false
+
+# ── Kubernetes component scraping ──────────────────────────────────────────────
+defaultDashboards:
+  enabled: false   # We provision dashboards via grafana-dashboards ConfigMaps
+defaultRules:
+  enabled: true   # Keep default k8s alerts

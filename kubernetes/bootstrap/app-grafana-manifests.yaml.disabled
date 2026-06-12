@@ -1,0 +1,48 @@
+---
+# Standalone ArgoCD Application for apps-grafana namespace secrets.
+# The grafana Helm chart (apps-grafana) manages the Grafana deployment.
+# This Application deploys supplementary manifests (ExternalSecret for admin credentials).
+#
+# NOTE: This is NOT picked up by the ApplicationSet (which is Helm-only).
+# It is applied by the bootstrap loop in the platform.yml workflow:
+#   for f in kubernetes/bootstrap/*.yaml; do kubectl apply -f "$f"; done
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps-grafana-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: http://onedev.onedev.svc.cluster.local/InfraWeaver-platform
+    targetRevision: HEAD
+    path: kubernetes/platform/grafana/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: apps-grafana
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /spec/target/deletionPolicy
+        - /spec/data/0/remoteRef/conversionStrategy
+        - /spec/data/0/remoteRef/decodingStrategy
+        - /spec/data/0/remoteRef/metadataPolicy
+        - /spec/data/1/remoteRef/conversionStrategy
+        - /spec/data/1/remoteRef/decodingStrategy
+        - /spec/data/1/remoteRef/metadataPolicy

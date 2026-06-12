@@ -1,0 +1,27 @@
+# Grafana datasource ConfigMap for VictoriaMetrics
+# This is picked up by the Grafana sidecar (grafana.sidecar.datasources.enabled=true)
+# Replaces the kube-prometheus-stack datasource (prometheus:9090) with
+# VictoriaMetrics single-node (vmsingle:8429) which is PromQL-compatible.
+#
+# All existing Grafana dashboards referencing datasource "Prometheus" will
+# continue to work because we use the same datasource name "Prometheus".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource-victoriametrics
+  namespace: apps-grafana
+  labels:
+    grafana_datasource: "1"   # Grafana sidecar watches for this label
+data:
+  datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        url: http://vmsingle-victoria-metrics-k8s-stack.monitoring.svc:8429
+        access: proxy
+        isDefault: true
+        jsonData:
+          timeInterval: 60s
+          httpMethod: POST

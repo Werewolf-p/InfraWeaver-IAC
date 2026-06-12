@@ -1,0 +1,80 @@
+{
+  "name": "Automation Inbox",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbox",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "inbox"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Automation Inbox \u2014 handles both GitHub issue events and custom payloads\nconst body = $input.first().json.body || $input.first().json;\n\nlet type, title, issueBody, priority;\n\nif (body.action && body.issue) {\n  // GitHub Issue Event payload\n  const issue = body.issue;\n  const labels = (issue.labels || []).map(l => l.name);\n  \n  // Determine type from labels (bug > feature > note)\n  if (labels.includes('bug')) type = 'bug';\n  else if (labels.includes('feature')) type = 'feature';\n  else type = 'note';\n  \n  title = issue.title;\n  issueBody = issue.body || '';\n  priority = labels.includes('critical') ? 'critical' : labels.includes('high') ? 'high' : 'medium';\n  \n  // Skip non-opened events\n  if (body.action !== 'opened') {\n    return [{json: {status: 'skipped', reason: 'action=' + body.action}}];\n  }\n} else {\n  // Custom payload format (direct webhook call)\n  type = body.type || 'note';\n  title = body.title || 'Untitled';\n  issueBody = body.body || body.description || '';\n  priority = body.priority || 'medium';\n}\n\nconst fullTitle = type + ': ' + title;\nconst fullBody = '**Type:** ' + type + '\\n**Priority:** ' + priority + '\\n\\n' + issueBody;\n\nconst ghToken = '${GITHUB_TOKEN}';\nconst data = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://api.github.com/repos/${GITHUB_REPO}/issues',\n  headers: {\n    'Authorization': 'token ' + ghToken,\n    'User-Agent': 'n8n-automation',\n    'Accept': 'application/vnd.github.v3+json'\n  },\n  body: { title: fullTitle, body: fullBody, labels: [type] },\n  json: true\n});\n\nreturn [{json: {status: 'ok', issue: data.number, url: data.html_url}}];"
+      },
+      "id": "code1",
+      "name": "Create Issue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "resp1",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        690,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Create Issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Issue": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "executionTimeout": 30
+  }
+}

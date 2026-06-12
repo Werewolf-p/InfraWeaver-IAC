@@ -1,0 +1,217 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: game-hub-scale-schedule-config
+  namespace: game-hub
+data:
+  scaleDownEnabled: "true"
+  scaleUpEnabled: "true"
+  scaleDownSchedule: "0 0 * * *"
+  scaleUpSchedule: "0 8 * * *"
+  scaleDownReplicas: "0"
+  scaleUpReplicas: "1"
+  targetDeployments: "minecraft-server terraria-server valheim-server"
+  targetStatefulSets: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: game-hub-scale-scheduler
+  namespace: game-hub
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: game-hub-scale-scheduler
+  namespace: game-hub
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: game-hub-scale-scheduler
+  namespace: game-hub
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: game-hub-scale-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: game-hub-scale-scheduler
+    namespace: game-hub
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: game-hub-scale-down
+  namespace: game-hub
+  labels:
+    app.kubernetes.io/name: game-hub-scale-down
+    infraweaver.io/automation: game-hub
+spec:
+  schedule: "0 0 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: game-hub-scale-down
+        spec:
+          serviceAccountName: game-hub-scale-scheduler
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: scaler
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              envFrom:
+                - configMapRef:
+                    name: game-hub-scale-schedule-config
+              env:
+                - name: ACTION
+                  value: scale-down
+                - name: ACTION_ENABLED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: game-hub-scale-schedule-config
+                      key: scaleDownEnabled
+                - name: TARGET_REPLICAS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: game-hub-scale-schedule-config
+                      key: scaleDownReplicas
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 48Mi
+                limits:
+                  cpu: 100m
+                  memory: 96Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  if [ "${ACTION_ENABLED:-false}" != "true" ]; then
+                    echo "${ACTION} is disabled; exiting"
+                    exit 0
+                  fi
+
+                  scale_targets() {
+                    local kind="$1"
+                    local replicas="$2"
+                    local targets="$3"
+
+                    for target in $targets; do
+                      [ -n "$target" ] || continue
+                      echo "Scaling ${kind}/${target} to ${replicas}"
+                      kubectl scale "${kind}/${target}" -n game-hub --replicas="${replicas}"
+                    done
+                  }
+
+                  scale_targets deployment "${TARGET_REPLICAS}" "${TARGET_DEPLOYMENTS:-}"
+                  scale_targets statefulset "${TARGET_REPLICAS}" "${TARGET_STATEFULSETS:-}"
+
+                  echo "${ACTION} complete"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: game-hub-scale-up
+  namespace: game-hub
+  labels:
+    app.kubernetes.io/name: game-hub-scale-up
+    infraweaver.io/automation: game-hub
+spec:
+  schedule: "0 8 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: game-hub-scale-up
+        spec:
+          serviceAccountName: game-hub-scale-scheduler
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: scaler
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              envFrom:
+                - configMapRef:
+                    name: game-hub-scale-schedule-config
+              env:
+                - name: ACTION
+                  value: scale-up
+                - name: ACTION_ENABLED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: game-hub-scale-schedule-config
+                      key: scaleUpEnabled
+                - name: TARGET_REPLICAS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: game-hub-scale-schedule-config
+                      key: scaleUpReplicas
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 48Mi
+                limits:
+                  cpu: 100m
+                  memory: 96Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  if [ "${ACTION_ENABLED:-false}" != "true" ]; then
+                    echo "${ACTION} is disabled; exiting"
+                    exit 0
+                  fi
+
+                  scale_targets() {
+                    local kind="$1"
+                    local replicas="$2"
+                    local targets="$3"
+
+                    for target in $targets; do
+                      [ -n "$target" ] || continue
+                      echo "Scaling ${kind}/${target} to ${replicas}"
+                      kubectl scale "${kind}/${target}" -n game-hub --replicas="${replicas}"
+                    done
+                  }
+
+                  scale_targets deployment "${TARGET_REPLICAS}" "${TARGET_DEPLOYMENTS:-}"
+                  scale_targets statefulset "${TARGET_REPLICAS}" "${TARGET_STATEFULSETS:-}"
+
+                  echo "${ACTION} complete"

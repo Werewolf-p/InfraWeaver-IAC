@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: pawelmalak/flame
+name: flame
+description: "Flame is self-hosted startpage for your server. Easily manage your apps and bookmarks with built-in editors."
+namespace: flame
+source: community-apps
+tier: simple
+image: pawelmalak/flame
+categories:
+  - "Tools-Utilities"
+  - "Network-Web"
+ingressroute:
+  host: flame.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T06:41:30.750Z

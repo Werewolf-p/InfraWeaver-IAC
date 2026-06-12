@@ -1,0 +1,279 @@
+fullnameOverride: kube-prometheus-stack
+
+# ── Prometheus Operator ───────────────────────────────────────────────────────
+# Disable admission webhook (its cert-patch Job has hook-delete-policy:
+# hook-succeeded which causes ArgoCD to wait forever after the Job self-deletes)
+prometheusOperator:
+  priorityClassName: platform-standard
+  admissionWebhooks:
+    enabled: false
+  tls:
+    enabled: false
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+# Disabled: standalone grafana (apps-grafana namespace, 69Mi) serves the UI instead.
+# The bundled Grafana was using 511Mi and is redundant.
+grafana:
+  enabled: false
+  priorityClassName: platform-standard
+  # Admin credentials from OpenBao via ExternalSecret in monitoring namespace
+  # grafana-admin-secret provides both admin-user and admin-password keys
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  # Prefer standard nodes (CP1/CP2, 18GB RAM each)
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: infraweaver.io/node-class
+                operator: In
+                values: [standard]
+
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - grafana.prod.local
+    paths:
+      - /
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/router.middlewares: traefik-forward-auth@kubernetescrd
+
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          orgId: 1
+          folder: ""
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+  dashboards:
+    default:
+      kubernetes-cluster:
+        gnetId: 7249
+        revision: 1
+        datasource: Prometheus
+      node-exporter:
+        gnetId: 1860
+        revision: 37
+        datasource: Prometheus
+      talos-dashboard:
+        gnetId: 19764
+        revision: 1
+        datasource: Prometheus
+
+  sidecar:
+    dashboards:
+      enabled: true
+    datasources:
+      enabled: true
+
+# ── Prometheus ────────────────────────────────────────────────────────────────
+prometheus:
+  enabled: true
+  prometheusSpec:
+    priorityClassName: platform-standard
+    retention: 3d
+    retentionSize: 8GB
+    # Reduce scrape load to ease memory pressure on 8GB nodes
+    scrapeInterval: 60s
+    evaluationInterval: 60s
+    # Prevent Kubernetes from re-applying fsGroup between init containers and main container
+    # (which would reset our chown). With Never, our initContainer sets the correct ownership.
+    podMetadata:
+      annotations: {}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 2000
+      fsGroup: 2000
+      fsGroupChangePolicy: "OnRootMismatch"
+      seccompProfile:
+        type: RuntimeDefault
+    # subPath mounts in Kubernetes use overlayfs. The overlay's upper layer is a fresh
+    # root:root 755 directory created by kubelet, overriding changes to the lower layer.
+    # Fix: second init container mounts WITH subPath to chmod the overlayfs upper layer directly.
+    initContainers:
+      - name: fix-prometheus-permissions
+        image: busybox:1.36
+        command:
+          - sh
+          - -c
+          - |
+            mkdir -p /prometheus/prometheus-db
+            chmod -R a+rwx /prometheus/prometheus-db
+            chown -R 1000:2000 /prometheus/prometheus-db
+            echo "Lower layer fixed: $(ls -lan /prometheus/)"
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: true
+        volumeMounts:
+          - name: prometheus-kube-prometheus-stack-prometheus-db
+            mountPath: /prometheus
+      - name: fix-prometheus-overlay-permissions
+        image: busybox:1.36
+        command:
+          - sh
+          - -c
+          - |
+            chmod 777 /prometheus
+            chown 1000:2000 /prometheus
+            echo "Overlay upper layer fixed: $(ls -lan /prometheus)"
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: true
+        volumeMounts:
+          - name: prometheus-kube-prometheus-stack-prometheus-db
+            mountPath: /prometheus
+            subPath: prometheus-db
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+    # Prefer standard nodes (CP1/CP2, 18GB RAM each); CP3 only has 6.6GB allocatable
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: infraweaver.io/node-class
+                  operator: In
+                  values: [standard]
+
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 200m
+      limits:
+        memory: 2Gi  # Hard cap: 4x headroom over current 499Mi usage
+
+    # Scrape all ServiceMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+# ── AlertManager ─────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    priorityClassName: platform-standard
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+  config:
+    global:
+      smtp_from: "alertmanager@${BASE_DOMAIN}"
+      smtp_smarthost: "smtp.gmail.com:587"
+      smtp_auth_username: "noreply@${BASE_DOMAIN}"
+      smtp_auth_password: "changeme"   # set via ExternalSecret when Gmail app-password is ready
+      smtp_require_tls: true
+      resolve_timeout: 5m
+    route:
+      group_by: ["alertname", "namespace", "severity"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 6h
+      receiver: "discord"
+      routes:
+        - matchers: ['alertname = "Watchdog"']
+          receiver: "null"
+          continue: false
+        - matchers: ['alertname = "InfoInhibitor"']
+          receiver: "null"
+          continue: false
+        # Talos binds kube-controller-manager, kube-proxy, kube-scheduler to localhost — scraping is not possible.
+        # Both the component-down alerts AND the companion TargetDown alerts must be silenced here,
+        # otherwise TargetDown (job=kube-proxy|kube-controller-manager|kube-scheduler) leaks to Discord.
+        - matchers: ['alertname =~ "KubeControllerManagerDown|KubeProxyDown|KubeSchedulerDown"']
+          receiver: "null"
+          continue: false
+        - matchers: ['alertname = "TargetDown"', 'job =~ "kube-proxy|kube-controller-manager|kube-scheduler"']
+          receiver: "null"
+          continue: false
+        - matchers: ['severity = "critical"']
+          receiver: "all"
+          repeat_interval: 1h
+          continue: false
+        - matchers: ['severity = "warning"']
+          receiver: "discord"
+          repeat_interval: 6h
+          continue: false
+    receivers:
+      - name: "null"
+      - name: "email-admin"
+        email_configs:
+          - to: "admin@${BASE_DOMAIN}"
+            send_resolved: true
+      - name: "discord"
+        webhook_configs:
+          - url: "http://alertmanager-discord.monitoring.svc.cluster.local:9094"
+            send_resolved: true
+      - name: "all"
+        # email disabled until Gmail app-password ExternalSecret is configured
+        webhook_configs:
+          - url: "http://alertmanager-discord.monitoring.svc.cluster.local:9094"
+            send_resolved: true
+    inhibit_rules:
+      - source_matchers: ['severity = "critical"']
+        target_matchers: ['severity = "warning"']
+        equal: ["alertname", "namespace"]
+
+# ── Node Exporter ─────────────────────────────────────────────────────────────
+nodeExporter:
+  enabled: true
+  priorityClassName: platform-standard
+
+# ── kube-state-metrics ───────────────────────────────────────────────────────
+kubeStateMetrics:
+  enabled: true
+  priorityClassName: platform-standard
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── Talos-incompatible ServiceMonitors ────────────────────────────────────────
+# Talos binds these to 127.0.0.1 only — disable monitors to prevent false alerts
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeScheduler:
+  enabled: false

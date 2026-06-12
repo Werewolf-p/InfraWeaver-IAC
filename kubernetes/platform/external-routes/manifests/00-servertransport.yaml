@@ -1,0 +1,25 @@
+---
+# ServersTransport — allows Traefik to connect to backends with self-signed certs
+# Required for external HTTPS baremetal backends that present self-signed certs.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: insecure-skip-verify
+  namespace: traefik
+spec:
+  insecureSkipVerify: true
+---
+# ServersTransport — gRPC h2c keepalive for long-lived gRPC backends.
+# Keeps long-lived gRPC streams alive through mobile NATs and idle firewalls.
+# responseHeaderTimeout=0s: gRPC streams are long-lived; never timeout waiting for headers.
+# idleConnTimeout=1800s: 30-minute idle keepalive matches typical NAT timeout windows.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: grpc-h2c-keepalive
+  namespace: traefik
+spec:
+  forwardingTimeouts:
+    dialTimeout: 30s
+    responseHeaderTimeout: 0s
+    idleConnTimeout: 1800s

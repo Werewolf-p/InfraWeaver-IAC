@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: mace/qbittorrent
+name: qbittorrent
+description: "The qBittorrent project aims to provide a Free Software alternative to µTorrent. ,[br][br] [b][u][span style='color: #E80000;']Configuration[/span][/u][/b][br] [b]/config[/b] This is where qBittorrent"
+namespace: qbittorrent
+source: community-apps
+tier: simple
+image: mace/qbittorrent
+categories:
+  - "Downloaders"
+ingressroute:
+  host: qbittorrent.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T20:13:35.097Z

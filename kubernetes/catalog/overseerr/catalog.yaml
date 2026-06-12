@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/overseerr
+name: overseerr
+description: "Overseerr(https://overseerr.dev/) is a request management and media discovery tool built to work with your existing Plex ecosystem."
+namespace: overseerr
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/overseerr
+categories:
+  - "MediaServer-Video"
+  - "Tools-Utilities"
+ingressroute:
+  host: overseerr.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:13:56.710Z

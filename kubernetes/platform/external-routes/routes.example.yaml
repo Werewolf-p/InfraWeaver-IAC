@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# routes.example.yaml — TEMPLATE for exposing your own apps through Traefik.
+#
+# This directory (kubernetes/platform/external-routes/manifests/) is watched by
+# the `external-routes` ArgoCD Application. The files shipped here are the
+# InfraWeaver-owned routes (auth, argocd, grafana, console, homepage, …).
+#
+# Your OWN homelab/baremetal/external routes do NOT belong in this committed
+# template — keep them in the gitignored sibling `overlays/local/` so upstream
+# updates never conflict with (or prune) your personal services. Copy this file
+# as a starting point. `${BASE_DOMAIN}` is filled by scripts/generate-from-env.sh.
+# ─────────────────────────────────────────────────────────────────────────────
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: example-app
+  namespace: traefik
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`example-app.${BASE_DOMAIN}`)
+      kind: Rule
+      # Protect browser-facing apps with Authentik forward-auth (optional):
+      middlewares:
+        - name: authentik-forward-auth
+          namespace: traefik
+      services:
+        - name: example-app-backend   # an ExternalName Service or in-cluster Service
+          port: 443
+  tls:
+    secretName: platform-wildcard-tls
+---
+# Backend for a baremetal/external host (ExternalName Service example):
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-app-backend
+  namespace: traefik
+spec:
+  type: ExternalName
+  externalName: 10.0.0.50   # REPLACE: IP/hostname of your baremetal service
+  ports:
+    - port: 443

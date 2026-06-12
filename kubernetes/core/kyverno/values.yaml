@@ -1,0 +1,204 @@
+# Kyverno — Kubernetes-native policy engine
+# Deployed in audit mode. Policies enforce in apps/ and catalog/ namespaces.
+# Single-node-friendly: all controllers set to 1 replica.
+
+# ── Avoid CP2 (was chronically OOM-killing) ──────────────────────────────────
+# All Kyverno controllers prefer CP1/CP3 to prevent co-location with CP2 crashes.
+admissionController:
+  replicas: 1
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: NotIn
+            values: [talos-prod-cp2]
+  serviceMonitor:
+    enabled: false  # enable once Prometheus is confirmed running
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+backgroundController:
+  replicas: 1
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: NotIn
+            values: [talos-prod-cp2]
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+cleanupController:
+  replicas: 1
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: NotIn
+            values: [talos-prod-cp2]
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  cleanupJobsImage:
+    registry: docker.io
+    repository: bitnami/kubectl
+    tag: "latest"
+
+reportsController:
+  replicas: 1
+  # Increase API rate limits to prevent leader-election lease timeouts during
+  # post-crash reconciliation bursts (269+ restarts observed in 3 days).
+  clientRateLimitQPS: 30
+  clientRateLimitBurst: 60
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: NotIn
+            values: [talos-prod-cp2]
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+# ── Namespace exclusions ──────────────────────────────────────────────────────
+# System and platform namespaces are excluded from policy enforcement.
+# These have legitimate reasons to run privileged/root workloads.
+config:
+  excludeNamespacesFromAdmission:
+    - kube-system
+    - kube-public
+    - kube-node-lease
+    - kyverno
+    - argocd
+    - authentik
+    - openbao
+    - longhorn-system
+    - external-secrets
+    - cert-manager
+    - metallb-system
+    - monitoring
+    - ingress-nginx
+    - traefik
+    - external-dns
+    - dns-system
+    - local-path-storage
+    - bootstrap
+    - wiki
+    - registry
+    - velero
+    - infraweaver-console
+    - apps-grafana
+    - apps-homepage
+    - apps-gatus
+    - apps-stirling-pdf
+    - apps-onedev
+    - apps-immich
+
+# ── Webhook interception — namespace-level bypass ─────────────────────────────
+# These namespaces bypass the Kyverno webhook entirely (no policy call made).
+# Critical: prevents Kyverno downtime from blocking Longhorn, Authentik, etc.
+# Without this, failurePolicy=Fail on webhook causes ALL system pods to crash
+# whenever Kyverno is restarting (e.g. during node OOM cascade recovery).
+features:
+  forceFailurePolicyIgnore:
+    # All Kyverno webhooks use Ignore instead of Fail.
+    # Prevents: Kyverno down → Longhorn manager crash → CSI deregistration → cascade.
+    enabled: true
+  webhooks:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - kyverno
+            - argocd
+            - authentik
+            - openbao
+            - longhorn-system
+            - external-secrets
+            - cert-manager
+            - metallb-system
+            - monitoring
+            - traefik
+            - dns-system
+            - local-path-storage
+            - bootstrap
+            - wiki
+            - registry
+            - velero
+            - infraweaver-console
+
+# ── Webhook cleanup ───────────────────────────────────────────────────────────
+webhooksCleanupEnabled: true
+
+# ── Override bitnami/kubectl (1.28.5 no longer on DockerHub) ─────────────────
+# Use official registry.k8s.io/kubectl instead across all cleanup jobs.
+webhooksCleanup:
+  image:
+    registry: docker.io
+    repository: bitnami/kubectl
+    tag: "latest"
+
+policyReportsCleanup:
+  enabled: false  # Post-upgrade migration hook — not needed for fresh installs
+  image:
+    registry: docker.io
+    repository: bitnami/kubectl
+    tag: "latest"
+
+cleanupJobs:
+  admissionReports:
+    image:
+      registry: docker.io
+      repository: bitnami/kubectl
+      tag: "latest"
+  clusterAdmissionReports:
+    image:
+      registry: docker.io
+      repository: bitnami/kubectl
+      tag: "latest"
+  ephemeralReports:
+    image:
+      registry: docker.io
+      repository: bitnami/kubectl
+      tag: "latest"
+  clusterEphemeralReports:
+    image:
+      registry: docker.io
+      repository: bitnami/kubectl
+      tag: "latest"
+  updateRequests:
+    image:
+      registry: docker.io
+      repository: bitnami/kubectl
+      tag: "latest"

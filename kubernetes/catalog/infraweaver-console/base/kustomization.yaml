@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Base manifests for infraweaver-console — environment-agnostic.
+# Tunable params (image tag, replicas) live in overlays/prod/kustomization.yaml.
+resources:
+  - deployment.yaml
+  - externalsecret-ghcr.yaml
+  - externalsecret-registry.yaml
+  - externalsecret.yaml
+  - game-servers-namespace.yaml
+  - game-servers-pool.yaml
+  - hpa.yaml
+  - ingressroute.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml
+  - rbac.yaml
+  - service-account.yaml
+  - service.yaml
+  - serviceaccount.yaml

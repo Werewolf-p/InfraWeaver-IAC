@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/radarr
+name: radarr
+description: "Radarr(https://github.com/Radarr/Radarr) - A fork of Sonarr to work with movies à la Couchpotato."
+namespace: radarr
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/radarr
+categories:
+  - "MediaServer-Video"
+  - "Downloaders"
+ingressroute:
+  host: radarr.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:39:55.956Z

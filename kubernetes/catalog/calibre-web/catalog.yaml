@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/calibre-web
+name: calibre-web
+description: "Calibre-web(https://github.com/janeczku/calibre-web) is a web app providing a clean interface for browsing, reading and downloading eBooks using an existing Calibre database. It is also possible to in"
+namespace: calibre-web
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/calibre-web
+categories:
+  - "MediaApp-Books"
+  - "MediaServer-Books"
+ingressroute:
+  host: calibre-web.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:03:55.695Z

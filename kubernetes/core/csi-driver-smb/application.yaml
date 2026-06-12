@@ -1,0 +1,10 @@
+---
+# ApplicationSet parameter file for platform-core AppSet (appset-core.yaml).
+# Fields here are Go template variables used by the AppSet generator.
+# Values override goes in values.yaml alongside this file.
+# Used by plex and nas-manager for SMB share provisioning on Talos (no node-level changes needed).
+repoURL: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-smb/master/charts
+targetRevision: "v1.20.1"
+chart: csi-driver-smb
+releaseName: csi-driver-smb
+namespace: kube-system

@@ -1,0 +1,22 @@
+---
+# PVC for "Appdata" → /etc/linkding/data
+# Default path on Unraid: /mnt/user/appdata/linkding/
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linkding-data-0
+  namespace: linkding
+  labels:
+    app.kubernetes.io/name: linkding
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/mnt/user/appdata/linkding/"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

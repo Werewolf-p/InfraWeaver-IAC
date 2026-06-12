@@ -1,0 +1,175 @@
+---
+# Zot OCI registry — the self-hosted "image gallery" for the feedback pipeline.
+# Preview images (one per approved change) and the released console image are
+# pushed here by the in-cluster BuildKit, removing GitHub Actions / ghcr rate
+# limits. The host carries NO Authentik forward-auth (docker/buildkit/containerd
+# clients cannot complete SSO) — Zot's own htpasswd is the access gate.
+#
+# Secret material is provided out-of-band (NOT in git): the `zot-htpasswd`
+# Secret (registry ns). See kubernetes/core/registry/README.md.
+#
+# Namespace `registry` PSA labels are set centrally in
+# kubernetes/core/psa/namespace-labels.yaml (do not add a Namespace here).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-config
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: zot
+    infraweaver.io/component: registry
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.0",
+      "storage": { "rootDirectory": "/var/lib/registry", "dedupe": false, "gc": true, "gcDelay": "1h", "gcInterval": "24h" },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "5000",
+        "auth": { "htpasswd": { "path": "/secret/htpasswd" } }
+      },
+      "log": { "level": "info" },
+      "extensions": {
+        "search": { "enable": true },
+        "ui": { "enable": true }
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zot-data
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: zot
+    infraweaver.io/component: registry
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Node-local storage. Longhorn's network-replicated RWO volume churns
+  # (attach/detach FailedMount) under a registry's large sequential blob writes,
+  # replacing the Zot pod mid-push (500/504). local-path is far more robust here;
+  # registry images are rebuildable so single-node durability is acceptable.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zot
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: zot
+    infraweaver.io/component: registry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single RWO volume — never run two pods at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zot
+        infraweaver.io/component: registry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zot
+          image: ghcr.io/project-zot/zot-linux-amd64:v2.1.2
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "/etc/zot/config.json"]
+          ports:
+            - name: http
+              containerPort: 5000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Pushing the large console image (many node_modules layers) with
+          # dedupe/GC enabled needs headroom; 512Mi OOMs → Traefik 503 on push.
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "2", memory: 2Gi }
+          # /v2/ returns 401 under htpasswd auth (correct), and embedding creds in
+          # an HTTP probe would leak them to git — so check the listening socket.
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/zot }
+            - { name: htpasswd, mountPath: /secret, readOnly: true }
+            - { name: data, mountPath: /var/lib/registry }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: zot-config }
+        - name: htpasswd
+          secret: { secretName: zot-htpasswd }
+        - name: data
+          persistentVolumeClaim: { claimName: zot-data }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: registry
+  labels:
+    app.kubernetes.io/name: zot
+    infraweaver.io/component: registry
+spec:
+  selector:
+    app.kubernetes.io/name: zot
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+---
+# Browser/API route: registry.int.${BASE_DOMAIN} → Zot. No forward-auth (clients
+# can't SSO); secure-headers only. Lives in the traefik ns (cross-namespace
+# service ref is allowed: traefik runs with allowCrossNamespace=true).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: registry-int
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    # DNS-only (NOT Cloudflare-proxied): the OCI registry push protocol
+    # (chunked blob uploads, OCI manifest media types) is mangled by the
+    # Cloudflare proxy — pushes fail with 415 / connection-reset. Going direct to
+    # Traefik (valid wildcard TLS) makes push+pull reliable.
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`registry.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+      services:
+        - name: registry
+          namespace: registry
+          port: 5000
+  tls:
+    secretName: platform-int-wildcard-tls

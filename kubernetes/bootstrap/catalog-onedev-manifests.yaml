@@ -1,0 +1,55 @@
+---
+# catalog-onedev-manifests.yaml — ArgoCD Application for Onedev raw manifests
+# Manages kubernetes/catalog/onedev/manifests/ (IngressRoute, bootstrap job, etc.)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-onedev-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: catalog-app
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/onedev/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "onedev"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+        - /spec/target/creationPolicy
+        - /spec/target/deletionPolicy
+      jqPathExpressions:
+        - ".spec.data[].remoteRef.conversionStrategy"
+        - ".spec.data[].remoteRef.decodingStrategy"
+        - ".spec.data[].remoteRef.metadataPolicy"
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - ".spec.volumeClaimTemplates[].status"

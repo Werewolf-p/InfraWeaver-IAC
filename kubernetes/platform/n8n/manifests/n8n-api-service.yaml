@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n-api
+  namespace: n8n-prod
+spec:
+  clusterIP: 10.100.33.135
+  clusterIPs:
+  - 10.100.33.135
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - port: 8080
+    protocol: TCP
+    targetPort: 5678
+  selector:
+    app: n8n
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}

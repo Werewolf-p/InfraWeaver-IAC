@@ -1,0 +1,340 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: longhorn-backup-verifier
+  namespace: longhorn-system
+  labels:
+    app.kubernetes.io/name: longhorn-backup-verifier
+    infraweaver.io/automation: storage
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: longhorn-backup-verifier
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: verifier
+              image: python:3.12-alpine
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: LONGHORN_API
+                  value: http://longhorn-frontend.longhorn-system.svc.cluster.local:80
+                - name: MAX_BACKUP_AGE_HOURS
+                  value: "36"
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import json
+                  import os
+                  import urllib.parse
+                  import urllib.request
+                  from datetime import datetime, timezone
+
+                  api = os.environ.get("LONGHORN_API", "http://longhorn-frontend.longhorn-system.svc.cluster.local:80").rstrip("/")
+                  max_age_hours = int(os.environ.get("MAX_BACKUP_AGE_HOURS", "36"))
+
+                  def fetch(path: str):
+                    with urllib.request.urlopen(f"{api}{path}", timeout=30) as response:
+                      return json.loads(response.read().decode())
+
+                  def parse_time(raw: str | None):
+                    if not raw:
+                      return None
+                    return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+                  payload = fetch("/v1/backupvolumes")
+                  items = payload.get("data") or payload.get("items") or []
+                  if isinstance(items, dict):
+                    entries = [{"name": key, **value} for key, value in items.items()]
+                  else:
+                    entries = list(items)
+
+                  if not entries:
+                    raise SystemExit("No Longhorn backup volumes found")
+
+                  now = datetime.now(timezone.utc)
+                  stale: list[str] = []
+                  healthy = 0
+
+                  for item in entries:
+                    name = item.get("name") or item.get("id")
+                    if not name:
+                      continue
+                    backups_payload = fetch(f"/v1/backupvolumes/{urllib.parse.quote(name, safe='')}/backups")
+                    backups = backups_payload.get("data") or backups_payload.get("items") or {}
+                    if isinstance(backups, dict):
+                      backup_values = list(backups.values())
+                    else:
+                      backup_values = list(backups)
+                    latest = max((parse_time(entry.get("created")) for entry in backup_values if entry.get("created")), default=None)
+                    if latest is None:
+                      stale.append(f"{name}: no backups present")
+                      continue
+                    age_hours = (now - latest).total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                      stale.append(f"{name}: latest backup is {age_hours:.1f}h old")
+                    else:
+                      healthy += 1
+
+                  print(f"Verified {healthy} Longhorn backup volumes")
+                  if stale:
+                    print("Stale Longhorn backups detected:")
+                    for item in stale:
+                      print(f"- {item}")
+                    raise SystemExit(1)
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: longhorn-replica-guardian
+  namespace: longhorn-system
+  labels:
+    app.kubernetes.io/name: longhorn-replica-guardian
+    infraweaver.io/automation: storage
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: longhorn-replica-guardian
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: guardian
+              image: python:3.12-alpine
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: LONGHORN_API
+                  value: http://longhorn-frontend.longhorn-system.svc.cluster.local:80
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import json
+                  import os
+                  import urllib.parse
+                  import urllib.request
+
+                  api = os.environ.get("LONGHORN_API", "http://longhorn-frontend.longhorn-system.svc.cluster.local:80").rstrip("/")
+
+                  def request(path: str, payload: dict | None = None):
+                    data = None if payload is None else json.dumps(payload).encode()
+                    req = urllib.request.Request(
+                      f"{api}{path}",
+                      data=data,
+                      headers={"Content-Type": "application/json"},
+                      method="POST" if payload is not None else "GET",
+                    )
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                      raw = response.read().decode()
+                      return json.loads(raw) if raw else {}
+
+                  payload = request("/v1/volumes")
+                  volumes = payload.get("data") or payload.get("items") or []
+                  degraded = [volume for volume in volumes if str(volume.get("robustness", "")).lower() in {"degraded", "faulted"}]
+
+                  if not degraded:
+                    print("No degraded Longhorn volumes found")
+                    raise SystemExit(0)
+
+                  for volume in degraded:
+                    name = volume.get("name")
+                    desired_replicas = int(volume.get("numberOfReplicas") or 1)
+                    encoded = urllib.parse.quote(name, safe="")
+                    try:
+                      request(f"/v1/volumes/{encoded}?action=updateReplicaAutoBalance", {"replicaAutoBalance": "best-effort"})
+                      request(f"/v1/volumes/{encoded}?action=updateReplicaCount", {"replicaCount": desired_replicas})
+                      print(f"Reconciled Longhorn volume {name} with desired replicas={desired_replicas}")
+                    except Exception as e:
+                      print(f"Warning: failed to reconcile volume {name}: {e}")
+---
+# ── Orphaned Volume Cleaner ─────────────────────────────────────────────────
+# Longhorn's orphanAutoDeletion only cleans data dirs on disk, NOT Volume CRs
+# that lost their PVC (owner deleted but Volume CR persists). These show as
+# "stopped" replicas, waste disk space, and can block snapshot operations.
+#
+# This CronJob finds Volumes where:
+#   - status.kubernetesStatus.pvName is empty (no backing PV)
+#   - state is "detached"
+#   - creationTimestamp is > 2 hours old (grace period for fresh PVCs)
+# Then deletes them via the Longhorn API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: longhorn-orphan-cleaner
+  namespace: longhorn-system
+  labels:
+    app.kubernetes.io/name: longhorn-orphan-cleaner
+    infraweaver.io/automation: storage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: longhorn-orphan-cleaner
+  labels:
+    app.kubernetes.io/name: longhorn-orphan-cleaner
+    infraweaver.io/automation: storage
+rules:
+  - apiGroups: [longhorn.io]
+    resources: [volumes]
+    verbs: [get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: longhorn-orphan-cleaner
+  labels:
+    app.kubernetes.io/name: longhorn-orphan-cleaner
+    infraweaver.io/automation: storage
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: longhorn-orphan-cleaner
+subjects:
+  - kind: ServiceAccount
+    name: longhorn-orphan-cleaner
+    namespace: longhorn-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: longhorn-orphan-cleaner
+  namespace: longhorn-system
+  labels:
+    app.kubernetes.io/name: longhorn-orphan-cleaner
+    infraweaver.io/automation: storage
+spec:
+  schedule: "0 1 * * *"   # 01:00 UTC daily — low-traffic window
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: longhorn-orphan-cleaner
+        spec:
+          serviceAccountName: longhorn-orphan-cleaner
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cleaner
+              image: python:3.12-alpine
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: LONGHORN_API
+                  value: http://longhorn-frontend.longhorn-system.svc.cluster.local:80
+                - name: GRACE_HOURS
+                  value: "2"
+              command:
+                - python3
+                - -c
+                - |
+                  import json, os, sys, urllib.request, urllib.parse, urllib.error
+                  from datetime import datetime, timezone
+
+                  api = os.environ["LONGHORN_API"]
+                  grace_hours = int(os.environ.get("GRACE_HOURS", "2"))
+
+                  def request(path):
+                    req = urllib.request.Request(f"{api}{path}")
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read().decode())
+
+                  def delete(path):
+                    req = urllib.request.Request(f"{api}{path}", method="DELETE")
+                    try:
+                      urllib.request.urlopen(req, timeout=30)
+                    except urllib.error.HTTPError as e:
+                      if e.code != 404:
+                        raise
+
+                  payload = request("/v1/volumes")
+                  volumes = payload.get("data") or payload.get("items") or []
+                  deleted = 0
+
+                  for vol in volumes:
+                    name = vol.get("name", "?")
+                    state = vol.get("state", "")
+                    ks = vol.get("kubernetesStatus", {})
+                    pv  = ks.get("pvName", "")
+                    pvc = ks.get("pvcName", "")
+
+                    # Only clean detached volumes with no PV and no PVC
+                    if state != "detached" or pv or pvc:
+                      continue
+
+                    created_str = vol.get("created", "")
+                    try:
+                      created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                      age_h = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+                    except Exception:
+                      age_h = 0
+
+                    if age_h < grace_hours:
+                      print(f"  Skipping {name} — only {age_h:.1f}h old (grace={grace_hours}h)")
+                      continue
+
+                    print(f"  Deleting orphaned volume {name} (age={age_h:.1f}h, state={state})")
+                    delete(f"/v1/volumes/{urllib.parse.quote(name, safe='')}")
+                    deleted += 1
+
+                  print(f"Done — deleted {deleted} orphaned volume(s) out of {len(volumes)} total.")
+                  if deleted > 0:
+                    sys.exit(0)

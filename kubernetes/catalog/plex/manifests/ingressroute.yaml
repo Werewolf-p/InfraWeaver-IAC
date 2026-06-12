@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: plex
+  namespace: plex
+  labels:
+    app.kubernetes.io/name: plex
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`plex.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: lan-only
+          namespace: traefik
+      services:
+        - name: plex
+          port: 32400
+  tls:
+    store:
+      name: default
+      namespace: traefik

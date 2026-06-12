@@ -1,0 +1,231 @@
+---
+# Catch-all HTTP → HTTPS redirect on the web (port 80) entrypoint.
+# Excludes /.well-known/acme-challenge/ so cert-manager HTTP-01 solver can respond.
+# This replaces the entrypoint-level redirect (which can't be bypassed by routes).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: http-to-https-redirect
+  namespace: traefik
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: PathPrefix(`/`) && !PathPrefix(`/.well-known/acme-challenge/`)
+      kind: Rule
+      priority: 1
+      middlewares:
+        - name: redirect-to-https
+          namespace: traefik
+      services:
+        - name: noop@internal
+          kind: TraefikService
+---
+# Middleware: redirect-to-https — HTTP → HTTPS permanent redirect
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-to-https
+  namespace: traefik
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+# Middleware: internal-cluster-only — in-cluster callers only (no public exposure).
+# Used for machine-to-machine endpoints like api.int that have no browser and thus
+# no Authentik session. These must never be reachable from the public internet —
+# only Traefik, health probes, and in-cluster service-to-service traffic reach them.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: internal-cluster-only
+  namespace: traefik
+spec:
+  ipAllowList:
+    sourceRange:
+      - 127.0.0.1/32        # Localhost
+      - ${NODE_SUBNET_CIDR}        # K8s node VLAN — in-cluster traffic + health probes
+      - 10.244.0.0/16       # K8s pod CIDR — in-cluster service-to-service + probes
+---
+# Middleware: add-https-headers — sets X-Forwarded-Proto for backends
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: add-https-headers
+  namespace: traefik
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: "https"
+---
+# Middleware: secure-headers — browser security headers for all HTTPS responses.
+#
+# Applied automatically by new-app.sh to generated IngressRoutes.
+# Safe to apply to any app — does NOT include Content-Security-Policy
+# (that is highly app-specific and must be configured per-app if needed).
+#
+# Headers applied:
+#   HSTS          — forces HTTPS for 2 years, including subdomains, with preload
+#   X-Frame-Options — blocks your app from being embedded in iframes (clickjacking)
+#   X-Content-Type-Options — prevents MIME-type sniffing attacks
+#   Referrer-Policy — only send referrer to same-origin requests
+#   Permissions-Policy — disable sensitive browser APIs not needed by most apps
+#   X-Robots-Tag — prevents admin portals from being indexed by search engines
+#   X-Powered-By — cleared to prevent server technology fingerprinting
+#
+# Note: X-XSS-Protection removed — deprecated in modern browsers and can cause
+#       security issues on some setups. CSP is the correct mitigation.
+#
+# Usage in IngressRoute:
+#   middlewares:
+#     - name: secure-headers
+#       namespace: traefik
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: secure-headers
+  namespace: traefik
+spec:
+  headers:
+    customResponseHeaders:
+      Strict-Transport-Security: "max-age=63072000; includeSubDomains; preload"
+      X-Frame-Options: "DENY"
+      X-Content-Type-Options: "nosniff"
+      Referrer-Policy: "strict-origin-when-cross-origin"
+      Permissions-Policy: "geolocation=(), microphone=(), camera=(), payment=(), usb=(), bluetooth=()"
+      X-Robots-Tag: "noindex, nofollow"
+      X-Powered-By: ""
+---
+# Middleware: forward-auth — Authentik proxy auth for any logged-in user.
+#
+# Uses Authentik's embedded outpost forward-auth endpoint.
+# Any user with a valid Authentik session passes; unauthenticated users are
+# redirected to auth.${BASE_DOMAIN} to log in, then returned here.
+#
+# authResponseHeaders: passes Authentik user info to the backend so apps can
+# read who is logged in without doing their own auth.
+#
+# Usage in IngressRoute:
+#   middlewares:
+#     - name: forward-auth
+#       namespace: traefik
+#
+# Label convention: add label infraweaver.io/auth: proxy to your Deployment
+# to document that this app is protected (visible in: kubectl get deploy -A -L infraweaver.io/auth)
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: forward-auth
+  namespace: traefik
+spec:
+  forwardAuth:
+    address: "http://authentik-server.authentik.svc.cluster.local:80/outpost.goauthentik.io/auth/traefik"
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-authentik-username
+      - X-authentik-groups
+      - X-authentik-email
+      - X-authentik-name
+      - X-authentik-uid
+      - X-authentik-jwt
+      - X-authentik-meta-jwks
+      - X-authentik-meta-outpost
+      - X-authentik-meta-provider
+      - X-authentik-meta-app
+      - X-authentik-meta-version
+      - authorization
+---
+# Middleware: forward-auth-admin — Authentik proxy auth for platform-admins only.
+#
+# Same as forward-auth but the Authentik Application for admin-protected services
+# should have a Policy Binding requiring the `platform-admins` group.
+# Authentik returns 403 for users not in the group; Traefik passes that through.
+#
+# To apply admin-only access to a new app in Authentik:
+#   1. Create an Authentik Application + Proxy Provider pointing to your app URL
+#   2. Add a Policy Binding: Expression Policy that checks ak_is_group_member(request.user, name="platform-admins")
+#   3. Apply this middleware in the IngressRoute
+#
+# Usage in IngressRoute:
+#   middlewares:
+#     - name: forward-auth-admin
+#       namespace: traefik
+#
+# Label convention: add label infraweaver.io/auth: admin to your Deployment
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: forward-auth-admin
+  namespace: traefik
+spec:
+  forwardAuth:
+    address: "http://authentik-server.authentik.svc.cluster.local:80/outpost.goauthentik.io/auth/traefik"
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-authentik-username
+      - X-authentik-groups
+      - X-authentik-email
+      - X-authentik-name
+      - X-authentik-uid
+      - X-authentik-jwt
+      - X-authentik-meta-jwks
+      - X-authentik-meta-outpost
+      - X-authentik-meta-provider
+      - X-authentik-meta-app
+      - X-authentik-meta-version
+      - authorization
+---
+# Middleware: compress — gzip/zstd response compression for text-heavy apps.
+#
+# Add to IngressRoutes for apps that serve HTML, JSON, CSS, JS, SVG, etc.
+# Reduces response size by 60-80% for typical web apps, improving load times
+# especially over slower remote links.
+#
+# Traefik v3 supports zstd (faster, better ratio) and gzip automatically.
+# excludedContentTypes: skip compressing images/binary (already compressed)
+#
+# Usage in IngressRoute:
+#   middlewares:
+#     - name: compress
+#       namespace: traefik
+#     - name: secure-headers
+#       namespace: traefik
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: compress
+  namespace: traefik
+spec:
+  compress:
+    excludedContentTypes:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      - image/avif
+      - video/mp4
+      - video/webm
+      - audio/mpeg
+      - application/zip
+      - application/gzip
+      - application/pdf
+    minResponseBodyBytes: 1024   # Don't compress tiny responses (overhead not worth it)
+---
+# Middleware: lan-only — internal subnets + in-cluster only (no public internet).
+# For non-browser services that cannot use Authentik SSO (Docker registry pulls,
+# Plex clients, etc.). Reachable from the homelab subnets and inside the cluster;
+# everything from the public internet is denied.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: lan-only
+  namespace: traefik
+spec:
+  ipAllowList:
+    sourceRange:
+      - 127.0.0.1/32        # Localhost
+      - 10.244.0.0/16       # K8s pod CIDR — in-cluster pulls + probes
+      - ${NODE_SUBNET_CIDR}        # K8s node VLAN3
+      - ${MGMT_SUBNET_CIDR}        # Proxmox management network
+      - 192.168.1.0/24      # Home LAN

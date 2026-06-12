@@ -1,0 +1,61 @@
+# MetalLB IP Address Pools for productie
+#
+# Split pools on VLAN 3 (${NODE_SUBNET_CIDR}):
+#   vlan3-pool — general services (Traefik, n8n, etc.)
+#   dns-pool   — dedicated for CoreDNS, pinned to stable nodes only
+#
+# ${METALLB_TRAEFIK_VIP} → Traefik ingress VIP
+# ${METALLB_COREDNS_VIP} → Custom CoreDNS (dedicated pool, cp1/cp3 only)
+# ${METALLB_VIP_206} → n8n
+# Remaining addresses in ${METALLB_VLAN3_POOL_RANGE} are assigned to other
+# LoadBalancer services as needed.
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vlan3-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - ${METALLB_TRAEFIK_VIP}/32
+    - ${METALLB_VLAN3_POOL_RANGE}
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: dns-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - ${METALLB_COREDNS_VIP}/32
+  autoAssign: false
+---
+# General L2Advertisement: all control-plane nodes
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: prod-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - vlan3-pool
+  nodeSelectors:
+    - matchLabels:
+        node-role.kubernetes.io/control-plane: ""
+---
+# DNS L2Advertisement: only stable nodes (exclude cp2 due to frequent reboots)
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: dns-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - dns-pool
+  nodeSelectors:
+    - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+            - talos-prod-cp1
+            - talos-prod-cp3

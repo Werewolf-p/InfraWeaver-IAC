@@ -1,0 +1,13 @@
+# metrics-server Helm values
+# --kubelet-insecure-tls is required for homelab clusters with self-signed kubelet certs
+args:
+  - --kubelet-insecure-tls
+  - --kubelet-preferred-address-types=InternalIP,Hostname
+
+# Deploy to control-plane nodes for reliability
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+priorityClassName: system-cluster-critical

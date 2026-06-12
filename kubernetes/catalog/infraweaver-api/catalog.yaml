@@ -1,0 +1,4 @@
+name: infraweaver-api
+description: "InfraWeaver API — backend service for cluster management and console integration"
+namespace: infraweaver-console
+replicas: "2"

@@ -1,0 +1,110 @@
+---
+# In-cluster BuildKit. The dispatch service (on the runner, ${NODE_SUBNET_CIDR}) runs
+# `buildctl` against this daemon to build the console image and push it to the
+# Zot registry — no GitHub Actions minutes, no ghcr pull limits.
+#
+# Runs ROOTFUL + privileged: the Talos nodes have user namespaces disabled
+# (max_user_namespaces=0), which rootless BuildKit requires, so rootless fails
+# with "no space left on device" on the userns clone. The `build` namespace is
+# PSA `privileged` (set centrally in kubernetes/core/psa/namespace-labels.yaml)
+# and Kyverno's privileged policy is Audit-mode, so this is admitted.
+#
+# Exposed via NodePort 31234 so the runner can reach it. Plain TCP on the
+# internal network; mTLS is a future hardening step.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+  namespace: build
+  labels:
+    app.kubernetes.io/name: buildkitd
+    infraweaver.io/component: buildkit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: buildkitd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: buildkitd
+        infraweaver.io/component: buildkit
+    spec:
+      # Push to the registry via Traefik's INTERNAL MetalLB IP (${METALLB_TRAEFIK_VIP}),
+      # not the public IP. Reaching the cluster's own public IP from a pod
+      # hairpins and resets OCI blob uploads (415 / connection-reset); going
+      # straight to the internal LB avoids that while Traefik still serves the
+      # valid *.int wildcard cert (matched by SNI = registry.int.${BASE_DOMAIN}).
+      hostAliases:
+        - ip: "${METALLB_TRAEFIK_VIP}"
+          hostnames:
+            - registry.int.${BASE_DOMAIN}
+      # Never co-schedule the heavy 12Gi build on the same node as the Zot
+      # registry — the memory contention makes Zot 500/503 on large pushes.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              namespaces: ["registry"]
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: zot
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:v0.16.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --addr
+            - unix:///run/buildkit/buildkitd.sock
+            - --addr
+            - tcp://0.0.0.0:1234
+            # Allow RUN steps to opt out of BuildKit's seccomp sandbox. Node/V8
+            # segfaults (exit 139) under the default seccomp profile on the Talos
+            # kernel; builds pass `--allow security.insecure` + run with
+            # `security.insecure` to execute RUN unsandboxed.
+            - --allow-insecure-entitlement
+            - security.insecure
+          securityContext:
+            privileged: true
+          ports:
+            - name: grpc
+              containerPort: 1234
+          readinessProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          livenessProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            initialDelaySeconds: 10
+            periodSeconds: 60
+          # Next.js 16 production builds are memory-hungry; the webpack build
+          # worker SIGSEGVs (OOM) under a 6Gi cap. cp1/cp2 have ~18Gi.
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { cpu: "4", memory: 12Gi }
+          volumeMounts:
+            - name: buildkitd
+              mountPath: /var/lib/buildkit
+      volumes:
+        - name: buildkitd
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: build
+  labels:
+    app.kubernetes.io/name: buildkitd
+    infraweaver.io/component: buildkit
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: buildkitd
+  ports:
+    - name: grpc
+      port: 1234
+      targetPort: grpc
+      nodePort: 31234

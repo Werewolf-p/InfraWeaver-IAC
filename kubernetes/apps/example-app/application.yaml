@@ -1,0 +1,14 @@
+# ── Example App: hello-world ─────────────────────────────────────────────────
+# This is a minimal example showing how to add any Helm app to the platform.
+#
+# To add YOUR app:
+#   1. Copy this folder: cp -r kubernetes/apps/example-app kubernetes/apps/my-app
+#   2. Edit application.yaml — set repoURL, chart, namespace
+#   3. Edit values.yaml — configure the chart
+#   4. Push to your branch
+#   5. ArgoCD auto-deploys it!
+repoURL: https://charts.bitnami.com/bitnami
+targetRevision: "23.*"
+chart: nginx
+releaseName: example-app
+namespace: apps-example

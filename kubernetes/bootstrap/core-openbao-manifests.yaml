@@ -1,0 +1,35 @@
+---
+# Standalone ArgoCD Application for OpenBao extra manifests (RBAC, NetworkPolicies, PSA).
+# The OpenBao Helm chart (core-openbao) is managed by the root ApplicationSet.
+# This Application deploys supplementary manifests that require separate sync-wave timing.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-openbao-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/openbao/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openbao
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

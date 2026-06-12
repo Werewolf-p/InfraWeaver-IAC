@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: ghcr.io/paperless-ngx/paperless-ngx
+name: paperless-ngx
+description: "Paperless-ngx is a document management system that transforms your physical documents into a searchable online archive so you can keep, well, less paper. Paperless-ngx forked from paperless-ng to cont"
+namespace: paperless-ngx
+source: community-apps
+tier: simple
+image: ghcr.io/paperless-ngx/paperless-ngx
+categories:
+  - "Productivity"
+ingressroute:
+  host: paperless-ngx.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T21:13:17.251Z

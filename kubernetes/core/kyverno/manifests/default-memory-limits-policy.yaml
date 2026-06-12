@@ -1,0 +1,60 @@
+---
+# Mutate pods in catalog namespaces that have no memory limit set.
+# Prevents unbounded memory growth from causing node OOM crashes.
+# Excluded: system namespaces that manage their own resources.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: set-default-memory-limits
+  annotations:
+    policies.kyverno.io/title: Set Default Memory Limits
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Adds default memory request (64Mi) and limit (1Gi) to containers that
+      have no memory resources set. Targets catalog application namespaces only.
+      Prevents a single uncapped pod from consuming all node memory and
+      triggering an OOM crash of the entire Talos node.
+spec:
+  background: false
+  rules:
+    - name: add-default-memory-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/part-of
+                    operator: In
+                    values: [infraweaver]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - argocd
+                - longhorn-system
+                - monitoring
+                - traefik
+                - cert-manager
+                - kyverno
+                - external-secrets
+                - openbao
+                - velero
+                - authentik
+                - game-hub  # game-hub has its own LimitRange
+      mutate:
+        foreach:
+          - list: "request.object.spec.containers"
+            patchStrategicMerge:
+              spec:
+                containers:
+                  - name: "{{ element.name }}"
+                    resources:
+                      requests:
+                        memory: "{{ element.resources.requests.memory || '64Mi' }}"
+                      limits:
+                        memory: "{{ element.resources.limits.memory || '1Gi' }}"

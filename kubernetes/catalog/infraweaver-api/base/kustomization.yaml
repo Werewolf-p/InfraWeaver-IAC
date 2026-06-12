@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Base manifests for infraweaver-api — environment-agnostic.
+# Tunable params (image tag, scaling) live in overlays/prod/kustomization.yaml.
+resources:
+  - cluster-registry-configmap.yaml
+  - deployment.yaml
+  - external-secret.yaml
+  - hpa.yaml
+  - ingressroute.yaml
+  - namespace.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml
+  - rbac.yaml
+  - service.yaml
+  - serviceaccount.yaml
+  - traefik-reader-rbac.yaml

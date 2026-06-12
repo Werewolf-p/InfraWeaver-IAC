@@ -1,0 +1,39 @@
+---
+# Kyverno ClusterPolicy — Block :latest image tags
+# Source: ArgoCD best practices (immutable manifests) + OWASP K8s security
+# Mode: Enforce — blocks admission of pods with :latest tags
+# Scope: catalog and apps namespaces only (core platform excluded — uses pinned tags)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      The ':latest' tag is mutable and can lead to unexpected changes.
+      Require all container images in catalog/apps namespaces to use
+      a specific version tag.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaceSelector:
+                matchExpressions:
+                  - key: infraweaver.io/type
+                    operator: In
+                    values:
+                      - catalog-app
+      validate:
+        message: "Image tag ':latest' is not allowed. Pin to a specific version (e.g. 'myapp:1.2.3')."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"

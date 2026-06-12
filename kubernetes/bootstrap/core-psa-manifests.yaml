@@ -1,0 +1,39 @@
+---
+# ArgoCD Application for Pod Security Admission namespace labels.
+# Applies pod-security.kubernetes.io/* labels to all platform namespaces so that
+# Kubernetes' built-in admission controller enforces the right security profile
+# for each namespace, independent of Kyverno.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-psa-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/psa
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: false    # never delete namespaces that were once labeled
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  # tracking-id ignoreDifferences now handled globally in argocd-cm:
+  # resource.customizations.ignoreDifferences.core_Namespace

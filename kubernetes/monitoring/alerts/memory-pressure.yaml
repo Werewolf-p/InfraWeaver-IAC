@@ -1,0 +1,40 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: memory-pressure-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: memory.pressure
+      rules:
+        - alert: NodeMemoryPressure
+          expr: |
+            (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.instance }} memory usage > 85%"
+            description: >-
+              Node {{ $labels.instance }} has sustained memory usage above 85% for 5 minutes.
+              Check eviction thresholds, kubelet reservations, and the memory heatmap in InfraWeaver.
+
+        - alert: PodOOMKillRisk
+          expr: |
+            (
+              container_memory_working_set_bytes{container!="",container!="POD",image!=""}
+              /
+              on(namespace, pod, container)
+              max by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory", unit="byte"} > 0)
+            ) * 100 > 90
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is nearing its memory limit"
+            description: >-
+              Container {{ $labels.container }} in {{ $labels.namespace }}/{{ $labels.pod }}
+              has exceeded 90% of its configured memory limit for more than 3 minutes.

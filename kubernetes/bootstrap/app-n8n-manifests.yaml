@@ -1,0 +1,45 @@
+---
+# platform-n8n — N8N workflow automation platform
+# Managed via raw Kubernetes manifests (git path) rather than helm chart.
+# Switched from charts.n8n.io helm chart (broken DNS) to git-managed manifests.
+# Resources are pinned at n8nio/n8n:1.123.50 (latest 1.x stable) + PostgreSQL.
+# Update by bumping image tag in kubernetes/platform/n8n/manifests/n8n-deployment.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-n8n
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/platform/n8n/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: n8n-prod
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/clusterIP
+        - /spec/clusterIPs

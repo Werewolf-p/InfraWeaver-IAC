@@ -1,0 +1,454 @@
+{
+  "name": "Dev Feedback \u2192 Approved Fix Flow",
+  "meta": {
+    "description": "Receives APPROVED in-console developer feedback, requires a human approval gate, dispatches a coding agent to implement the fix, tests in the live environment, then routes the resulting commit to GitHub (core/functionality changes) or OneDev (config/cluster-state changes). Nothing runs without authentication AND explicit human approval."
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "timezone": "UTC"
+  },
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook: Approved Feedback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1040,
+        320
+      ],
+      "webhookId": "dev-feedback-fix-flow",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dev-feedback-fix-flow",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "notes": "SECURITY: header auth credential 'feedback-webhook-token' (X-Feedback-Token) must match. Only the InfraWeaver console (server-side, after an admin sets status=approved) calls this. Reject anything else."
+    },
+    {
+      "id": "validate-payload",
+      "name": "Validate Approved Entry",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        320
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "leftValue": "={{ $json.body.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "Defense in depth: only entries explicitly marked 'approved' by an admin proceed. Everything else is dropped."
+    },
+    {
+      "id": "human-approval-gate",
+      "name": "Human Approval Gate",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        -540,
+        220
+      ],
+      "parameters": {
+        "operation": "completion",
+        "formTitle": "Confirm Automated Fix",
+        "formDescription": "A coding agent is about to implement a fix for this feedback. Review the details, then approve to proceed. This is a hard stop \u2014 the workflow CANNOT continue until a human approves here.",
+        "responseMode": "responseNode"
+      },
+      "notes": "MANUAL APPROVAL GATE (human-in-the-loop). The workflow pauses here and waits for a human to confirm before any code is generated or pushed. Use n8n's Wait/Approval mechanism; no auto-continue."
+    },
+    {
+      "id": "dispatch-agent",
+      "name": "Dispatch Coding Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -300,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CODING_AGENT_DISPATCH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"task\": \"Implement fix for approved developer feedback\",\n  \"feedbackId\": \"{{ $('Webhook: Approved Feedback').item.json.body.id }}\",\n  \"description\": \"{{ $('Webhook: Approved Feedback').item.json.body.description }}\",\n  \"pagePath\": \"{{ $('Webhook: Approved Feedback').item.json.body.pagePath }}\",\n  \"type\": \"{{ $('Webhook: Approved Feedback').item.json.body.type }}\",\n  \"agent\": \"claude\",\n  \"branchPrefix\": \"n8n/feedback-fix\"\n}",
+        "options": {}
+      },
+      "notes": "PLACEHOLDER: dispatches Copilot CLI / Claude Code to implement the fix. Real endpoint + token come from n8n env/credentials ($env.CODING_AGENT_DISPATCH_URL, header-auth credential). NEVER embed real secrets in this file."
+    },
+    {
+      "id": "test-live-env",
+      "name": "Test in Live Environment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -60,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://infraweaver.${BASE_DOMAIN}/api/self-test",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"scope\": \"{{ $('Webhook: Approved Feedback').item.json.body.pagePath }}\",\n  \"feedbackId\": \"{{ $('Webhook: Approved Feedback').item.json.body.id }}\"\n}",
+        "options": {}
+      },
+      "notes": "Runs the console self-test / smoke checks against the live environment to verify the agent's fix did not regress anything."
+    },
+    {
+      "id": "verify-fix",
+      "name": "Verify Fix Result",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        180,
+        220
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.passed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      },
+      "notes": "Only proceed to push if tests passed. On failure, route to the rollback/notify branch."
+    },
+    {
+      "id": "route-change-type",
+      "name": "Route: Core vs Config",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        420,
+        160
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "core",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "combinator": "or",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Dispatch Coding Agent').item.json.changeClass }}",
+                    "rightValue": "core",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $('Dispatch Coding Agent').item.json.changeClass }}",
+                    "rightValue": "functionality",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "config",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "combinator": "or",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Dispatch Coding Agent').item.json.changeClass }}",
+                    "rightValue": "config",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $('Dispatch Coding Agent').item.json.changeClass }}",
+                    "rightValue": "cluster-state",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "PUSH POLICY ROUTING: CORE/functionality changes \u2192 GitHub remote; CONFIG/cluster-state changes \u2192 OneDev remote only."
+    },
+    {
+      "id": "push-github",
+      "name": "Push to GitHub (core)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        680,
+        80
+      ],
+      "parameters": {
+        "command": "=git -C /workspace/repo push https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${GITHUB_REPO}.git HEAD:refs/heads/n8n/feedback-fix-{{ $('Webhook: Approved Feedback').item.json.body.id }}"
+      },
+      "notes": "CORE / functionality changes go to the GitHub remote ONLY. Token from $env.GITHUB_TOKEN (n8n credential). Pushes to a feature branch; a draft PR is opened for human review \u2014 never to main directly. PLACEHOLDER: no real secret embedded."
+    },
+    {
+      "id": "push-onedev",
+      "name": "Push to OneDev (config)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        680,
+        260
+      ],
+      "parameters": {
+        "command": "=git -C /workspace/repo push https://${ONEDEV_USER}:${ONEDEV_TOKEN}@onedev.${BASE_DOMAIN}/${ONEDEV_PROJECT}.git HEAD:refs/heads/n8n/feedback-fix-{{ $('Webhook: Approved Feedback').item.json.body.id }}"
+      },
+      "notes": "CONFIG / cluster-state changes go to the OneDev remote ONLY (never GitHub). Token from $env.ONEDEV_TOKEN (n8n credential). PLACEHOLDER: no real secret embedded."
+    },
+    {
+      "id": "notify-complete",
+      "name": "Notify + Update Console Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        160
+      ],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://infraweaver.${BASE_DOMAIN}/api/feedback/{{ $('Webhook: Approved Feedback').item.json.body.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"status\": \"dispatched\",\n  \"reviewNote\": \"Fix dispatched by n8n; awaiting PR/MR review.\"\n}",
+        "options": {}
+      },
+      "notes": "Writes status back to the console feedback ConfigMap (admin-gated API). Keeps the audit trail in sync."
+    },
+    {
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1180,
+        160
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true, \"feedbackId\": \"{{ $('Webhook: Approved Feedback').item.json.body.id }}\" }"
+      }
+    },
+    {
+      "id": "rollback-notify",
+      "name": "Rollback / Notify Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        400
+      ],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://infraweaver.${BASE_DOMAIN}/api/feedback/{{ $('Webhook: Approved Feedback').item.json.body.id }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"status\": \"approved\",\n  \"reviewNote\": \"Automated fix failed live tests; reverted to approved for manual handling.\"\n}",
+        "options": {}
+      },
+      "notes": "On test failure: do NOT push. Revert console status and alert a human."
+    }
+  ],
+  "connections": {
+    "Webhook: Approved Feedback": {
+      "main": [
+        [
+          {
+            "node": "Validate Approved Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Approved Entry": {
+      "main": [
+        [
+          {
+            "node": "Human Approval Gate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Human Approval Gate": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Coding Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch Coding Agent": {
+      "main": [
+        [
+          {
+            "node": "Test in Live Environment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test in Live Environment": {
+      "main": [
+        [
+          {
+            "node": "Verify Fix Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Fix Result": {
+      "main": [
+        [
+          {
+            "node": "Route: Core vs Config",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rollback / Notify Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Core vs Config": {
+      "main": [
+        [
+          {
+            "node": "Push to GitHub (core)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Push to OneDev (config)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push to GitHub (core)": {
+      "main": [
+        [
+          {
+            "node": "Notify + Update Console Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push to OneDev (config)": {
+      "main": [
+        [
+          {
+            "node": "Notify + Update Console Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify + Update Console Status": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "infraweaver"
+    },
+    {
+      "name": "feedback"
+    },
+    {
+      "name": "human-in-the-loop"
+    }
+  ],
+  "active": false
+}

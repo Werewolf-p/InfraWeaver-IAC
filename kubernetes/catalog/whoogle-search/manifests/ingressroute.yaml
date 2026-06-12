@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: whoogle-search
+  namespace: whoogle-search
+  labels:
+    app.kubernetes.io/name: whoogle-search
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`whoogle-search.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: whoogle-search
+          port: 5000
+  tls:
+    store:
+      name: default
+      namespace: traefik

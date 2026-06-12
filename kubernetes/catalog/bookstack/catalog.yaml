@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/bookstack
+name: bookstack
+description: "Bookstack(https://codeberg.org/bookstack/bookstack) is a free and open source Wiki designed for creating beautiful documentation. Featuring a simple, but powerful WYSIWYG editor it allows for teams to"
+namespace: bookstack
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/bookstack
+categories:
+  - "Tools-Utilities"
+  - "Productivity"
+ingressroute:
+  host: bookstack.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:00:38.433Z

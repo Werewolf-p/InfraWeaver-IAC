@@ -1,0 +1,53 @@
+---
+# NetworkPolicies for the Traefik namespace
+# Default-deny all ingress and egress, then explicitly allow what's needed.
+# Traefik acts as the platform ingress — it needs to reach pods in all namespaces.
+
+# ── Default deny all ingress to traefik namespace ─────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: traefik
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# ── Allow inbound from any source (Traefik is the ingress — must accept external traffic) ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all-ingress-to-traefik
+  namespace: traefik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}   # allow from any source (LoadBalancer IPs, MetalLB, etc.)
+
+---
+# ── Allow Prometheus to scrape Traefik metrics ────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: traefik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9100

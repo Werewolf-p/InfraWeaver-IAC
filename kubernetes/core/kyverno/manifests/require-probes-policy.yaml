@@ -1,0 +1,61 @@
+---
+# Kyverno ClusterPolicy — Require health probes on catalog app Deployments
+# Source: learnk8s.io/production-best-practices — "Containers have readiness probes"
+# Source: kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+#
+# Mode: Audit — alerts in admission but does not block deployment.
+# This allows developers to iterate while maintaining visibility on missing probes.
+# Scope: catalog namespaces (label: infraweaver.io/type=catalog-app)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pod-probes
+  annotations:
+    policies.kyverno.io/title: Require Readiness and Liveness Probes
+    policies.kyverno.io/category: Self-Healing
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Without a readiness probe, pods receive traffic before they are ready.
+      Without a liveness probe, stuck/deadlocked containers are never restarted.
+      Both are required for self-healing catalog apps.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-readiness-probe
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Catalog app Deployments must define a readinessProbe on all containers. Without it, pods receive traffic before they are ready."
+        foreach:
+          - list: "request.object.spec.template.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.readinessProbe }}"
+                    operator: Equals
+
+    - name: require-liveness-probe
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: "Catalog app Deployments must define a livenessProbe on all containers. Without it, deadlocked containers are never restarted."
+        foreach:
+          - list: "request.object.spec.template.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.livenessProbe }}"
+                    operator: Equals

@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: uptimekuma
+  namespace: uptimekuma
+  labels:
+    app.kubernetes.io/name: uptimekuma
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`uptimekuma.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: uptimekuma
+          port: 3001
+  tls:
+    store:
+      name: default
+      namespace: traefik

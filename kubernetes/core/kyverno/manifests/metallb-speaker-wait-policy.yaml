@@ -1,0 +1,74 @@
+---
+# Kyverno ClusterPolicy: inject apiserver readiness wait into metallb-speaker pods
+#
+# Problem: metallb-speaker starts before kube-apiserver is ready after node reboots,
+# causing 300+ CrashLoopBackOff restarts per rollout. The speaker image is distroless
+# (no shell), so we cannot wrap the entrypoint.
+#
+# Solution: Kyverno mutates every speaker Pod before admission to inject a busybox
+# init container that polls kube-apiserver /healthz and only exits when it responds
+# 200 OK.
+#
+# IMPORTANT — Talos Linux note:
+# On Talos, kube-apiserver binds to the node IP only (NOT 127.0.0.1), and has
+# --anonymous-auth=false so /healthz returns 401 (wget --spider fails on 401).
+# Solution: use `nc -z` TCP port check on KUBERNETES_SERVICE_HOST — reliable,
+# auth-free, and works even on nodes that do NOT run their own apiserver instance
+# (e.g. cp3 which is a scheduling-only control-plane node in this cluster).
+#
+# References: MetalLB issue #2042; fixed in v0.15.0 chart startup logic.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: metallb-speaker-wait-for-apiserver
+  annotations:
+    policies.kyverno.io/title: MetalLB Speaker — Wait for API Server
+    policies.kyverno.io/category: Reliability
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Injects a busybox init container into metallb-speaker pods that waits for
+      the kube-apiserver TCP port to be open. Uses KUBERNETES_SERVICE_HOST
+      (the cluster's kubernetes service IP) instead of the node IP so the check
+      works on all nodes regardless of whether they run their own apiserver.
+spec:
+  rules:
+    - name: inject-wait-for-apiserver
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [metallb-system]
+              selector:
+                matchLabels:
+                  app.kubernetes.io/component: speaker
+      mutate:
+        patchStrategicMerge:
+          spec:
+            initContainers:
+              - name: wait-for-apiserver
+                image: busybox:1.36
+                imagePullPolicy: IfNotPresent
+                command:
+                  - sh
+                  - -c
+                  - |
+                    echo "Waiting for kube-apiserver TCP port to open..."
+                    echo "  Using cluster endpoint: ${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+                    until nc -z -w 5 "${KUBERNETES_SERVICE_HOST}" "${KUBERNETES_SERVICE_PORT}" 2>/dev/null; do
+                      echo "  Port not open yet, retrying in 5s..."
+                      sleep 5
+                    done
+                    echo "kube-apiserver TCP port is open — speaker may start."
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 8Mi
+                  limits:
+                    cpu: 50m
+                    memory: 16Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  runAsUser: 65534
+                  capabilities:
+                    drop: ["ALL"]

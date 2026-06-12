@@ -1,0 +1,247 @@
+---
+# ExternalSecret — OneDev OIDC credentials for bootstrap job
+# Separate from onedev-admin-secret so the job can mount them cleanly
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: onedev-oidc-secret
+  namespace: onedev
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: onedev-oidc-secret
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: admin-login
+      remoteRef:
+        key: secret/platform/onedev
+        property: admin-login
+    - secretKey: admin-password
+      remoteRef:
+        key: secret/platform/onedev
+        property: admin-password
+    - secretKey: oidc-client-id
+      remoteRef:
+        key: secret/platform/onedev
+        property: oidc-client-id
+    - secretKey: oidc-client-secret
+      remoteRef:
+        key: secret/platform/onedev
+        property: oidc-client-secret
+---
+# Job — Bootstrap OneDev SSO/OIDC configuration via Wicket UI automation
+# Runs as an ArgoCD PostSync hook so it runs after every sync.
+# Idempotent: checks if 'Authentik' SSO provider already exists before creating.
+# Note: OneDev v15 has no REST API for SSO; this uses Wicket form automation instead.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: onedev-bootstrap
+  namespace: onedev
+  labels:
+    app.kubernetes.io/name: onedev
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: onedev
+        app.kubernetes.io/component: bootstrap
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              ONEDEV_URL="http://onedev.onedev.svc.cluster.local"
+              ADMIN_LOGIN=$(cat /secrets/admin-login)
+              ADMIN_PASSWORD=$(cat /secrets/admin-password)
+              OIDC_CLIENT_ID=$(cat /secrets/oidc-client-id)
+              OIDC_CLIENT_SECRET=$(cat /secrets/oidc-client-secret)
+              DISCOVERY_URL="https://auth.${BASE_DOMAIN}/application/o/onedev/.well-known/openid-configuration"
+              BUTTON_IMAGE="/wicket/resource/io.onedev.server.plugin.sso.openid.OpenIdConnector/openid.png"
+
+              echo "=== Waiting for OneDev to be ready ==="
+              for i in $(seq 1 30); do
+                HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "${ONEDEV_URL}/~api/users/1" \
+                  -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" 2>/dev/null || echo "000")
+                if [ "$HTTP_CODE" = "200" ]; then
+                  echo "OneDev is ready (HTTP $HTTP_CODE)"
+                  break
+                fi
+                echo "Attempt $i: HTTP $HTTP_CODE — waiting 10s..."
+                sleep 10
+                if [ "$i" = "30" ]; then
+                  echo "ERROR: OneDev not ready after 5 minutes"
+                  exit 1
+                fi
+              done
+
+              sleep 5
+
+              # =========================================================
+              # PHASE 1: Provision Server Administrators group + members
+              # =========================================================
+              echo "=== Phase 1: Provisioning Server Administrators group ==="
+
+              GROUPS=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                "${ONEDEV_URL}/~api/groups?offset=0&count=100" 2>/dev/null)
+
+              # Find existing admin group (first group with administrator:true)
+              ADMIN_GROUP_ID=$(echo "$GROUPS" | \
+                awk 'BEGIN{id=""} /"id"/{gsub(/[^0-9]/,"",$NF); id=$NF} /"administrator" : true/{print id; exit}')
+
+              if [ -z "$ADMIN_GROUP_ID" ]; then
+                echo "Creating 'Server Administrators' group..."
+                ADMIN_GROUP_ID=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                  -X POST "${ONEDEV_URL}/~api/groups" \
+                  -H 'Content-Type: application/json' \
+                  -d '{"name":"Server Administrators","administrator":true,"createRootProjects":true,"enforce2FA":false}' \
+                  2>/dev/null)
+                echo "Created group ID: $ADMIN_GROUP_ID"
+              else
+                echo "Found existing admin group ID: $ADMIN_GROUP_ID"
+              fi
+
+              # Add each user listed in /config/admin-users to the admin group
+              while IFS= read -r ADMIN_USER || [ -n "$ADMIN_USER" ]; do
+                [ -z "$ADMIN_USER" ] && continue
+                ADMIN_USER=$(echo "$ADMIN_USER" | tr -d ' \t\r')
+
+                USER_LIST=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                  "${ONEDEV_URL}/~api/users?offset=0&count=100" 2>/dev/null)
+                USER_ID=$(echo "$USER_LIST" | \
+                  awk -v name="\"${ADMIN_USER}\"" \
+                  'BEGIN{id=""} /"id"/{gsub(/[^0-9]/,"",$NF); id=$NF} $0 ~ ("\"name\" : " name){print id; exit}')
+
+                if [ -z "$USER_ID" ]; then
+                  echo "INFO: User '${ADMIN_USER}' not found yet — will be added on first SSO login"
+                  continue
+                fi
+
+                MEMBERS=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                  "${ONEDEV_URL}/~api/groups/${ADMIN_GROUP_ID}/memberships" 2>/dev/null)
+
+                if echo "$MEMBERS" | grep -q "\"userId\" : ${USER_ID}"; then
+                  echo "OK: User '${ADMIN_USER}' (ID: ${USER_ID}) already in admin group"
+                else
+                  echo "Adding '${ADMIN_USER}' (ID: ${USER_ID}) to admin group..."
+                  RESULT=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                    -X POST "${ONEDEV_URL}/~api/memberships" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"userId\":${USER_ID},\"groupId\":${ADMIN_GROUP_ID}}" 2>/dev/null)
+                  echo "Added '${ADMIN_USER}' to Server Administrators (membership ID: $RESULT)"
+                fi
+              done < /config/admin-users
+
+              # =========================================================
+              # PHASE 2: Configure Authentik SSO provider (if not done)
+              # =========================================================
+              echo "=== Phase 2: Checking Authentik SSO provider ==="
+              LIST_PAGE=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                "${ONEDEV_URL}/~administration/settings/sso-providers" 2>/dev/null)
+
+              if echo "$LIST_PAGE" | grep -q "Authentik"; then
+                echo "OK: Authentik SSO provider already configured — skipping SSO setup"
+                exit 0
+              fi
+
+              echo "=== Step 1: Load new SSO provider form ==="
+              NEW_PAGE=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                -c /tmp/cookies.txt -b /tmp/cookies.txt \
+                "${ONEDEV_URL}/~administration/settings/sso-providers/new" 2>/dev/null)
+
+              PV=$(echo "$NEW_PAGE" | grep -o "[0-9]*-[0-9]*\.IFormSubmitListener" | head -1 | cut -d. -f1)
+              HF=$(echo "$NEW_PAGE" | grep -o 'name="id[^"]*_hf_0"' | head -1 | sed 's/name="//;s/"//')
+
+              echo "Page version: $PV, Hidden field: $HF"
+
+              if [ -z "$PV" ] || [ -z "$HF" ]; then
+                echo "ERROR: Could not find page version or hidden field"
+                exit 1
+              fi
+
+              echo "=== Step 2: AJAX type change to OpenID (4) ==="
+              AJAX_STATUS=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                -c /tmp/cookies.txt -b /tmp/cookies.txt \
+                -X POST "${ONEDEV_URL}/~administration/settings/sso-providers/new?${PV}.IBehaviorListener.0-form-editor-groups-1-properties-2-value-editor-typeSelectorContainer-typeSelector" \
+                -H "Wicket-Ajax: true" \
+                -H "Wicket-Ajax-BaseURL: ~administration/settings/sso-providers/new" \
+                -H "Accept: application/xml" \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                --data-urlencode "${HF}=" \
+                --data-urlencode "editor:groups:1:properties:1:value:content:input=Authentik" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:typeSelectorContainer:typeSelector=4" \
+                --data-urlencode "editor:groups:1:properties:3:value:input=" \
+                -o /dev/null -w "%{http_code}" 2>/dev/null)
+
+              echo "AJAX type change: HTTP $AJAX_STATUS"
+              if [ "$AJAX_STATUS" != "200" ]; then
+                echo "ERROR: AJAX type change failed"
+                exit 1
+              fi
+
+              echo "=== Step 3: Submit form with OpenID connector details ==="
+              curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                -c /tmp/cookies.txt -b /tmp/cookies.txt \
+                -X POST "${ONEDEV_URL}/~administration/settings/sso-providers/new?${PV}.IFormSubmitListener-form" \
+                -H "Wicket-Ajax-BaseURL: ~administration/settings/sso-providers/new" \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                --data-urlencode "${HF}=" \
+                --data-urlencode "editor:groups:1:properties:1:value:content:input=Authentik" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:typeSelectorContainer:typeSelector=4" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:beanEditor:groups:1:properties:1:value:content:input=${DISCOVERY_URL}" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:beanEditor:groups:1:properties:2:value:content:input=${OIDC_CLIENT_ID}" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:beanEditor:groups:1:properties:3:value:input=${OIDC_CLIENT_SECRET}" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:beanEditor:groups:2:properties:1:value:content:input=openid email profile" \
+                --data-urlencode "editor:groups:1:properties:2:value:editor:beanEditor:groups:2:properties:3:value:content:input=${BUTTON_IMAGE}" \
+                --data-urlencode "editor:groups:1:properties:3:value:input=" \
+                -o /dev/null -w "Form submit: HTTP %{http_code}\n" 2>/dev/null
+
+              echo "=== Step 4: Verify provider was created ==="
+              sleep 3
+              VERIFY=$(curl -sk -u "${ADMIN_LOGIN}:${ADMIN_PASSWORD}" \
+                "${ONEDEV_URL}/~administration/settings/sso-providers" 2>/dev/null)
+
+              if echo "$VERIFY" | grep -q "Authentik"; then
+                echo "✅ Authentik SSO provider created successfully!"
+              else
+                echo "⚠️  SSO provider may not have been created. Check OneDev SSO settings manually."
+                exit 1
+              fi
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: secrets
+          secret:
+            secretName: onedev-oidc-secret
+        - name: config
+          configMap:
+            name: onedev-admin-config

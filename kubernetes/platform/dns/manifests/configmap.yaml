@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom-config
+  namespace: dns-system
+data:
+  Corefile: |
+    # ${BASE_DOMAIN} zone — all internal services
+    ${BASE_DOMAIN}:53 {
+        hosts /etc/coredns/zones/${BASE_DOMAIN}.hosts {
+            ttl 60
+            reload 30s
+            fallthrough
+        }
+        forward . 1.1.1.1 8.8.8.8
+        log
+        errors
+    }
+
+    # prod.local zone — Talos cluster in-cluster ingress (Traefik)
+    prod.local:53 {
+        hosts /etc/coredns/zones/prod.local.hosts {
+            ttl 60
+            reload 30s
+            fallthrough
+        }
+        log
+        errors
+    }
+
+    # Catch-all — forward everything else to upstream DNS
+    # NOTE: int.${BASE_DOMAIN} zone removed — Cloudflare wildcard *.int.${BASE_DOMAIN} → ${PUBLIC_INGRESS_IP} (public IP)
+    # Changed from ${METALLB_TRAEFIK_VIP}: cellular devices no longer get 30s TCP timeout for internal routes.
+    .:53 {
+        forward . 1.1.1.1 8.8.8.8 {
+            max_concurrent 1000
+        }
+        cache 300
+        log
+        errors
+        health :8080
+        ready :8181
+    }
+
+  ${BASE_DOMAIN}.hosts: |
+    # ${BASE_DOMAIN} — all services route through K8s Traefik at ${METALLB_TRAEFIK_VIP}
+    # K8s Traefik proxies to the actual bare-metal or cluster backend.
+
+    # ── Cluster apps ─────────────────────────────────────────────────────────
+    ${METALLB_TRAEFIK_VIP}  test.${BASE_DOMAIN}
+
+
+    # ── Additional services (proxied through K8s Traefik) ────────────────────
+    # Most hosts are covered by the *.${BASE_DOMAIN} wildcard. Add explicit
+    # entries here only for names that need them (example set below — replace
+    # with your own; these are NOT required for wildcard-covered services).
+    ${METALLB_TRAEFIK_VIP}  auth.${BASE_DOMAIN}
+    ${METALLB_TRAEFIK_VIP}  registry.${BASE_DOMAIN}
+    ${METALLB_TRAEFIK_VIP}  ${BASE_DOMAIN}
+    ${METALLB_TRAEFIK_VIP}  www.${BASE_DOMAIN}
+
+    # ── Static / non-Traefik (example: an external host by IP) ────────────────
+    # ${DC1_IP}   dc1.${BASE_DOMAIN}
+
+  prod.local.hosts: |
+    # prod.local — Talos Kubernetes cluster services
+    # All route through cluster Traefik at ${METALLB_TRAEFIK_VIP}
+
+    ${METALLB_TRAEFIK_VIP}  argocd.prod.local
+    ${METALLB_TRAEFIK_VIP}  grafana.prod.local
+    ${METALLB_TRAEFIK_VIP}  longhorn.prod.local
+    ${METALLB_TRAEFIK_VIP}  openbao.prod.local
+    ${METALLB_TRAEFIK_VIP}  test.prod.local
+

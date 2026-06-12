@@ -1,0 +1,44 @@
+---
+# PVC for "Path 1" → /app/data
+# Default path on Unraid: /mnt/user/appdata/gotify/
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gotify-data-0
+  namespace: gotify
+  labels:
+    app.kubernetes.io/name: gotify
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/mnt/user/appdata/gotify/"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+# PVC for "Path 2" → /etc/gotify
+# Default path on Unraid: (not set)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gotify-data-1
+  namespace: gotify
+  labels:
+    app.kubernetes.io/name: gotify
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/etc/gotify"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

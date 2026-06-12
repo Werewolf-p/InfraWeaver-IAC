@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: deluan/navidrome
+name: navidrome
+description: "Modern Music Server and Streamer compatible with Subsonic/Airsonic"
+namespace: navidrome
+source: community-apps
+tier: simple
+image: deluan/navidrome
+categories:
+  - "MediaServer-Music"
+ingressroute:
+  host: navidrome.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:42:33.921Z

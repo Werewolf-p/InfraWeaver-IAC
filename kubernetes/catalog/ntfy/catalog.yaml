@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: binwiederhier/ntfy
+name: ntfy
+description: "ntfy (pronounce: notify) is a simple HTTP-based pub-sub notification service. It allows you to send notifications to your phone or desktop via scripts from any computer, entirely without signup, cost "
+namespace: ntfy
+source: community-apps
+tier: simple
+image: binwiederhier/ntfy
+categories:
+  - "Tools-Utilities"
+ingressroute:
+  host: ntfy.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:41:06.550Z

@@ -1,0 +1,38 @@
+---
+# Standalone ArgoCD Application for Authentik supporting manifests
+# Deploys: ExternalSecret for secrets + Authentik blueprint ConfigMaps
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps-authentik-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/platform/authentik/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: authentik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      name: authentik-secrets
+      jsonPointers:
+        - /status

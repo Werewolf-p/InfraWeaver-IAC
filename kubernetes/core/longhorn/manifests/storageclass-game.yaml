@@ -1,0 +1,33 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  # Dedicated storage class for game server workloads.
+  #
+  # WHY single replica + strict-local:
+  #   Game servers use Recreate strategy with ReadWriteOnce PVCs. When a server pod is
+  #   stopped or deleted, Longhorn detaches the volume. With 3 replicas, Longhorn attempts
+  #   to rebuild the replica set across ALL nodes — causing a cluster-wide I/O storm that
+  #   makes OTHER services (authentik, console, OpenBao) slow or unavailable.
+  #
+  #   strict-local keeps the single replica on the SAME node as the pod. Volume attach/detach
+  #   is purely local disk I/O with zero cross-node network impact. The tradeoff is that
+  #   if the node fails, the game server data is unavailable until the node recovers — which
+  #   is acceptable for game servers (backed by Velero snapshots).
+  #
+  # Use "longhorn" or "longhorn-retain" for infrastructure services that need HA replicas.
+  # Use "longhorn-game" for all game-hub workloads.
+  name: longhorn-game
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "1"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: ext4
+  # strict-local: replica is always on the same node as the pod that uses the volume.
+  # This eliminates cross-node replication I/O when game servers start/stop.
+  dataLocality: "strict-local"

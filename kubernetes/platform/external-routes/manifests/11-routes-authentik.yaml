@@ -1,0 +1,117 @@
+---
+# CORS middleware for auth.${BASE_DOMAIN}
+# Authentik handles CORS for application-specific OAuth2 endpoints (token, authorize)
+# but NOT for the global revocation endpoint (/application/o/revoke/) or userinfo.
+# This middleware adds CORS headers for those missing endpoints.
+# Traefik replaces any existing Access-Control-Allow-Origin (no duplicates).
+# CORS for the Authentik auth domain.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cors-authentik
+  namespace: traefik
+spec:
+  headers:
+    customResponseHeaders:
+      Access-Control-Allow-Origin: "https://auth.${BASE_DOMAIN}"
+      Access-Control-Allow-Methods: "GET, POST, OPTIONS, HEAD"
+      Access-Control-Allow-Headers: "Authorization, Content-Type, Accept"
+      Access-Control-Allow-Credentials: "true"
+      Access-Control-Max-Age: "86400"
+---
+# Authentik — IngressRoute at auth.${BASE_DOMAIN}
+# No VPN restriction: users need to reach Authentik to log in via SSO
+# before connecting to services behind the VPN middleware.
+# Uses individual cert (platform-auth-tls) to avoid rate limit dependency on main bundle.
+#
+# Two routes:
+#   1. /ws/ — WebSocket path (flow SPA real-time stage updates).
+#              No rate-limit-auth: rate limiting injects response-header latency that
+#              delays the 101 Switching Protocols upgrade on first connection.
+#              No secure-headers: X-Frame-Options/Permissions-Policy headers on a
+#              101 response confuse some WebKit versions (iOS Safari/Brave).
+#   2. Everything else — full middleware stack including rate-limit-auth for
+#              brute-force protection on login/OIDC endpoints.
+#
+# Sticky cookie: ensures a user's flow session always lands on the same
+# Authentik server pod. Required if replicas > 1 (flow plan tokens are
+# stored in Redis but WebSocket connections are pod-local). Harmless with 1 replica.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: authentik
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/target: "${PUBLIC_INGRESS_IP}"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # WebSocket route — must be listed first (Traefik evaluates routes top-to-bottom,
+    # longest match wins; the PathPrefix rule is more specific than Host-only).
+    - match: Host(`auth.${BASE_DOMAIN}`) && PathPrefix(`/ws/`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: authentik-server
+          namespace: authentik
+          port: 80
+          sticky:
+            cookie:
+              name: ak_affinity
+              secure: true
+              httpOnly: true
+              sameSite: lax
+
+    # Static assets (JS chunks, CSS, fonts, icons) — NO rate-limit-auth.
+    # The login SPA loads ~13+ chunks concurrently on first paint. Rate-limiting
+    # these collapses the page load into 429s (especially since the limiter
+    # buckets per Cloudflare edge IP / shared empty-key bucket), so the SPA never
+    # boots and OIDC login silently fails. Static assets need no brute-force
+    # protection; keep secure-headers + CORS only. Brute-force protection stays
+    # on the dynamic auth/flow/token endpoints via the catch-all route below.
+    - match: Host(`auth.${BASE_DOMAIN}`) && PathPrefix(`/static/`)
+      kind: Rule
+      priority: 15
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: cors-authentik
+          namespace: traefik
+      services:
+        - name: authentik-server
+          namespace: authentik
+          port: 80
+          sticky:
+            cookie:
+              name: ak_affinity
+              secure: true
+              httpOnly: true
+              sameSite: lax
+
+    # All other traffic — rate-limited brute-force protection
+    - match: Host(`auth.${BASE_DOMAIN}`)
+      kind: Rule
+      priority: 10
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: cors-authentik
+          namespace: traefik
+        - name: rate-limit-auth
+          namespace: traefik
+      services:
+        - name: authentik-server
+          namespace: authentik
+          port: 80
+          sticky:
+            cookie:
+              name: ak_affinity
+              secure: true
+              httpOnly: true
+              sameSite: lax
+  tls:
+    secretName: platform-wildcard-tls
+

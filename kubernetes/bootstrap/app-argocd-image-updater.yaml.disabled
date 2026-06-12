@@ -1,0 +1,103 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-argocd-image-updater
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-image-updater
+    infraweaver.io/layer: platform
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argocd-image-updater
+    targetRevision: "1.1.5"
+    helm:
+      valuesObject:
+        replicaCount: 1
+
+        image:
+          repository: quay.io/argoprojlabs/argocd-image-updater
+          tag: v1.1.1
+          pullPolicy: IfNotPresent
+
+        config:
+          # Write image updates back to git (GitOps — no live patching)
+          argocd:
+            grpcWeb: true
+            serverAddress: "argocd-server.argocd.svc.cluster.local"
+            insecure: true
+            plaintext: true
+          logLevel: info
+          # Git commit author identity
+          gitCommitUser: "argocd-image-updater"
+          gitCommitMail: "argocd-image-updater@example.com"
+          gitCommitTemplate: |
+            chore(deps): update {{range .AppChanges}}{{.AppName}} images{{end}}
+
+            {{range .AppChanges}}
+            App: {{.AppName}}
+            {{range .Changes}}  - {{.Image.Original}} -> {{.NewTag}}
+            {{end}}{{end}}
+
+            Co-authored-by: ArgoCD Image Updater <argocd-image-updater@example.com>
+
+          # Registries — use Docker Hub (default) and GHCR
+          registries:
+            - name: Docker Hub
+              api_url: https://registry-1.docker.io
+              prefix: docker.io
+              defaultns: library
+              ping: yes
+            - name: GitHub Container Registry
+              api_url: https://ghcr.io
+              prefix: ghcr.io
+              ping: yes
+            - name: Quay.io
+              api_url: https://quay.io
+              prefix: quay.io
+              ping: yes
+
+        # GitHub token for git write-back (from ExternalSecret)
+        extraEnv:
+          - name: ARGOCD_IMAGE_UPDATER_GITCREDS_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: argocd-image-updater-github
+                key: username
+          - name: ARGOCD_IMAGE_UPDATER_GITCREDS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: argocd-image-updater-github
+                key: token
+
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+
+        serviceAccount:
+          create: true
+          name: argocd-image-updater
+
+        rbac:
+          enabled: true
+
+        metrics:
+          enabled: true
+          serviceMonitor:
+            enabled: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true

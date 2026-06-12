@@ -1,0 +1,59 @@
+# Terraform state
+**/.terraform/
+*.tfstate*
+*.auto.tfvars
+crash.log
+
+# Generated credentials
+envs/*/generated/*.yaml
+envs/*/generated/kubeconfig
+envs/*/generated/talosconfig
+!envs/*/generated/.gitkeep
+# Top-level generated/ runtime artifacts (deploy-local.sh writes a live kubeconfig here)
+generated/kubeconfig
+generated/talosconfig
+
+# Python bytecode artifacts
+__pycache__/
+*.pyc
+
+# Secrets (use SOPS for encrypted, never plain)
+*.secrets.plain.yaml
+*.key
+*.pem
+*.crt
+age.key
+.env
+
+# Local-only dev overrides — stay on the developer's machine, NEVER committed.
+# Convention: kubernetes/**/overlays/local/ is a personal Kustomize overlay a dev
+# can point a throwaway ArgoCD app (or `kubectl apply -k`) at, without it ever
+# becoming cluster truth. Shared/prod params live in overlays/prod/ (committed).
+kubernetes/**/overlays/local/
+!kubernetes/**/overlays/local/.gitkeep
+# Local value/param files for ad-hoc dev (kept out of git by suffix convention).
+*.local.yaml
+*.local.env
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+node_modules/
+
+# Redeploy snapshot backups (contain a live deployment's real values) — never ship.
+# Pre-existing tracked copies should be removed before publishing:
+#   git rm -r --cached .redeploy-backup-*
+.redeploy-backup-*/
+
+# ---------------------------------------------------------------------------
+# params/ — master folder for all per-deployment secrets/personal config
+# (kubeconfig, talosconfig, .env copies, machine configs, tokens)
+# Create your own; never commit. See params.example/ for required files.
+# ---------------------------------------------------------------------------
+params/
+
+# Talos configs — generated credentials, should never be committed
+envs/*/talosconfig
+talos/clusterconfig/talosconfig

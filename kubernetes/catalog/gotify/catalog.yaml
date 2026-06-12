@@ -1,0 +1,15 @@
+# Community app installed from Unraid AppFeed
+# Source: gotify/server:latest
+name: gotify
+description: "A simple server for sending and receiving messages.[br][br][b][u][span style='color: #ff9900;']Default user/password[/span][/u][/b][br]User: [B][u]admin[/B][/u][br]Password: [B][u]admin[/B][/u][/b][br"
+namespace: gotify
+source: community-apps
+tier: simple
+image: gotify/server:latest
+categories:
+  - "Productivity"
+  - "Tools-Utilities"
+  - "Network-Messenger"
+ingressroute:
+  host: gotify.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T23:13:14.962Z

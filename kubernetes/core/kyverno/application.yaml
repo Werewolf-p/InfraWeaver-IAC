@@ -1,0 +1,9 @@
+---
+# Kyverno — Kubernetes-native policy engine for pod security enforcement
+# Chart: https://kyverno.github.io/kyverno/
+# Access: cluster-internal only (no ingress needed)
+repoURL: https://kyverno.github.io/kyverno/
+targetRevision: "3.2.*"
+chart: kyverno
+releaseName: kyverno
+namespace: kyverno

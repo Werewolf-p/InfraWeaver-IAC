@@ -1,0 +1,51 @@
+---
+# Root ArgoCD AppProject — defines what the platform is allowed to manage
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "InfraWeaver Platform — all cluster applications"
+  sourceRepos:
+    # Repo ArgoCD actually pulls rendered manifests from (the private deploy repo
+    # when DEPLOY_REPO_URL is set; otherwise defaults to INFRA_REPO_URL).
+    - "${DEPLOY_REPO_URL}"
+    - "${INFRA_REPO_URL}"
+    - "https://charts.bitnami.com/bitnami"
+    - "https://grafana.github.io/helm-charts"
+    - "https://prometheus-community.github.io/helm-charts"
+    - "https://charts.jetstack.io"
+    - "https://charts.external-secrets.io"
+    - "https://argoproj.github.io/argo-helm"
+    - "*"
+  destinations:
+    - namespace: "*"
+      server: "https://kubernetes.default.svc"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  orphanedResources:
+    warn: false   # argocd namespace always has Helm-managed resources not tracked by manifests app
+    ignore:
+      # openbao-token is managed by workflow (not ArgoCD)
+      - kind: Secret
+        name: openbao-token
+      # grafana-admin-secret is created by ExternalSecret (ESO-managed)
+      - kind: Secret
+        name: grafana-admin-secret
+      # Game-hub PVCs hold persistent game-server data and intentionally outlive
+      # individual ArgoCD application objects (servers can be re-provisioned without
+      # data loss). These would generate OrphanedResourceWarnings if warn: true is
+      # ever enabled — pre-emptively ignoring them for that scenario.
+      - kind: PersistentVolumeClaim
+        name: minecraft-server-data
+      - kind: PersistentVolumeClaim
+        name: terraria-server-data
+      - kind: PersistentVolumeClaim
+        name: valheim-server-config

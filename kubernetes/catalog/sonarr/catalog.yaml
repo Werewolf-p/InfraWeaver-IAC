@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/sonarr
+name: sonarr
+description: "Sonarr(https://sonarr.tv/) (formerly NZBdrone) is a PVR for usenet and bittorrent users. It can monitor multiple RSS feeds for new episodes of your favorite shows and will grab, sort and rename them. "
+namespace: sonarr
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/sonarr
+categories:
+  - "MediaServer-Video"
+  - "Downloaders"
+ingressroute:
+  host: sonarr.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T22:55:56.557Z

@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: infraweaver-console
+  namespace: infraweaver-console
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: infraweaver-console

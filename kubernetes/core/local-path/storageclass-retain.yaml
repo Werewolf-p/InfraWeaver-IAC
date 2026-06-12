@@ -1,0 +1,15 @@
+---
+# local-path-retain — same as the default local-path StorageClass but with
+# reclaimPolicy: Retain so PVs (and their data on the node) survive PVC deletion.
+# Use this for stateful workloads where you want a safety net against accidental
+# data loss, without the overhead of Longhorn replication.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-retain
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false

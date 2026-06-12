@@ -1,0 +1,45 @@
+kubeletDir: /var/lib/kubelet
+
+controller:
+  resources:
+    limits:
+      cpu: 200m
+      memory: 200Mi
+    requests:
+      cpu: 10m
+      memory: 20Mi
+  # Sidecar containers (csi-provisioner, csi-resizer) default to 400Mi each
+  # which causes cp3 memory overcommit. Actual usage is <30Mi each.
+  externalProvisioner:
+    resources:
+      limits:
+        cpu: 100m
+        memory: 100Mi
+      requests:
+        cpu: 10m
+        memory: 20Mi
+  externalResizer:
+    resources:
+      limits:
+        cpu: 100m
+        memory: 100Mi
+      requests:
+        cpu: 10m
+        memory: 20Mi
+  livenessProbe:
+    resources:
+      limits:
+        cpu: 50m
+        memory: 50Mi
+      requests:
+        cpu: 10m
+        memory: 10Mi
+
+node:
+  resources:
+    limits:
+      cpu: 200m
+      memory: 200Mi
+    requests:
+      cpu: 10m
+      memory: 20Mi

@@ -1,0 +1,104 @@
+# Longhorn HA storage for Talos control-plane-only cluster
+# Disable pre-upgrade checker job (causes circular SA dependency on fresh installs)
+preUpgradeChecker:
+  jobEnabled: false
+  upgradeVersionCheck: false
+
+defaultSettings:
+  # All 3 nodes healthy — store 2 replicas (no workers, only 3 CPs; 3 replicas would exhaust disk)
+  defaultReplicaCount: 2
+  # Allow scheduling on control-plane nodes (no workers in this cluster)
+  taintToleration: "node-role.kubernetes.io/control-plane:NoSchedule"
+  # Give Longhorn itself platform-standard priority so storage stays online
+  # without out-prioritising ingress/DNS/control-plane components.
+  priorityClass: platform-standard
+  # Storage reserved per node — 5% minimal ensures CP1/CP3 remain schedulable
+  # with ~134GB available and 299GB scheduled at 200% overprovisioning (299 < 390).
+  # At 15% the condition would require 63GB reserved which pushes CP1/CP3 to
+  # "not schedulable" even though overprovisioning headroom is fine.
+  storageMinimalAvailablePercentage: 5
+  storageOverProvisioningPercentage: 300
+  # Reserve CPU for Longhorn instance managers so replica rebuilds do not starve.
+  guaranteedInstanceManagerCPU: 12
+  # 3 concurrent rebuilds per node — increased from 1 to recover faster after
+  # rolling node reboots (which leave ~15 stopped replicas per node). Warm restarts
+  # (data dir intact, just reconnecting) are low-I/O; the original 1-limit extended
+  # post-reboot degraded-volume windows unnecessarily.
+  concurrentReplicaRebuildPerNodeLimit: 3
+  # Wait before replenishing a failed replica — 2 min gives rebooting nodes time to return
+  # and reuse existing replicas (delta-resync only). Reduced from 30 min to prevent long
+  # degraded-volume windows that block new workloads from starting.
+  replicaReplenishmentWaitInterval: 120
+  # Auto-clean Longhorn-generated system snapshots (head snapshot, recurring job snapshots)
+  # to prevent FailedStartingSnapshotPurge errors caused by stale engine proxy references.
+  autoCleanupSystemGeneratedSnapshot: true
+  # Auto-delete orphaned volume CRs and instance data left after PVC deletion.
+  # replica-data: orphaned data dirs on disk; instance: orphaned instance-manager entries.
+  orphanResourceAutoDeletion: "replica-data;instance"
+  # Limit concurrent engine upgrades per node so upgrades don't cause I/O storms.
+  concurrentAutomaticEngineUpgradePerNodeLimit: 1
+  # Disable periodic snapshot integrity checks — reduces background I/O on small cluster.
+  snapshotDataIntegrity: disabled
+  # Auto-clean orphaned replicas left behind after PVC deletion (prevents disk fill).
+  orphanAutoDeletion: true
+  # Reserve 5% of disk for system use (reduced from 15% to keep CP1/CP3 schedulable
+  # given current 299GB storageScheduled at 200% overprovisioning on 195GB disks)
+  storageReservedPercentageForDefaultDisk: 5
+  # Auto-balance replicas when nodes have unequal replica counts
+  replicaAutoBalance: least-effort
+  # Delete PVCs when PV is deleted
+  defaultDataLocality: best-effort
+  # Faster failover
+  nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
+  # TrueNAS NFS backup target — volumes in the "truenas-backup" RecurringJob group
+  # are backed up here nightly. On fresh redeploy, scripts/restore-from-truenas.sh
+  # uses this target to restore PVCs before apps deploy.
+  # TrueNAS prerequisite: create dataset at /mnt/tank/longhorn-backups and enable
+  # NFS share with network access for ${NODE_SUBNET_CIDR} (cluster nodes).
+  backupTarget: "nfs://${TRUENAS_HOST}:/mnt/Main/k8s-longhorn-backups"
+  backupTargetCredentialSecret: ""
+
+longhornUI:
+  enabled: true
+  priorityClass: "platform-standard"
+
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  host: longhorn.prod.local
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-forward-auth@kubernetescrd
+
+persistence:
+  defaultClass: false
+  defaultClassReplicaCount: 2
+
+# Allow pods on control-plane nodes
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+longhornManager:
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+  priorityClass: "platform-standard"
+
+longhornDriver:
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+  priorityClass: "platform-standard"
+
+longhornAdmissionWebhook:
+  priorityClass: "platform-standard"
+
+longhornConversionWebhook:
+  priorityClass: "platform-standard"
+
+longhornRecoveryBackend:
+  priorityClass: "platform-standard"

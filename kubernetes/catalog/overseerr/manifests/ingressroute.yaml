@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: overseerr
+  namespace: overseerr
+  labels:
+    app.kubernetes.io/name: overseerr
+    infraweaver.io/source: community-apps
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`overseerr.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: overseerr
+          port: 5055
+  tls:
+    store:
+      name: default
+      namespace: traefik

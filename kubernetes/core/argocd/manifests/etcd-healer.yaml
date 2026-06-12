@@ -1,0 +1,42 @@
+# etcd-alarm-healer — diagnosis and permanent fix documentation
+#
+# ROOT CAUSE CONFIRMED (May 25, 2026):
+# All 3 Talos CP nodes were rebooting every ~71 minutes in a rolling cascade.
+# Flannel restarts (43+ times) were a SYMPTOM of node reboots, not the root cause.
+#
+# CAUSE: etcd v3.6.9 in Talos v1.12.7 starts with:
+#   --experimental-compact-hash-check-enabled=true
+#   --experimental-initial-corrupt-check=true
+# After each hourly compaction (auto-compaction-retention=1h), the post-compaction
+# hash check fails on Proxmox-virtualized storage (timing jitter in I/O causes
+# hash mismatches between cluster members). etcd panics/exits → machined restart
+# loop → startup corrupt check also fails → Talos reboots node after N failures.
+# Pattern: 60min (compaction) + 11min (cascade) = 71min reboot cycle.
+#
+# PERMANENT IaC FIX (in place since May 25, 2026):
+# - terraform/modules/talos-cluster/main.tf already contains:
+#     experimental-compact-hash-check-enabled = "false"
+#     experimental-initial-corrupt-check      = "false"
+#   in cluster.etcd.extraArgs — applied to ALL new deploys automatically.
+#
+# HOW UPDATES ARE APPLIED (via update mechanism / console):
+# 1. Any push to terraform/modules/talos-cluster/main.tf triggers
+#    .github/workflows/apply-machineconfig.yml on the management-host runner
+# 2. That workflow writes talosconfig (from TALOSCONFIG_PRODUCTIE secret) and
+#    runs scripts/update.sh which does: tofu apply -target=module.talos_cluster
+# 3. Terraform applies machineconfig to running nodes with --mode=staged (no reboot)
+# 4. TALOSCONFIG_PRODUCTIE is auto-populated by deploy-local.sh after each
+#    successful cluster provision.
+#
+# TEMPORARY WORKAROUND REMOVED:
+# - etcd-config-patcher DaemonSet was deployed as a quick fix but was fundamentally
+#   broken due to a race condition: containerd restarts etcd in <1s, but the patcher
+#   pod takes 30-60s after node boot to start. The patch always arrived too late.
+# - Removed in May 2026 — the IaC fix is the correct long-term solution.
+#
+# RECOVERY WITHOUT FULL REDEPLOY:
+# If talosconfig is available and nodes are restarting due to this issue:
+#   talosctl --talosconfig envs/productie/generated/talosconfig \
+#     apply-config --mode=no-reboot \
+#     --nodes ${NODE_1_IP},${NODE_2_IP},${NODE_3_IP} \
+#     --config-patch '[{"op":"add","path":"/cluster/etcd/extraArgs","value":{"experimental-compact-hash-check-enabled":"false","experimental-initial-corrupt-check":"false"}}]'

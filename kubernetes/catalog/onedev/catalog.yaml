@@ -1,0 +1,38 @@
+---
+# catalog.yaml — source definition for catalog apps
+# This file is read by scripts/sync-catalog.sh to generate ArgoCD Applications.
+#
+# Catalog app: OneDev — all-in-one DevOps platform (Git, CI/CD, Issue Tracker)
+# Access: onedev.${BASE_DOMAIN} (public, app-level login via native Authentik OIDC)
+# SSO: Authentik OAuth2 (configured post-deploy via OneDev admin UI)
+# Storage: Single PVC on longhorn-retain (embedded H2 DB + repos in /opt/onedev)
+# Note: No Helm chart — pure manifests only.
+
+name: onedev
+description: "OneDev — all-in-one Git server with built-in CI/CD and issue tracker"
+namespace: onedev
+
+manifests:
+  path: kubernetes/catalog/onedev/manifests
+
+# ── Secrets schema ────────────────────────────────────────────────────────────
+# Read by scripts/seed-catalog-secrets.sh — auto-seeds OpenBao if missing.
+# Path: secret/data/platform/onedev
+# Never overwrites existing values (idempotent). Safe to redeploy.
+secrets:
+  path: platform/onedev
+  keys:
+    admin-login:
+      type: static
+      value: "admin"
+    admin-password:
+      type: password         # openssl rand -base64 24, unique per deploy
+    admin-email:
+      type: static
+      value: "admin@${BASE_DOMAIN}"
+    oidc-client-id:
+      type: static
+      value: "onedev"        # matches Authentik OAuth2 provider client_id
+    oidc-client-secret:
+      type: password         # 32-char token, set in both OneDev and Authentik
+replicas: "1"

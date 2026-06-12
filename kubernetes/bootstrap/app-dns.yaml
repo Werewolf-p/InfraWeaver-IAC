@@ -1,0 +1,32 @@
+# Standalone ArgoCD Application for internal CoreDNS
+# Deploys a custom DNS server accessible at ${METALLB_COREDNS_VIP}:53 (MetalLB)
+# Serves ${BASE_DOMAIN} and prod.local zones; forwards everything else upstream
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps-dns
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/platform/dns/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dns-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

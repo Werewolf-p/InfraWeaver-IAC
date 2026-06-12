@@ -1,0 +1,8 @@
+# Standalone Grafana — separate from the monitoring stack's Grafana.
+# Use this as a template for your own apps.
+repoURL: https://grafana.github.io/helm-charts
+targetRevision: "8.*"
+chart: grafana
+releaseName: grafana
+namespace: apps-grafana
+replicas: "2"

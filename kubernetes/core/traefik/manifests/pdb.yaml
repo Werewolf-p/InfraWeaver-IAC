@@ -1,0 +1,14 @@
+---
+# PodDisruptionBudget for Traefik ingress controller
+# Ensures at least 1 Traefik replica is available during node drains or upgrades.
+# Traefik runs 1 replica by default; this prevents it from being evicted entirely.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: traefik-pdb
+  namespace: traefik
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik

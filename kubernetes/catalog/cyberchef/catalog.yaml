@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: ghcr.io/gchq/cyberchef:latest
+name: cyberchef
+description: "The Cyber Swiss Army Knife - a web app for encryption, encoding, compression and data analysis."
+namespace: cyberchef
+source: community-apps
+tier: simple
+image: ghcr.io/gchq/cyberchef:latest
+categories:
+  - "Productivity"
+  - "Tools-Utilities"
+ingressroute:
+  host: cyberchef.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T06:48:57.320Z

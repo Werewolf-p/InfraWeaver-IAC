@@ -1,0 +1,259 @@
+global:
+  # Mount custom branding images as static files so they are served
+  # permanently at /static/dist/assets/icons/<filename> (no JWT expiry).
+  # subPath mounts add individual files without replacing the whole directory.
+  volumes:
+    - name: authentik-media
+      configMap:
+        name: authentik-media
+  volumeMounts:
+    - name: authentik-media
+      mountPath: /web/dist/assets/icons/logo.png
+      subPath: logo.png
+      readOnly: true
+    - name: authentik-media
+      mountPath: /web/dist/assets/icons/favicon.png
+      subPath: favicon.png
+      readOnly: true
+    - name: authentik-media
+      mountPath: /web/dist/assets/icons/banner.jpg
+      subPath: banner.jpg
+      readOnly: true
+
+  # Inject secrets from ExternalSecret-managed K8s secret (authentik-secrets)
+  env:
+    - name: AUTHENTIK_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secrets
+          key: secret-key
+    - name: AUTHENTIK_BOOTSTRAP_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secrets
+          key: bootstrap-password
+    - name: AUTHENTIK_BOOTSTRAP_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secrets
+          key: bootstrap-token
+    - name: AUTHENTIK_BOOTSTRAP_EMAIL
+      value: "akadmin@${BASE_DOMAIN}"
+    - name: AUTHENTIK_ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secrets
+          key: admin-password
+          # No optional: true — pod must fail if password key is missing.
+          # Silently empty password → blueprint runs without setting it → user locked out.
+
+    - name: AUTHENTIK_POSTGRESQL__PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secrets
+          key: postgresql-password
+    - name: AUTHENTIK_EMAIL__USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: authentik-smtp-secret
+          key: smtp-username
+    - name: AUTHENTIK_EMAIL__PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-smtp-secret
+          key: smtp-password
+    # 4 Gunicorn workers — reduces the chance of a request hitting a worker that
+    # is being recycled (max_requests reached). With 4 workers, 3 remain available
+    # while one restarts, eliminating the intermittent "flow infinite load" on first click.
+    - name: AUTHENTIK_WEB__WORKERS
+      value: "4"
+
+authentik:
+  # secret_key must be non-empty for chart templating; actual value from env var above
+  secret_key: "placeholder-overridden-by-env"
+  log_level: info
+  error_reporting:
+    enabled: false
+  email:
+    host: "smtp-mail.outlook.com"
+    port: 587
+    use_tls: true
+    use_ssl: false
+    timeout: 30
+    from: "noreply@${BASE_DOMAIN}"
+  postgresql:
+    host: "authentik-postgresql"
+    name: "authentik"
+    user: "authentik"
+    password: ""  # supplied via AUTHENTIK_POSTGRESQL__PASSWORD env var
+    port: 5432
+  redis:
+    host: "authentik-redis-master"
+
+blueprints:
+  configMaps:
+    - authentik-blueprint-branding
+    - authentik-blueprint-users
+    - authentik-blueprint-apps
+    - authentik-blueprint-access-control
+    - authentik-blueprint-forward-auth
+
+postgresql:
+  enabled: true
+  auth:
+    username: authentik
+    database: authentik
+    existingSecret: authentik-secrets
+    secretKeys:
+      userPasswordKey: postgresql-password
+  primary:
+    priorityClassName: platform-high
+    persistence:
+      annotations:
+        recurring-job-group.longhorn.io/truenas-backup: "enabled"
+      storageClass: local-path   # local-path: stable with 2 nodes/cp3 offline
+      size: 2Gi
+    resources:
+      requests:
+        cpu: 200m
+        memory: 768Mi
+      limits:
+        cpu: 500m
+        memory: 1280Mi   # was 768Mi → OOMKilled (exit 137) under normal load; give real headroom
+    # Spread PostgreSQL to CP3 (lightest node after game servers go to CP2)
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 80
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+              - talos-prod-cp2
+              - talos-prod-cp1
+
+# Redis is deployed as a standalone StatefulSet in manifests/redis.yaml
+# (authentik chart 2026.x dropped the bundled Redis subchart)
+
+server:
+  replicas: 1  # Memory-optimised: single replica saves ~800Mi; requiredAntiAffinity is trivially satisfied
+  priorityClassName: platform-high
+  nodeSelector: {}
+  podAnnotations:
+    infraweaver.io/rebalance-memory: "true"
+  ingress:
+    enabled: false
+  # Explicit rolling-update strategy: never take a pod down before a new one is ready.
+  # With 2 replicas and maxUnavailable=0, Kubernetes always keeps both pods serving
+  # traffic until the replacement is healthy — zero downtime during ArgoCD-triggered
+  # rollouts or resource-limit changes from the cluster editor.
+  deploymentStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  # Give enough time for Django migrations on a fresh DB (292+ migrations)
+  # NOTE: Authentik chart does NOT support livenessProbe.enabled field — use raw k8s probe fields only
+  startupProbe:
+    timeoutSeconds: 10
+  livenessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 30
+  readinessProbe:
+    # 30s is enough: Authentik static responses are available well before all migrations complete.
+    # Reduced from 60s so rolling updates complete faster (old pod released sooner).
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 6
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: authentik
+          app.kubernetes.io/component: server
+  affinity:
+    # REQUIRED anti-affinity: force 2 server replicas onto 2 different nodes for true HA.
+    # With 3 nodes, this guarantees a node reboot can only take down 1 of 2 replicas.
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: authentik
+              app.kubernetes.io/component: server
+          topologyKey: kubernetes.io/hostname
+    # Prefer CP1/CP2 — CP3 has PostgreSQL + Prometheus
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 60
+          preference:
+            matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - talos-prod-cp1
+                  - talos-prod-cp2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1500Mi
+
+worker:
+  replicas: 1  # Memory-optimised: single worker saves ~500Mi
+  priorityClassName: platform-high
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: authentik
+          app.kubernetes.io/component: worker
+  affinity:
+    # REQUIRED anti-affinity: force worker replicas onto different nodes too.
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: authentik
+              app.kubernetes.io/component: worker
+          topologyKey: kubernetes.io/hostname
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 60
+          preference:
+            matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - talos-prod-cp1
+                  - talos-prod-cp2
+  # Give enough time for Django migrations on a fresh DB (292+ migrations)
+  # NOTE: Authentik chart does NOT support livenessProbe.enabled field — use raw k8s probe fields only
+  startupProbe:
+    timeoutSeconds: 10
+  livenessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 30
+  readinessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 6
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi

@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: ghcr.io/librespeed/speedtest
+name: librespeed
+description: "Simple and lightweight local speedtest page. Avoid reverse-proxying since that will affect the measurement."
+namespace: librespeed
+source: community-apps
+tier: simple
+image: ghcr.io/librespeed/speedtest
+categories:
+  - "Network-Other"
+ingressroute:
+  host: librespeed.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T06:45:24.299Z

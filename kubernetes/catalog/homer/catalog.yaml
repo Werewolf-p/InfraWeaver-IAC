@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: b4bz/homer:latest
+name: homer
+description: "A dead simple static HOMe for your servER to keep your services on hand from a simple yaml config."
+namespace: homer
+source: community-apps
+tier: simple
+image: b4bz/homer:latest
+categories:
+  - "Network-Web"
+ingressroute:
+  host: homer.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T07:04:57.405Z

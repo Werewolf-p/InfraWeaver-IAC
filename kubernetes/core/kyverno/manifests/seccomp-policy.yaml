@@ -1,0 +1,96 @@
+---
+# Kyverno ClusterPolicy: require seccomp profile on catalog/apps pods
+#
+# Mode: Audit — logs violations but does NOT block deployments.
+# Rationale: seccomp RuntimeDefault blocks ~44% of Linux kernel syscalls used
+# in container escape CVEs (e.g. CVE-2022-0492, CVE-2023-0386). This is listed
+# in Kubernetes Pod Security Standards (Restricted) and NSA/CISA K8s Hardening Guide.
+#
+# RuntimeDefault uses the container runtime's built-in seccomp filter.
+# Localhost is also allowed for custom profiles.
+# Applies to: catalog/* and apps/* namespaces (not infrastructure).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-seccomp-profile
+  annotations:
+    policies.kyverno.io/title: Require Seccomp Profile
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Pods should set securityContext.seccompProfile.type to RuntimeDefault or Localhost.
+      RuntimeDefault enables the container runtime's default seccomp filter, blocking
+      ~44% of kernel syscalls and reducing the attack surface for container escapes.
+      This is an Audit policy — violations are logged but not blocked.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-seccomp-profile
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: >-
+          Pod "{{ request.object.metadata.name }}" should set
+          spec.securityContext.seccompProfile.type to RuntimeDefault or Localhost.
+          This limits kernel syscall exposure and reduces container escape risk.
+        pattern:
+          spec:
+            securityContext:
+              seccompProfile:
+                type: "RuntimeDefault | Localhost"
+---
+# Kyverno ClusterPolicy: warn when pods automount ServiceAccount tokens unnecessarily
+#
+# Mode: Audit — logs violations but does NOT block deployments.
+# Rationale: automountServiceAccountToken: true (the default) injects a K8s API
+# credential into every pod. Workloads that don't call the K8s API expose this
+# credential unnecessarily — if the container is compromised, the token can be
+# used for lateral movement (privilege escalation via RBAC).
+# NSA/CISA K8s Hardening Guide §4.2: "Disable auto-mounting of service account tokens".
+#
+# Applies to: catalog/* and apps/* namespaces.
+# Note: Infrastructure pods (argocd, cert-manager, etc.) legitimately need SA tokens.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: warn-automount-service-account-token
+  annotations:
+    policies.kyverno.io/title: Warn Automount ServiceAccount Token
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/description: >-
+      Pods that don't call the Kubernetes API should set
+      automountServiceAccountToken: false to prevent unnecessary credential exposure.
+      If a container is compromised and has a mounted SA token, attackers can use it
+      for lateral movement via RBAC. This is an Audit policy — violations are logged
+      but not blocked (some apps legitimately need SA tokens).
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-automount-serviceaccount-token
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  infraweaver.io/type: catalog-app
+      validate:
+        message: >-
+          Pod "{{ request.object.metadata.name }}" has automountServiceAccountToken enabled (default).
+          If this pod does not call the Kubernetes API, set automountServiceAccountToken: false
+          in the pod spec (or on the ServiceAccount) to reduce credential exposure.
+        pattern:
+          spec:
+            automountServiceAccountToken: "false"

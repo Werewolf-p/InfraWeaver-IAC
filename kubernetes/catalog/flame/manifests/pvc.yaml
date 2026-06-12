@@ -1,0 +1,22 @@
+---
+# PVC for "Host Path 1" → /app/data
+# Default path on Unraid: (not set)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flame-data-0
+  namespace: flame
+  labels:
+    app.kubernetes.io/name: flame
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/app/data"
+    infraweaver.io/required: "false"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

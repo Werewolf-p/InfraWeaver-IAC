@@ -1,0 +1,163 @@
+---
+# Namespace for Stirling-PDF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stirling-pdf
+  labels:
+    app.kubernetes.io/name: stirling-pdf
+    infraweaver.io/type: catalog-app
+---
+# Deployment — Stirling-PDF multi-tool PDF manipulation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stirling-pdf
+  namespace: stirling-pdf
+  labels:
+    app: stirling-pdf
+    infraweaver.io/auth: proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stirling-pdf
+  template:
+    metadata:
+      labels:
+        app: stirling-pdf
+    spec:
+      terminationGracePeriodSeconds: 30
+      priorityClassName: platform-standard
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stirling-pdf
+          image: frooodle/s-pdf:2.10.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DOCKER_ENABLE_SECURITY
+              value: "false"
+            - name: INSTALL_BOOK_AND_ADVANCED_HTML_OPS
+              value: "false"
+            - name: LANGS
+              value: "en_GB"
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxMetaspaceSize=256m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 800m
+              memory: 1200Mi  # Original stable config: 782Mi actual usage
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: stirling-pdf
+  namespace: stirling-pdf
+spec:
+  selector:
+    app: stirling-pdf
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# IngressRoute — VPN-only + Authentik forward-auth
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: stirling-pdf-int
+  namespace: traefik
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`stirling-pdf.int.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: stirling-pdf
+          namespace: stirling-pdf
+          port: 8080
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# NetworkPolicy — allow Traefik ingress only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-to-stirling-pdf
+  namespace: stirling-pdf
+spec:
+  podSelector:
+    matchLabels:
+      app: stirling-pdf
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - port: 8080
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# LimitRange — default resource constraints for namespace
+# Prevents pods without explicit resources from starving the node
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: stirling-pdf
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 200m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: 4000m
+        memory: 4Gi

@@ -1,0 +1,33 @@
+---
+# ArgoCD CMP — non-secret substitution values (design: docs/gitops-cmp-substitution.md §4a)
+#
+# Config ONLY. NEVER put secret-class placeholders here (${ADMIN_PASSWORD},
+# ${GITHUB_TOKEN}, ${ADMIN_LOGIN}). The envsubst CMP sidecar sources these keys
+# via envFrom and substitutes them into manifests at sync time; real secrets keep
+# flowing through OpenBao + ESO.
+#
+# This committed copy holds ${PLACEHOLDER} tokens, NOT real values, so the file is
+# safe to publish to the public template (scripts/sync-to-public.sh) and forkable.
+# At the DR rebuild, scripts/emit-cmp-substitutions.sh fills these from .env using
+# an explicit config-key allowlist (so a secret key can never slip in) and applies
+# the concrete ConfigMap imperatively, before app-of-apps bootstrap (design §5.2).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmp-substitutions
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: argocd
+data:
+  BASE_DOMAIN: "${BASE_DOMAIN}"
+  DEPLOY_REPO_URL: "${DEPLOY_REPO_URL}"
+  ONEDEV_URL: "${ONEDEV_URL}"
+  METALLB_TRAEFIK_VIP: "${METALLB_TRAEFIK_VIP}"
+  METALLB_COREDNS_VIP: "${METALLB_COREDNS_VIP}"
+  PUBLIC_INGRESS_IP: "${PUBLIC_INGRESS_IP}"
+  MGMT_SUBNET_CIDR: "${MGMT_SUBNET_CIDR}"
+  NODE_SUBNET_CIDR: "${NODE_SUBNET_CIDR}"
+  GITHUB_REPO: "${GITHUB_REPO}"
+  ADMIN_EMAIL: "${ADMIN_EMAIL}"
+  TRUENAS_HOST: "${TRUENAS_HOST}"
+  TARGET_REPLICAS: "${TARGET_REPLICAS}"

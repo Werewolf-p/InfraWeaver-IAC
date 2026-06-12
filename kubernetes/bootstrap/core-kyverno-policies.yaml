@@ -1,0 +1,41 @@
+---
+# Standalone ArgoCD Application for Kyverno ClusterPolicies.
+# ClusterPolicies are cluster-scoped so they deploy to the kyverno namespace
+# but apply cluster-wide (filtered to apps-* and catalog-* namespaces).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-kyverno-policies
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/kyverno/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: kyverno.io
+      kind: ClusterPolicy
+      jqPathExpressions:
+        - '.status'
+        - '.spec.admission'
+        - '.spec.rules[].skipBackgroundRequests'

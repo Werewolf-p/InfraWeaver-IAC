@@ -1,0 +1,9 @@
+# Authentik — self-hosted identity provider for SSO
+# Chart: https://charts.goauthentik.io
+# Deploys: Authentik server + worker + PostgreSQL + Redis
+repoURL: https://charts.goauthentik.io
+targetRevision: "2026.5.*"
+chart: authentik
+releaseName: authentik
+namespace: authentik
+replicas: "1"

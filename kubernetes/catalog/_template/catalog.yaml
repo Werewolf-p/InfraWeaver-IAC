@@ -1,0 +1,21 @@
+---
+# catalog.yaml — Template for new catalog apps
+# Copy this file to kubernetes/catalog/<your-app>/catalog.yaml
+# and fill in the fields below.
+
+name: APP_NAME
+description: "Short description of this app"
+namespace: APP_NAME    # K8s namespace to deploy into
+
+# Helm chart source (delete this section for raw manifests only)
+helm:
+  repoURL: https://charts.example.com
+  chart: chart-name
+  targetRevision: "1.0.*"
+  releaseName: APP_NAME
+
+# IngressRoute (optional — creates a Traefik route in the app namespace)
+# ingressroute:
+#   host: APP_NAME.int.${BASE_DOMAIN}
+#   entrypoint: websecure
+#   port: 80

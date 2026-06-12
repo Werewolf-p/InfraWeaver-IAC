@@ -1,0 +1,19 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  # Supplementary class for workloads that need data retention after PVC deletion.
+  # The Longhorn Helm chart manages the default "longhorn" StorageClass (reclaimPolicy: Delete).
+  # Use "longhorn-retain" for stateful workloads where accidental PVC deletion must not lose data.
+  name: longhorn-retain
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "2"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: ext4
+  dataLocality: "best-effort"

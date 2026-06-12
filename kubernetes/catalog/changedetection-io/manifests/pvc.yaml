@@ -1,0 +1,22 @@
+---
+# PVC for "Appdata" → /config
+# Default path on Unraid: (not set)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: changedetection-io-data-0
+  namespace: changedetection-io
+  labels:
+    app.kubernetes.io/name: changedetection-io
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/config"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

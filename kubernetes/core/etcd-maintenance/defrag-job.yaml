@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-metrics-logger
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: etcd-metrics-logger
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: etcd-metrics-logger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: etcd-metrics-logger
+subjects:
+  - kind: ServiceAccount
+    name: etcd-metrics-logger
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-metrics-logger
+  namespace: kube-system
+spec:
+  schedule: "0 2 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: etcd-metrics-logger
+          restartPolicy: Never
+          containers:
+            - name: metrics
+              image: bitnami/kubectl:1.33.4
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -ceu
+                - |
+                  echo "[etcd-metrics] $(date -u +'%Y-%m-%dT%H:%M:%SZ') collecting apiserver-exposed etcd metrics"
+                  kubectl get --raw /metrics \
+                    | grep -E '^(etcd_|apiserver_storage_)' \
+                    | sed 's/^/[etcd-metrics] /'

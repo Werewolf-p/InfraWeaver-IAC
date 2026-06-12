@@ -1,0 +1,13 @@
+# Community app installed from Unraid AppFeed
+# Source: ghcr.io/sharevb/it-tools:latest
+name: it-tools
+description: "This is a fork of the original it-tools with many changes: - Almost all tool PRs implemented from original - 95% of issues fixed from original - Full UI translation in many languages (Google translate"
+namespace: it-tools-test
+source: community-apps
+tier: simple
+image: ghcr.io/sharevb/it-tools:latest
+categories:
+  - "Tools-Utilities"
+ingressroute:
+  host: it-tools.int.${BASE_DOMAIN}
+installed_at: 2026-05-18T08:18:50.303Z

@@ -1,0 +1,406 @@
+global:
+  domain: argocd.int.${BASE_DOMAIN}
+  priorityClassName: platform-critical
+
+controller:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 300Mi
+    limits:
+      cpu: 2000m
+      memory: 1500Mi  # raised from 900Mi — controller was OOMKilled at 879Mi under load
+  # Increase probe timeouts — default 1s causes false-positive failures when controller
+  # is busy reconciling 50+ apps (1200m+ CPU observed, healthz can't respond in 1s)
+  readinessProbe:
+    timeoutSeconds: 10
+    failureThreshold: 5
+  livenessProbe:
+    timeoutSeconds: 10
+    failureThreshold: 5
+  # Prefer standard nodes (CP1/CP2, 18GB RAM each); avoid CP3 (only 6.6GB allocatable)
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: infraweaver.io/node-class
+            operator: In
+            values: [standard]
+
+server:
+  replicas: 1  # Memory-optimised: 3-node homelab, single replica is sufficient
+  extraArgs:
+    - --insecure  # TLS terminated at ingress
+
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: infraweaver.io/node-class
+                operator: In
+                values: [standard]
+
+  ingress:
+    # Ingress disabled — routing handled by Traefik IngressRoute in external-routes
+    # (kubernetes/platform/external-routes/manifests/10-routes-vpn-only.yaml → argocd-int)
+    # which uses argocd.int.${BASE_DOMAIN} with forward-auth middleware.
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi  # raised from 128Mi — server OOMKilled (11 restarts, exitCode 255)
+    limits:
+      cpu: 500m
+      memory: 768Mi  # raised from 512Mi — prevents liveness probe timeouts under load
+
+repoServer:
+  replicas: 1  # Memory-optimised: single replica saves ~160Mi
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: infraweaver.io/node-class
+                operator: In
+                values: [standard]
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: argocd-repo-server
+            topologyKey: kubernetes.io/hostname
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Increase liveness probe timeout — default 1s is too tight when repo server is busy
+  # with git clone/fetch operations, causing false-positive kills (52 restarts observed)
+  livenessProbe:
+    timeoutSeconds: 10
+    failureThreshold: 5
+  readinessProbe:
+    timeoutSeconds: 10
+    failureThreshold: 5
+  # envsubst Config Management Plugin sidecar (design: docs/gitops-cmp-substitution.md §4c).
+  # NB: the argo-cd Helm chart's repo-server sidecar key is `extraContainers` (+ `volumes`);
+  # the design doc wrote `sidecarContainers`, which this chart ignores. Substitutes the
+  # allowlisted ${CONFIG} placeholders at sync time; secrets stay in OpenBao + ESO.
+  extraContainers:
+    - name: cmp-envsubst
+      image: ghcr.io/werewolf-p/argocd-cmp-tools@sha256:05f971df8600134be5ac2a82ca938286d86c33e40e2f07ba70d834d9afd11e90
+      command: ["/var/run/argocd/argocd-cmp-server"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+      envFrom:
+        - configMapRef:
+            name: argocd-cmp-substitutions
+            optional: true
+      env:
+        # Kubernetes does NOT expand ${...} in env values, so this is passed to
+        # envsubst verbatim as its shell-format allowlist — only these names are
+        # substituted; anything else (incl. secret-class tokens) is left for the
+        # plugin's fail-closed grep to catch.
+        - name: ALLOWED_VARS
+          value: "${BASE_DOMAIN} ${DEPLOY_REPO_URL} ${ONEDEV_URL} ${METALLB_TRAEFIK_VIP} ${METALLB_COREDNS_VIP} ${PUBLIC_INGRESS_IP} ${MGMT_SUBNET_CIDR} ${NODE_SUBNET_CIDR} ${GITHUB_REPO} ${ADMIN_EMAIL} ${TRUENAS_HOST} ${TARGET_REPLICAS}"
+      volumeMounts:
+        - { name: var-files, mountPath: /var/run/argocd }
+        - { name: plugins, mountPath: /home/argocd/cmp-server/plugins }
+        - { name: cmp-tmp, mountPath: /tmp }
+        - name: argocd-cmp-envsubst-plugin
+          mountPath: /home/argocd/cmp-server/config/plugin.yaml
+          subPath: plugin.yaml
+  volumes:
+    - { name: cmp-tmp, emptyDir: {} }
+    - name: argocd-cmp-envsubst-plugin
+      configMap:
+        name: argocd-cmp-envsubst-plugin
+
+applicationSet:
+  replicas: 1  # Memory-optimised: single replica saves ~100Mi
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: infraweaver.io/node-class
+                operator: In
+                values: [standard]
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: argocd-applicationset-controller
+            topologyKey: kubernetes.io/hostname
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+configs:
+  cm:
+    # Allow apps to sync without manual approval for platform-managed apps
+    resource.customizations.ignoreDifferences.admissionregistration.k8s.io_MutatingWebhookConfiguration: |
+      jqPathExpressions:
+        - '.webhooks[]?.clientConfig.caBundle'
+    # ValidatingWebhookConfigurations also get caBundle injected (Kyverno, cert-manager, ESO)
+    resource.customizations.ignoreDifferences.admissionregistration.k8s.io_ValidatingWebhookConfiguration: |
+      jqPathExpressions:
+        - '.webhooks[]?.clientConfig.caBundle'
+    # CRDs accumulate runtime-only fields (status.conditions, storedVersions, webhook caBundle)
+    resource.customizations.ignoreDifferences.apiextensions.k8s.io_CustomResourceDefinition: |
+      jqPathExpressions:
+        - '.spec.conversion.webhook.clientConfig.caBundle'
+        - '.spec.preserveUnknownFields'
+        - '.status'
+    # PodDisruptionBudget status is filled in by the Kubernetes controller (disruptionsAllowed,
+    # disruptedPods, currentHealthy, etc.) — ArgoCD should not consider this as drift.
+    resource.customizations.ignoreDifferences.policy_PodDisruptionBudget: |
+      jqPathExpressions:
+        - '.status'
+    # StatefulSet volumeClaimTemplates: Kubernetes injects apiVersion, kind, status.phase, and
+    # defaults spec.volumeMode="Filesystem" at creation time. These fields are not authored in
+    # git manifests but appear in the live resource, causing perpetual OutOfSync drift.
+    # VCTs are also IMMUTABLE — ArgoCD cannot apply changes even if it tries. Ignoring all
+    # Kubernetes-injected VCT fields is safe and prevents both drift detection and apply errors.
+    resource.customizations.ignoreDifferences.apps_StatefulSet: |
+      jqPathExpressions:
+        - '.spec.volumeClaimTemplates[].status'
+        - '.spec.volumeClaimTemplates[].spec.volumeMode'
+        - '.spec.volumeClaimTemplates[].apiVersion'
+        - '.spec.volumeClaimTemplates[].kind'
+    # Applications: notifications controller updates notified.notifications annotation with
+    # timestamps on every notification send, causing perpetual drift on bootstrap-managed apps.
+    resource.customizations.ignoreDifferences.argoproj.io_Application: |
+      jsonPointers:
+        - /metadata/annotations/notified.notifications.argoproj.io
+        - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+    # Namespaces: argocd.argoproj.io/tracking-id can only have one value but multiple apps
+    # may legitimately manage different FIELDS of the same Namespace (e.g., app labels vs PSA
+    # labels). Ignoring this annotation globally prevents SSA ownership ping-pong between
+    # core-psa-manifests and any app that also creates/labels its own namespace.
+    resource.customizations.ignoreDifferences.core_Namespace: |
+      jsonPointers:
+        - /metadata/annotations/argocd.argoproj.io~1tracking-id
+    # CronJob health: ArgoCD's built-in check marks Degraded after any single missed run
+    # (lastScheduleTime > lastSuccessfulTime). This causes false alarms for transient failures.
+    # Override: only mark Progressing when jobs are actively running; otherwise Healthy.
+    # Real alerting for persistent CronJob failures is handled by PrometheusRule alerts.
+    resource.customizations.health.batch_CronJob: |
+      hs = {}
+      if obj.status ~= nil and obj.status.active ~= nil and #obj.status.active > 0 then
+        hs.status = "Progressing"
+        hs.message = #obj.status.active .. " active job(s) running"
+        return hs
+      end
+      hs.status = "Healthy"
+      hs.message = "CronJob scheduled"
+      return hs
+    # On bare-metal (no cloud LB), ingresses never get an ADDRESS — mark them always healthy
+    resource.customizations.health.networking.k8s.io_Ingress: |
+      hs = {}
+      hs.status = "Healthy"
+      hs.message = "Ingress managed"
+      return hs
+    # Custom health check for ArgoCD Applications (App of Apps pattern).
+    # Without this, parent apps (e.g., bootstrap) report "Degraded" because
+    # ArgoCD has no built-in health aggregation for Application CRDs.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+        if obj.status.sync ~= nil and obj.status.sync.status == "OutOfSync" then
+          hs.status = "Degraded"
+          hs.message = "Application is out of sync"
+        end
+      end
+      if hs.status == nil then
+        hs.status = "Progressing"
+        hs.message = "Waiting for application health"
+      end
+      return hs
+    # Local user accounts — passwords set by full-redeploy bootstrap (stored in OpenBao)
+    accounts.admin: login
+    # Disable built-in admin account — OIDC (Authentik) is the sole login path
+    admin.enabled: "false"
+    # OIDC via Authentik — client secret read from argocd-secret by ArgoCD
+    oidc.config: |
+      name: Authentik
+      issuer: https://auth.${BASE_DOMAIN}/application/o/argocd/
+      clientID: argocd
+      clientSecret: $oidc.authentik.clientSecret
+      requestedScopes:
+        - openid
+        - profile
+        - email
+    # Override default exclusions: allow Endpoints/EndpointSlice so ArgoCD can manage
+    # bare-metal backend Endpoints in the traefik namespace (external-routes app).
+    resource.exclusions: |
+      - apiGroups:
+        - coordination.k8s.io
+        kinds:
+        - Lease
+      - apiGroups:
+        - authentication.k8s.io
+        - authorization.k8s.io
+        kinds:
+        - SelfSubjectReview
+        - TokenReview
+        - LocalSubjectAccessReview
+  params:
+    server.insecure: "true"
+  rbac:
+    policy.csv: |
+      # Individual user mappings (username = sub from OIDC token)
+      g, admin, role:admin
+      # Group mappings (group name from OIDC groups claim, if configured)
+      g, platform-admins, role:admin
+      g, platform-users, role:readonly
+    policy.default: role:readonly
+  # No hardcoded passwords — admin password auto-generated by ArgoCD on first deploy,
+  # retrieved from argocd-initial-admin-secret and stored in OpenBao by bootstrap step.
+  # Admin password set by bootstrap step (random, stored in OpenBao).
+
+redis:
+  serviceAccount:
+    create: true
+    name: argocd-redis  # use pre-existing SA with secret create/get RBAC for secret-init
+  # Use the existing secret to avoid the secret-init Job hook race condition.
+  # The Job has hook-delete-policy: hook-succeeded which causes ArgoCD to wait
+  # indefinitely after the Job self-deletes on success.
+  existingSecret: argocd-redis
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+redis-ha:
+  enabled: false  # enable for productie HA
+
+notifications:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  # Discord notifications for important ArgoCD events
+  # Webhook URL is pulled from argocd-discord-secret (ExternalSecret in this namespace)
+  # RBAC grant is in kubernetes/core/argocd/manifests/notifications-rbac.yaml
+  notifiers:
+    service.webhook.discord: |
+      url: $argocd-discord-secret:webhook-url
+      headers:
+        - name: Content-Type
+          value: application/json
+
+  templates:
+    template.app-sync-failed: |
+      webhook:
+        discord:
+          method: POST
+          body: |
+            {
+              "embeds": [{
+                "title": ":x: Sync Failed — {{ .app.metadata.name }}",
+                "color": 15158332,
+                "fields": [
+                  {"name": "Health", "value": "{{ .app.status.health.status }}", "inline": true},
+                  {"name": "Sync", "value": "{{ .app.status.sync.status }}", "inline": true},
+                  {"name": "Message", "value": "{{ trunc 200 (default `(no message)` .app.status.operationState.message) }}"},
+                  {"name": "Action", "value": "Self-healer will retry. If repeated, check ArgoCD UI.", "inline": false}
+                ],
+                "url": "{{ .context.argocdUrl }}/applications/{{ .app.metadata.name }}"
+              }]
+            }
+    # app-health-degraded only fires after the app stays Degraded beyond its
+    # configured minimum duration (default 10m; override via
+    # infraweaver.io/min-degraded-duration: 5m|10m|30m|self-healer-only).
+    # Self-healer sends its own escalation for *persistent* (>30m) degradations.
+    template.app-health-degraded: |
+      webhook:
+        discord:
+          method: POST
+          body: |
+            {
+              "embeds": [{
+                "title": ":warning: Persistent App Degraded — {{ .app.metadata.name }}",
+                "color": 15105570,
+                "description": "{{ default `(no health message)` .app.status.health.message }}",
+                "fields": [
+                  {"name": "Health", "value": "{{ .app.status.health.status }}", "inline": true},
+                  {"name": "Sync", "value": "{{ .app.status.sync.status }}", "inline": true},
+                  {"name": "Since", "value": "{{ .app.status.health.lastTransitionTime }}", "inline": false},
+                  {"name": "Action", "value": "Inspect the app resource tree and recent events. Self-healer escalates again only if still degraded >30m.", "inline": false}
+                ],
+                "url": "{{ .context.argocdUrl }}/applications/{{ .app.metadata.name }}"
+              }]
+            }
+
+  triggers:
+    trigger.on-sync-failed: |
+      - when: app.status.operationState != nil && app.status.operationState.phase in ['Error', 'Failed']
+        oncePer: app.status.operationState.startedAt
+        send: [app-sync-failed]
+    # Fires once per Degraded episode, but only after the app has remained
+    # Degraded for its minimum duration gate.
+    # Duration gates:
+    #   default:                        10m
+    #   infraweaver.io/min-degraded-duration: 5m|10m|30m|self-healer-only
+    # Excluded apps:
+    #   bootstrap:                     app-of-apps (inherits worst-child health)
+    #   core-argocd-manifests:         self-referential (manages self-healer CronJob)
+    #   core-external-secrets-manifests: health tied to OpenBao uptime
+    # Suppressed conditions:
+    #   infraweaver.io/transient=true  annotation: intentionally transient app
+    #   op phase Running/Terminating:  sync/self-healer operation in progress
+    trigger.on-health-degraded: |
+      - when: >-
+          app.status.health.status == 'Degraded' &&
+          app.status.health.lastTransitionTime != nil &&
+          (app.status?.operationState == nil || app.status.operationState.phase not in ['Running', 'Terminating']) &&
+          app.metadata.name not in ['bootstrap', 'core-argocd-manifests', 'core-external-secrets-manifests'] &&
+          app.metadata.annotations['infraweaver.io/transient'] != 'true' &&
+          app.metadata.annotations['infraweaver.io/min-degraded-duration'] != 'self-healer-only' &&
+          (
+            (app.metadata.annotations['infraweaver.io/min-degraded-duration'] == '5m' && time.Now().Sub(time.Parse(app.status.health.lastTransitionTime)).Minutes() >= 5) ||
+            (app.metadata.annotations['infraweaver.io/min-degraded-duration'] == '30m' && time.Now().Sub(time.Parse(app.status.health.lastTransitionTime)).Minutes() >= 30) ||
+            ((app.metadata.annotations['infraweaver.io/min-degraded-duration'] == nil || app.metadata.annotations['infraweaver.io/min-degraded-duration'] in ['', '10m']) && time.Now().Sub(time.Parse(app.status.health.lastTransitionTime)).Minutes() >= 10)
+          )
+        oncePer: app.status.health.lastTransitionTime
+        send: [app-health-degraded]
+
+  subscriptions:
+    - recipients:
+        - webhook:discord
+      triggers:
+        - on-sync-failed
+        - on-health-degraded
+
+# Self-healing: priorityClassName moved to global block above

@@ -1,0 +1,80 @@
+{
+  "name": "DNS Manager",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dns",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "dns-wh",
+      "name": "DNS Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "dns"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst action = body.action || 'list';\nconst cfToken = '${CLOUDFLARE_API_TOKEN}';\nconst cfZone = '${CLOUDFLARE_ZONE_ID}';\nconst baseUrl = `https://api.cloudflare.com/client/v4/zones/${cfZone}/dns_records`;\nconst headers = { 'Authorization': `Bearer ${cfToken}`, 'Content-Type': 'application/json' };\n\nasync function cfReq(method, url, data) {\n  const opts = { method, url, headers, json: true };\n  if (data) opts.body = data;\n  return await this.helpers.httpRequest(opts);\n}\n\n// Use reliable DoH endpoints only\nconst dohResolvers = [\n  { name: 'Cloudflare', url: 'https://cloudflare-dns.com/dns-query' },\n  { name: 'Google', url: 'https://dns.google/resolve' }\n];\n\nasync function dohQuery(domain, resolver) {\n  try {\n    const resp = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `${resolver.url}?name=${domain}&type=A`,\n      headers: { 'Accept': 'application/dns-json' },\n      json: true,\n      timeout: 8000\n    });\n    return { resolver: resolver.name, ok: resp.Status === 0, answers: (resp.Answer||[]).map(a => a.data) };\n  } catch(e) { return { resolver: resolver.name, ok: false, error: e.message }; }\n}\n\ntry {\n  if (action === 'list') {\n    let url = `${baseUrl}?per_page=100`;\n    if (body.filter) url += `&name=${body.filter}`;\n    if (body.type) url += `&type=${body.type}`;\n    const resp = await cfReq.call(this, 'GET', url);\n    const records = (resp.result||[]).filter(r => !r.name.startsWith('edns-')).map(r => ({\n      id: r.id, name: r.name, type: r.type, content: r.content,\n      proxied: r.proxied, ttl: r.ttl,\n      tier: r.name.includes('.int.') ? 'private' : (r.proxied ? 'public-cdn' : 'public-direct'),\n      managed_by: (r.comment||'').includes('external-dns') ? 'external-dns' : 'manual'\n    }));\n    return [{json: {status:'ok', count:records.length, records}}];\n  }\n\n  if (action === 'create') {\n    const {name, type='A', content, proxied, ttl=1, comment=''} = body;\n    if (!name || !content) throw new Error('Required: name, content');\n    const isInt = name.includes('.int.');\n    const shouldProxy = proxied !== undefined ? proxied : !isInt;\n    const resp = await cfReq.call(this, 'POST', baseUrl, {\n      type, name, content, proxied: shouldProxy, ttl: shouldProxy ? 1 : (ttl||300),\n      comment: comment || `DNS Manager | ${new Date().toISOString()}`\n    });\n    if (!resp.success) throw new Error(JSON.stringify(resp.errors));\n    return [{json: {status:'ok', action:'created', record: {id:resp.result.id, name:resp.result.name, content:resp.result.content, proxied:resp.result.proxied, tier: isInt?'private':'public'}}}];\n  }\n\n  if (action === 'update') {\n    const {id, name, type, content, proxied, ttl} = body;\n    if (!id && !name) throw new Error('Required: id or name');\n    let recordId = id;\n    if (!recordId) {\n      const s = await cfReq.call(this, 'GET', `${baseUrl}?name=${name}`);\n      if (!s.result || !s.result.length) throw new Error(`Not found: ${name}`);\n      recordId = s.result[0].id;\n    }\n    const patch = {};\n    if (content) patch.content = content;\n    if (proxied !== undefined) patch.proxied = proxied;\n    if (ttl) patch.ttl = ttl;\n    if (type) patch.type = type;\n    const resp = await cfReq.call(this, 'PATCH', `${baseUrl}/${recordId}`, patch);\n    if (!resp.success) throw new Error(JSON.stringify(resp.errors));\n    return [{json: {status:'ok', action:'updated', record: {id:resp.result.id, name:resp.result.name, content:resp.result.content, proxied:resp.result.proxied}}}];\n  }\n\n  if (action === 'delete') {\n    let recordId = body.id;\n    if (!recordId && body.name) {\n      const s = await cfReq.call(this, 'GET', `${baseUrl}?name=${body.name}`);\n      if (!s.result || !s.result.length) throw new Error(`Not found: ${body.name}`);\n      recordId = s.result[0].id;\n    }\n    if (!recordId) throw new Error('Required: id or name');\n    const resp = await cfReq.call(this, 'DELETE', `${baseUrl}/${recordId}`);\n    if (!resp.success) throw new Error(JSON.stringify(resp.errors));\n    return [{json: {status:'ok', action:'deleted', id: recordId}}];\n  }\n\n  if (action === 'health') {\n    const resp = await cfReq.call(this, 'GET', `${baseUrl}?per_page=100&type=A`);\n    const records = (resp.result||[]).filter(r => !r.name.startsWith('edns-') && !r.name.includes('.int.'));\n    const results = [];\n    for (const r of records.slice(0, 20)) {\n      const checks = await Promise.all(dohResolvers.map(res => dohQuery.call(this, r.name, res)));\n      const healthy = checks.every(c => c.ok);\n      results.push({name:r.name, proxied:r.proxied, healthy, checks: checks.map(c=>({resolver:c.resolver, ok:c.ok, ips:c.answers||[], error:c.error}))});\n    }\n    const unhealthy = results.filter(r => !r.healthy);\n    return [{json: {status:'ok', total:results.length, healthy:results.length-unhealthy.length, unhealthy:unhealthy.length, issues: unhealthy.length>0 ? unhealthy : undefined, all_records: results}}];\n  }\n\n  if (action === 'propagation') {\n    if (!body.domain) throw new Error('Required: domain');\n    const checks = await Promise.all(dohResolvers.map(r => dohQuery.call(this, body.domain, r)));\n    const okChecks = checks.filter(c => c.ok);\n    const propagated = okChecks.length === dohResolvers.length;\n    return [{json: {status:'ok', domain:body.domain, propagated, coverage:`${okChecks.length}/${dohResolvers.length}`, resolvers:checks}}];\n  }\n\n  if (action === 'suggest') {\n    const resp = await cfReq.call(this, 'GET', `${baseUrl}?per_page=100&type=A`);\n    const existing = new Set((resp.result||[]).map(r => r.name));\n    const services = ['grafana','prometheus','longhorn','argocd','openbao','wiki','gitea','vaultwarden','forgejo','it-tools','stirling-pdf','excalidraw','actual'];\n    const suggestions = services.filter(s => !existing.has(`${s}.int.${BASE_DOMAIN}`)).map(s => ({\n      name:`${s}.int.${BASE_DOMAIN}`, type:'A', content:'${METALLB_TRAEFIK_VIP}', proxied:false,\n      note:'Covered by wildcard but explicit record improves monitoring visibility'\n    }));\n    return [{json: {status:'ok', suggestions, total:suggestions.length}}];\n  }\n\n  if (action === 'bulk') {\n    const ops = body.operations || [];\n    if (!ops.length) throw new Error('Required: operations array [{action,name,content,...}]');\n    const results = [];\n    for (const op of ops) {\n      try {\n        if (op.action === 'create') {\n          const r = await cfReq.call(this, 'POST', baseUrl, {type:op.type||'A', name:op.name, content:op.content, proxied:!!op.proxied, ttl:op.ttl||1, comment:'Bulk DNS Manager'});\n          results.push({name:op.name, ok:r.success});\n        } else if (op.action === 'delete') {\n          let rid = op.id;\n          if (!rid && op.name) { const s = await cfReq.call(this,'GET',`${baseUrl}?name=${op.name}`); rid = s.result && s.result[0] ? s.result[0].id : null; }\n          if (rid) { const r = await cfReq.call(this,'DELETE',`${baseUrl}/${rid}`); results.push({name:op.name||op.id, ok:r.success}); }\n          else results.push({name:op.name, ok:false, error:'Not found'});\n        }\n      } catch(e) { results.push({name:op.name, ok:false, error:e.message}); }\n    }\n    return [{json: {status:'ok', action:'bulk', total:results.length, succeeded:results.filter(r=>r.ok).length, results}}];\n  }\n\n  if (action === 'stats') {\n    const resp = await cfReq.call(this, 'GET', `${baseUrl}?per_page=100`);\n    const records = (resp.result||[]).filter(r => !r.name.startsWith('edns-'));\n    const byType = {}; const byTier = {};\n    for (const r of records) {\n      byType[r.type] = (byType[r.type]||0) + 1;\n      const tier = r.name.includes('.int.') ? 'private' : (r.proxied ? 'public-cdn' : 'public-direct');\n      byTier[tier] = (byTier[tier]||0) + 1;\n    }\n    return [{json: {status:'ok', total:records.length, by_type:byType, by_tier:byTier}}];\n  }\n\n  return [{json: {status:'error', message:`Unknown action: ${action}`, available:['list','create','update','delete','health','propagation','suggest','bulk','stats']}}];\n} catch(e) { return [{json: {status:'error', message:e.message}}]; }\n"
+      },
+      "id": "dns-code",
+      "name": "DNS Operations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "dns-resp",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        690,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "DNS Webhook": {
+      "main": [
+        [
+          {
+            "node": "DNS Operations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DNS Operations": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "executionTimeout": 60
+  }
+}

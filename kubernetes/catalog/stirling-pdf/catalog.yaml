@@ -1,0 +1,19 @@
+---
+# catalog.yaml — source definition for catalog apps
+# This file is read by scripts/sync-catalog.sh to generate ArgoCD Applications.
+#
+# Catalog app: Stirling-PDF — self-hosted PDF manipulation tools
+# Access: stirling-pdf.int.${BASE_DOMAIN} (VPN-only, protected by Authentik forward-auth)
+# SSO: Traefik forward-auth (no native OIDC in community edition)
+
+name: stirling-pdf
+description: "Stirling-PDF — self-hosted PDF tools (merge, split, convert, compress, rotate)"
+namespace: stirling-pdf
+
+ingressroute:
+  host: stirling-pdf.int.${BASE_DOMAIN}
+  entrypoint: websecure
+
+# No secrets needed — authentication is handled by Traefik forward-auth middleware.
+# secrets: (intentionally omitted)
+replicas: "1"

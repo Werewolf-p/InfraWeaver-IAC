@@ -1,0 +1,20 @@
+# application.yaml.disabled — VictoriaMetrics lightweight monitoring stack
+#
+# To switch from kube-prometheus-stack to VictoriaMetrics:
+#   1. Rename this file to application.yaml
+#   2. Rename kubernetes/monitoring/kube-prometheus-stack/application.yaml → application.yaml.disabled
+#   OR set MONITORING_STACK=victoria-metrics in your .env and re-run configure-platform.sh
+#
+# RAM savings vs kube-prometheus-stack:
+#   kube-prometheus-stack:   Prometheus ~500Mi + operator ~100Mi + kube-state-metrics ~200Mi
+#   victoria-metrics-k8s-stack: VMSingle  ~200Mi + VMOperator ~80Mi  + kube-state-metrics ~200Mi
+#   Net savings: ~320Mi per cluster node
+#
+# VictoriaMetrics is PromQL-compatible: Grafana datasource just points to VMSingle
+# instead of Prometheus. All existing dashboards work without changes.
+repoURL: https://victoriametrics.github.io/helm-charts/
+targetRevision: "0.43.*"
+chart: victoria-metrics-k8s-stack
+releaseName: victoria-metrics-k8s-stack
+namespace: monitoring
+replicas: "1"

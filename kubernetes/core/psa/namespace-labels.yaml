@@ -1,0 +1,198 @@
+---
+# Pod Security Admission (PSA) namespace labels — always applied, independent of Kyverno.
+#
+# Enforcement levels:
+#   privileged  — unrestricted (used only for host-level system components)
+#   baseline    — blocks most known privilege escalations; allows typical workloads
+#   restricted  — requires non-root, no hostPID/IPC, limited capabilities
+#
+# Platform namespaces are set to "baseline" enforce + "restricted" warn so drift is
+# visible in the audit log without breaking running workloads.
+# Networking and storage infrastructure namespaces stay "privileged" since their
+# pods legitimately need host-level access (eBPF, CNI, storage drivers).
+#
+# ⚠️  SINGLE SOURCE OF TRUTH: This file is the ONLY place PSA labels are set.
+#     Individual apps must NOT include Namespace resources with PSA labels.
+#     They rely on CreateNamespace=true to auto-create their namespace; PSA is set here.
+#     This prevents SSA ownership ping-pong between apps managing the same Namespace.
+
+# ── Host-level infra: privileged ────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: longhorn-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+# ── GitOps / CD: baseline ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+# ── Platform services: baseline enforce + restricted warn ────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-secrets
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openbao
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ── DNS / Networking services: baseline ─────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-dns
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+# ── InfraWeaver application namespaces ──────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infraweaver-console
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    infraweaver.io/type: catalog-app
+    app.kubernetes.io/name: infraweaver-console
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infraweaver-system
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/name: infraweaver-node
+---
+# ── Identity/SSO: baseline ───────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authentik
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+# ── Observability: privileged (Prometheus needs host metrics, Loki needs hostPath) ───
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+# ── Source control: privileged (CI agent needs Docker socket for image builds) ─
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: onedev
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+    app.kubernetes.io/name: onedev
+    infraweaver.io/type: catalog-app
+---
+# ── Image registry (Zot): baseline ───────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    infraweaver.io/component: registry
+---
+# ── In-cluster image builder (BuildKit): privileged ──────────────────────────
+# Rootful BuildKit needs a privileged container (Talos nodes have user
+# namespaces disabled, so rootless BuildKit cannot run). Build namespace only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: build
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+    infraweaver.io/component: buildkit

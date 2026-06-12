@@ -1,0 +1,14 @@
+# Community app installed from Unraid AppFeed
+# Source: lscr.io/linuxserver/grocy
+name: grocy
+description: "Grocy(https://github.com/grocy/grocy) is an ERP system for your kitchen! Cut down on food waste, and manage your chores with this brilliant utility. Keep track of your purchases, how much food you are"
+namespace: grocy
+source: community-apps
+tier: simple
+image: lscr.io/linuxserver/grocy
+categories:
+  - "Productivity"
+  - "Tools-Utilities"
+ingressroute:
+  host: grocy.int.${BASE_DOMAIN}
+installed_at: 2026-05-17T20:35:27.169Z

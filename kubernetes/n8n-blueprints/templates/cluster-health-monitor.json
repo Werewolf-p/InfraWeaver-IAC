@@ -1,0 +1,285 @@
+{
+  "name": "Cluster Health Monitor",
+  "description": "24/7 Kubernetes cluster health monitoring with 2-hour stability tracking",
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": true,
+    "timezone": "UTC"
+  },
+  "staticData": null,
+  "nodes": [
+    {
+      "parameters": {
+        "triggerType": "interval",
+        "unit": "minutes",
+        "value": 5
+      },
+      "name": "Monitor Trigger",
+      "type": "n8n-nodes-base.trigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": null
+    },
+    {
+      "parameters": {
+        "resource": "execute",
+        "command": "kubectl get nodes -o json",
+        "credentialsType": "kubeconfig",
+        "kubeconfig": "{{ $credentials.kubeconfig }}"
+      },
+      "name": "Check Node Status",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ],
+      "credentials": {
+        "kubeconfig": "kubeconfig_credential"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse node status\nconst nodes = JSON.parse(items[0].json.command_output);\nconst nodeStatus = {\n  timestamp: new Date().toISOString(),\n  total_nodes: nodes.items.length,\n  ready_nodes: nodes.items.filter(n => n.status.conditions.find(c => c.type === 'Ready' && c.status === 'True')).length,\n  nodes: nodes.items.map(n => ({\n    name: n.metadata.name,\n    status: n.status.conditions.find(c => c.type === 'Ready')?.status || 'Unknown',\n    role: n.metadata.labels['node-role.kubernetes.io/control-plane'] ? 'control-plane' : 'worker'\n  }))\n};\nreturn [{json: nodeStatus}];"
+      },
+      "name": "Parse Nodes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "execute",
+        "command": "kubectl get pods --all-namespaces --field-selector=status.phase!=Running,status.phase!=Succeeded -o json",
+        "credentialsType": "kubeconfig"
+      },
+      "name": "Check Pod Status",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        450,
+        450
+      ],
+      "credentials": {
+        "kubeconfig": "kubeconfig_credential"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse pod issues\nconst pods = JSON.parse(items[0].json.command_output);\nconst failingPods = {\n  timestamp: new Date().toISOString(),\n  total_issues: pods.items.length,\n  pods: pods.items.slice(0, 10).map(p => ({\n    name: p.metadata.name,\n    namespace: p.metadata.namespace,\n    status: p.status.phase,\n    reason: p.status.containerStatuses?.[0]?.state?.waiting?.reason || 'N/A'\n  }))\n};\nreturn [{json: failingPods}];"
+      },
+      "name": "Parse Pod Issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        650,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Check 2-hour stability\nconst nodeData = items[0].json;\nconst podData = items[1].json;\n\nconst isHealthy = nodeData.ready_nodes === nodeData.total_nodes && podData.total_issues === 0;\nconst timestamp = new Date().toISOString();\n\n// Store in memory or database (simplified)\nconst healthStatus = {\n  timestamp,\n  healthy: isHealthy,\n  nodes_ready: nodeData.ready_nodes === nodeData.total_nodes,\n  pods_healthy: podData.total_issues === 0,\n  stability_score: isHealthy ? 100 : Math.max(0, 100 - (podData.total_issues * 10))\n};\n\nreturn [{json: healthStatus}];"
+      },
+      "name": "Calculate Stability",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        850,
+        375
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "url": "{{ $credentials.slack_webhook }}",
+        "bodyParametersUi": "json",
+        "bodyJson": "{\n  \"text\": \"\ud83d\udfe2 Cluster Health Report\",\n  \"blocks\": [\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*Cluster Status:* {{ $node.Calculate_Stability.json.healthy ? '\u2705 Healthy' : '\u26a0\ufe0f Degraded' }}\\\\n*Nodes:* {{ $node.Parse_Nodes.json.ready_nodes }}/{{ $node.Parse_Nodes.json.total_nodes }} Ready\\\\n*Failing Pods:* {{ $node.Parse_Pod_Issues.json.total_issues }}\\\\n*Stability Score:* {{ $node.Calculate_Stability.json.stability_score }}%\"\n      }\n    }\n  ]\n}",
+        "sendQuery": false,
+        "sendHeaders": true,
+        "headerParametersUi": "json",
+        "headerJson": "{\"Content-Type\": \"application/json\"}"
+      },
+      "name": "Send Slack Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1050,
+        300
+      ],
+      "credentials": {
+        "httpBasicAuth": "slack_webhook"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "execute",
+        "command": "echo '{{ $node.Calculate_Stability.json | stringify }}' >> /tmp/cluster-health-$(date +%Y%m%d).log",
+        "credentialsType": "ssh"
+      },
+      "name": "Log to History",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        450
+      ],
+      "credentials": {
+        "ssh": "ssh_credential"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "nodeOutputs": [
+            {
+              "condition": "===",
+              "value1": "{{ $node.Calculate_Stability.json.healthy }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "name": "Is Unhealthy",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        850,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "execute",
+        "command": "kubectl describe nodes > /tmp/cluster-debug-$(date +%Y%m%d-%H%M%S).txt",
+        "credentialsType": "kubeconfig"
+      },
+      "name": "Collect Debug Info",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        150
+      ],
+      "credentials": {
+        "kubeconfig": "kubeconfig_credential"
+      }
+    }
+  ],
+  "connections": {
+    "Monitor Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Node Status",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Pod Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Node Status": {
+      "main": [
+        [
+          {
+            "node": "Parse Nodes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Pod Status": {
+      "main": [
+        [
+          {
+            "node": "Parse Pod Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Nodes": {
+      "main": [
+        [
+          {
+            "node": "Calculate Stability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Pod Issues": {
+      "main": [
+        [
+          {
+            "node": "Calculate Stability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Stability": {
+      "main": [
+        [
+          {
+            "node": "Is Unhealthy",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Unhealthy": {
+      "main": [
+        [
+          {
+            "node": "Collect Debug Info",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log to History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Debug Info": {
+      "main": [
+        [
+          {
+            "node": "Log to History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false
+}

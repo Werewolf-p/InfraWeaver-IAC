@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraweaver-api
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-api
+    app.kubernetes.io/name: infraweaver-api
+    app.kubernetes.io/component: api
+spec:
+  # spec.replicas omitted — HPA (hpa.yaml) is the sole owner of the replica count (no ArgoCD/HPA drift war).
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  minReadySeconds: 30
+  selector:
+    matchLabels:
+      app: infraweaver-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: infraweaver-api
+    spec:
+      priorityClassName: platform-high
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: true
+      serviceAccountName: infraweaver-api
+      # Spread replicas across nodes — a single node disruption must not take
+      # down both API replicas simultaneously.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: infraweaver-api
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: infraweaver-api
+              topologyKey: kubernetes.io/hostname
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ${IMAGE_REGISTRY}/infraweaver-api:f0a35feeae1ee301ecc3f6d07a8338fe80c70896
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3001
+              name: http
+          env:
+            - name: PORT
+              value: "3001"
+            - name: APP_VERSION
+              value: "main-b42d758"
+            - name: NODE_ENV
+              value: "production"
+            - name: CONSOLE_URL
+              value: "https://infraweaver.int.${BASE_DOMAIN}"
+            - name: ARGOCD_SERVER
+              value: "http://argocd-server.argocd.svc.cluster.local:80"
+            # Optional: GitHub PAT for workflow dispatch (node rolling updates).
+            # Seed in OpenBao: openbao kv patch secret/platform/infraweaver-console github-token=<pat>
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: github-token
+                  optional: true
+            - name: GITHUB_REPO
+              value: "${GITHUB_REPO}"
+            - name: GIT_PROVIDER
+              value: github
+            - name: ONEDEV_URL
+              value: "http://onedev.onedev.svc.cluster.local"
+            - name: ONEDEV_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: onedev-token
+            - name: ONEDEV_PROJECT_ID
+              value: "1"
+            - name: ONEDEV_PROJECT_PATH
+              value: "InfraWeaver-platform"
+            - name: ONEDEV_BRANCH
+              value: main
+            - name: ONEDEV_USERNAME
+              value: infraweaver
+            - name: GIT_WORKTREE_ROOT
+              value: /git-cache
+            - name: CONSOLE_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-api-console-secret
+                  key: CONSOLE_API_SECRET
+            # C7: comma-separated allowlist of namespaces the diagnostic pod-exec
+            # endpoint may target. Empty = fail-closed (every exec rejected). OSS
+            # forks opt in by setting this per-environment; prod overlay bakes the
+            # platform's own namespaces.
+            - name: EXEC_ALLOWED_NAMESPACES
+              value: ""
+          envFrom:
+            - secretRef:
+                name: infraweaver-api-argocd-token
+                optional: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: git-cache
+              mountPath: /git-cache
+      volumes:
+        - name: git-cache
+          emptyDir: {}

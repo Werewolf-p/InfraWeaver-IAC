@@ -1,0 +1,37 @@
+# Bootstrap Application — deploys ExternalDNS raw manifests (ExternalSecret for CF token)
+# The ExternalDNS Helm chart itself is managed by the root ApplicationSet
+# via kubernetes/platform/external-dns/application.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-external-dns-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: HEAD
+    path: kubernetes/platform/external-dns/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-dns
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jqPathExpressions:
+        - .status
+        - .metadata.annotations["argocd.argoproj.io/tracking-id"]

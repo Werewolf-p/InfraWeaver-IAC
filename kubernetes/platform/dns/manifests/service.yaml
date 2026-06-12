@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns
+  namespace: dns-system
+  annotations:
+    # Static MetalLB IP on VLAN 3 — dedicated dns-pool announced only from cp1/cp3
+    metallb.io/loadBalancerIPs: "${METALLB_COREDNS_VIP}"
+    metallb.io/address-pool: dns-pool
+  labels:
+    app: coredns
+spec:
+  type: LoadBalancer
+  # Cluster policy ensures DNS works even when pods on a node restart (cp2 instability)
+  externalTrafficPolicy: Cluster
+  selector:
+    app: coredns
+  ports:
+    - name: dns-udp
+      port: 53
+      protocol: UDP
+      targetPort: 53
+    - name: dns-tcp
+      port: 53
+      protocol: TCP
+      targetPort: 53
