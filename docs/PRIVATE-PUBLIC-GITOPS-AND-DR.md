@@ -11,7 +11,7 @@ PRIVATE repo  (InfraWeaver-infra, flipped private) = single source of truth
   ArgoCD reads THIS repo via a read-only deploy key (reachable; replaces OneDev)
         │  scripts/sync-to-public.sh  (.github/workflows/sync-to-public.yml)
         ▼  excludes IaC + config/param (terraform/ansible/envs/params/overlays/prod/*.tfvars/.sops.yaml)
-PUBLIC  template repo (new, e.g. InfraWeaver-template) = generic base/ + code + *.example
+PUBLIC  template repo (new, e.g. InfraWeaver-IAC) = generic base/ + code + *.example
 InfraWeaver-platform (app code) = stays public; push app changes directly
 InfraWeaver-base = retire OR keep as the private IaC home (it duplicates terraform/ansible/envs)
 ```
@@ -41,9 +41,9 @@ kubectl get applications -n argocd -w
 # 4. Only now flip visibility:
 gh repo edit Werewolf-p/InfraWeaver-infra --visibility private --accept-visibility-change-consequences
 # 5. Create the public template + enable the sync:
-gh repo create Werewolf-p/InfraWeaver-template --public
+gh repo create Werewolf-p/InfraWeaver-IAC --public
 gh secret set PUBLIC_REPO_PAT -R Werewolf-p/InfraWeaver-infra --body <fine-grained-PAT-contents:write-on-template>
-gh variable set PUBLIC_REPO -R Werewolf-p/InfraWeaver-infra --body Werewolf-p/InfraWeaver-template
+gh variable set PUBLIC_REPO -R Werewolf-p/InfraWeaver-infra --body Werewolf-p/InfraWeaver-IAC
 gh workflow run sync-to-public.yml -R Werewolf-p/InfraWeaver-infra   # first publish
 ```
 

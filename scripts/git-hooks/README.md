@@ -17,7 +17,7 @@ Enforces the private/public split (`docs/PRIVATE-PUBLIC-GITOPS-AND-DR.md`):
   GitOps source. `terraform/`, `ansible/`, `envs/`, `params/`, and `kubernetes/**`
   config (placeholders intact) all belong here. **Push freely** — developing and
   committing config to the private repo is the intended workflow.
-- **PUBLIC `InfraWeaver-template`** is the sanitized, forkable mirror. It receives
+- **PUBLIC `InfraWeaver-IAC`** is the sanitized, forkable mirror. It receives
   content **only** through `scripts/sync-to-public.sh`, which exports the tracked
   tree with `git archive`, strips IaC + params + prod overlays, and runs a
   deny-scan before pushing.

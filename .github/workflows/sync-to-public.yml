@@ -4,9 +4,9 @@ name: sync-to-public
 # repo (IaC + config/param never leave private). See scripts/sync-to-public.sh.
 #
 # Setup (one-time):
-#   1. Create a PUBLIC template repo (e.g. <owner>/InfraWeaver-template).
-#   2. Add a repo secret PUBLIC_REPO_PAT = a fine-grained PAT with `contents:write`
-#      on ONLY that public repo.
+#   1. Create a PUBLIC template repo (e.g. <owner>/InfraWeaver-IAC).
+#   2. Add an SSH deploy key (read-write) on ONLY that public repo and store its
+#      private half as the secret PUBLIC_REPO_DEPLOY_KEY.
 #   3. Set the `vars.PUBLIC_REPO` variable to "owner/public-repo".
 # Until both are set, the job no-ops (it only runs when PUBLIC_REPO is defined),
 # so adding this workflow changes nothing on its own.
@@ -46,7 +46,22 @@ jobs:
           fi
           mkdir -p params
           printf '%s\n' "$PUBLIC_DENY_LIST" > params/.public-deny
+      - name: Configure write-scoped deploy key (SSH)
+        # Push with an SSH deploy key bound to ONLY the public repo (read-write),
+        # instead of a broad account token. Fail hard if the key is missing.
+        env:
+          DEPLOY_KEY: ${{ secrets.PUBLIC_REPO_DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::PUBLIC_REPO_DEPLOY_KEY secret is not set — cannot push to the public repo." >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/public_repo_deploy
+          chmod 600 ~/.ssh/public_repo_deploy
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
       - name: Sync sanitized tree to public repo
         env:
-          PUBLIC_REPO_URL: https://x-access-token:${{ secrets.PUBLIC_REPO_PAT }}@github.com/${{ vars.PUBLIC_REPO }}.git
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/public_repo_deploy -o IdentitiesOnly=yes
+          PUBLIC_REPO_URL: git@github.com:${{ vars.PUBLIC_REPO }}.git
         run: bash scripts/sync-to-public.sh

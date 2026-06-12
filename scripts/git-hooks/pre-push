@@ -7,7 +7,7 @@
 #                                     terraform/ ansible/ envs/ params/ AND
 #                                     kubernetes/** config (with ${PLACEHOLDER}s)
 #                                     all legitimately live here. Push freely.
-#   PUBLIC   InfraWeaver-template    = sanitized, forkable mirror. Receives content
+#   PUBLIC   InfraWeaver-IAC    = sanitized, forkable mirror. Receives content
 #                                     ONLY through scripts/sync-to-public.sh, which
 #                                     git-archives the tracked tree, strips IaC +
 #                                     params + prod overlays, and runs a deny-scan.
@@ -30,7 +30,7 @@ remote_url="${2:-}"
 # Identify the PUBLIC template mirror. Match by repo name so it works for https
 # and ssh remote URLs alike. Override with PUBLIC_REPO_MATCH if the mirror is
 # renamed/forked.
-public_match="${PUBLIC_REPO_MATCH:-InfraWeaver-template}"
+public_match="${PUBLIC_REPO_MATCH:-InfraWeaver-IAC}"
 
 case "$remote_url" in
   *"$public_match"*) : ;;   # pushing to the public mirror — guard applies
@@ -47,7 +47,7 @@ echo "✖ pre-push BLOCKED: direct push to the PUBLIC mirror ($public_match)." >
 echo "" >&2
 echo "  The public template must only receive SANITIZED content. Publish with:" >&2
 echo "" >&2
-echo "      PUBLIC_REPO_URL=\"https://x-access-token:\${TOKEN}@github.com/<owner>/InfraWeaver-template.git\" \\" >&2
+echo "      PUBLIC_REPO_URL=\"https://x-access-token:\${TOKEN}@github.com/<owner>/InfraWeaver-IAC.git\" \\" >&2
 echo "        scripts/sync-to-public.sh" >&2
 echo "" >&2
 echo "  That strips terraform/ ansible/ envs/ params/ + prod overlays and runs a" >&2
