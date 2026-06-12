@@ -83,7 +83,7 @@ The handful of files **you** own (everything else stays upstream):
 | File | What you set |
 |------|--------------|
 | `.env` (gitignored) | the single source of truth — domain, repos, registry, nodes, secrets |
-| `envs/<env>/cluster.yaml` | Talos/Proxmox node topology |
+| `envs/<env>/cluster.yaml` | Talos/Proxmox node topology — per-node `role: control\|worker\|hybrid` (see [docs/cluster-builder.md](docs/cluster-builder.md)) |
 | `envs/<env>/terraform.tfvars` | terraform cluster identity + SSH keys |
 | `platform.yaml` | which catalog apps / platform components are enabled |
 | `kubernetes/**/overlays/local/` (gitignored) | your personal routes/overrides |

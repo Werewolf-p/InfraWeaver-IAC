@@ -141,24 +141,36 @@ GENERAL_DEFAULTS = {
 CLUSTER_ENV_FIELDS = [
     "PROXMOX_HOST", "PROXMOX_NODE_NAME", "K8S_CLUSTER_NAME",
     "NODE_GATEWAY", "NODE_SUBNET_PREFIX", "TALOS_DATASTORE",
+    "TALOS_VERSION", "KUBERNETES_VERSION", "TALOS_SCHEMATIC_ID",
     "PVE_NODES", "NODE_COUNT",
-    "NODE_1_IP", "NODE_1_VMID", "NODE_1_PVE_NODE", "NODE_1_DATASTORE", "NODE_1_CPU", "NODE_1_MEMORY", "NODE_1_DISK",
-    "NODE_2_IP", "NODE_2_VMID", "NODE_2_PVE_NODE", "NODE_2_DATASTORE", "NODE_2_CPU", "NODE_2_MEMORY", "NODE_2_DISK",
-    "NODE_3_IP", "NODE_3_VMID", "NODE_3_PVE_NODE", "NODE_3_DATASTORE", "NODE_3_CPU", "NODE_3_MEMORY", "NODE_3_DISK",
+    "NODE_1_IP", "NODE_1_VMID", "NODE_1_PVE_NODE", "NODE_1_DATASTORE", "NODE_1_CPU", "NODE_1_MEMORY", "NODE_1_DISK", "NODE_1_ROLE",
+    "NODE_2_IP", "NODE_2_VMID", "NODE_2_PVE_NODE", "NODE_2_DATASTORE", "NODE_2_CPU", "NODE_2_MEMORY", "NODE_2_DISK", "NODE_2_ROLE",
+    "NODE_3_IP", "NODE_3_VMID", "NODE_3_PVE_NODE", "NODE_3_DATASTORE", "NODE_3_CPU", "NODE_3_MEMORY", "NODE_3_DISK", "NODE_3_ROLE",
 ]
 
+# Cluster defaults are intentionally minimal: per-deployment values (IPs, VM IDs,
+# CPU/RAM, datastores, versions) are loaded dynamically — node IPs/VIPs from the
+# detected gateway, VM IDs/datastores/capacity from Proxmox discovery, sizing via
+# Auto-size, and Talos/Kubernetes versions from /api/latest-versions. Only the
+# topology shape (node count + role) and a safe offline version fallback remain.
 CLUSTER_DEFAULTS = {
-    "PROXMOX_HOST": "192.168.1.100",
-    "PROXMOX_NODE_NAME": "pve",
-    "K8S_CLUSTER_NAME": "infraweaver-prod",
-    "NODE_GATEWAY": "10.10.0.1",
-    "NODE_SUBNET_PREFIX": "24",
-    "TALOS_DATASTORE": "lvm-proxmox",
+    "PROXMOX_HOST": "",
+    "PROXMOX_NODE_NAME": "",
+    "K8S_CLUSTER_NAME": "",
+    "NODE_GATEWAY": "",
+    "NODE_SUBNET_PREFIX": "",
+    "TALOS_DATASTORE": "",
+    # Offline fallback only — the wizard overwrites these with the latest upstream
+    # releases via /api/latest-versions on load.
+    "TALOS_VERSION": "v1.13.0",
+    "KUBERNETES_VERSION": "v1.33.0",
+    # Generated on demand from factory.talos.dev (iscsi-tools); empty = vanilla.
+    "TALOS_SCHEMATIC_ID": "",
     "PVE_NODES": "",
     "NODE_COUNT": "3",
-    "NODE_1_IP": "10.10.0.90",   "NODE_1_VMID": "9310",   "NODE_1_PVE_NODE": "", "NODE_1_DATASTORE": "", "NODE_1_CPU": "4", "NODE_1_MEMORY": "12288", "NODE_1_DISK": "100",
-    "NODE_2_IP": "10.10.0.91",   "NODE_2_VMID": "9311",   "NODE_2_PVE_NODE": "", "NODE_2_DATASTORE": "", "NODE_2_CPU": "4", "NODE_2_MEMORY": "12288", "NODE_2_DISK": "100",
-    "NODE_3_IP": "10.10.0.92",   "NODE_3_VMID": "9312",   "NODE_3_PVE_NODE": "", "NODE_3_DATASTORE": "", "NODE_3_CPU": "4", "NODE_3_MEMORY": "12288", "NODE_3_DISK": "100",
+    "NODE_1_IP": "", "NODE_1_VMID": "", "NODE_1_PVE_NODE": "", "NODE_1_DATASTORE": "", "NODE_1_CPU": "", "NODE_1_MEMORY": "", "NODE_1_DISK": "", "NODE_1_ROLE": "hybrid",
+    "NODE_2_IP": "", "NODE_2_VMID": "", "NODE_2_PVE_NODE": "", "NODE_2_DATASTORE": "", "NODE_2_CPU": "", "NODE_2_MEMORY": "", "NODE_2_DISK": "", "NODE_2_ROLE": "hybrid",
+    "NODE_3_IP": "", "NODE_3_VMID": "", "NODE_3_PVE_NODE": "", "NODE_3_DATASTORE": "", "NODE_3_CPU": "", "NODE_3_MEMORY": "", "NODE_3_DISK": "", "NODE_3_ROLE": "hybrid",
 }
 
 # Infrastructure VIP and admin fields
@@ -167,11 +179,15 @@ INFRA_ENV_FIELDS = [
     "CLUSTER_LOCAL_DOMAIN", "ADMIN_USERNAME", "ADMIN_NAME",
 ]
 
+# MetalLB VIPs and the cluster-local domain are derived dynamically: the wizard
+# Auto-suggests VIPs from the gateway, and generate-from-env.sh derives both the
+# VIPs (gateway /24) and the local domain (base domain) as a fallback. Only the
+# human admin identity keeps a minimal default.
 INFRA_DEFAULTS = {
-    "METALLB_VIP_RANGE": "10.10.0.200-10.10.0.210",
-    "METALLB_TRAEFIK_VIP": "10.10.0.200",
-    "METALLB_COREDNS_VIP": "10.10.0.201",
-    "CLUSTER_LOCAL_DOMAIN": "prod.local",
+    "METALLB_VIP_RANGE": "",
+    "METALLB_TRAEFIK_VIP": "",
+    "METALLB_COREDNS_VIP": "",
+    "CLUSTER_LOCAL_DOMAIN": "",
     "ADMIN_USERNAME": "admin",
     "ADMIN_NAME": "Platform Admin",
 }
@@ -238,6 +254,102 @@ def _detect_local_subnets() -> list:
     except Exception:
         pass
     return subnets
+
+
+# Public-IP discovery providers, tried in order. Plain-text body = the IP.
+_PUBLIC_IP_PROVIDERS = (
+    "https://api.ipify.org",
+    "https://ifconfig.me/ip",
+    "https://icanhazip.com",
+    "https://checkip.amazonaws.com",
+)
+
+
+def _detect_public_ip() -> Dict:
+    """Fetch this host's public IPv4 from the first responsive provider.
+
+    Done server-side to avoid browser CORS and to keep the value out of any
+    hardcoded config — the wizard loads it dynamically on demand.
+    """
+    for url in _PUBLIC_IP_PROVIDERS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                ip = resp.read().decode("utf-8", "replace").strip()
+            if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip) and all(
+                0 <= int(o) <= 255 for o in ip.split(".")
+            ):
+                return {"ok": True, "ip": ip, "source": url}
+        except Exception:
+            continue
+    return {"ok": False, "error": "Could not determine public IP from any provider."}
+
+
+def _fetch_latest_versions() -> Dict:
+    """Look up the latest stable Talos and Kubernetes versions from upstream.
+
+    Talos:      latest GitHub release tag for siderolabs/talos.
+    Kubernetes: the canonical stable marker at dl.k8s.io/release/stable.txt.
+    Done server-side so the wizard never hardcodes a version — it loads the
+    current value on demand and only falls back to a pin if the lookup fails.
+    """
+    out = {"ok": True, "talos": "", "kubernetes": ""}
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/siderolabs/talos/releases/latest",
+            headers={"User-Agent": "curl/8", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            tag = json.load(resp).get("tag_name", "")
+        if re.match(r"^v\d+\.\d+\.\d+", tag):
+            out["talos"] = tag
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(
+            "https://dl.k8s.io/release/stable.txt", headers={"User-Agent": "curl/8"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            ver = resp.read().decode("utf-8", "replace").strip()
+        if re.match(r"^v\d+\.\d+\.\d+", ver):
+            out["kubernetes"] = ver
+    except Exception:
+        pass
+    if not out["talos"] and not out["kubernetes"]:
+        out["ok"] = False
+        out["error"] = "Could not fetch latest versions from upstream."
+    return out
+
+
+def _generate_talos_schematic(extensions: Optional[List[str]] = None) -> Dict:
+    """Generate a Talos factory schematic ID for the given system extensions.
+
+    POSTs the extension list to factory.talos.dev and returns the resulting
+    schematic ID (deterministic for a given extension set). Defaults to
+    siderolabs/iscsi-tools, required by Longhorn 1.7+. This removes the manual
+    REPLACE_ME_TALOS_SCHEMATIC_ID placeholder — the wizard generates it on demand.
+    """
+    if not extensions:
+        extensions = ["siderolabs/iscsi-tools"]
+    body = (
+        "customization:\n  systemExtensions:\n    officialExtensions:\n"
+        + "".join(f"      - {e}\n" for e in extensions)
+    )
+    try:
+        req = urllib.request.Request(
+            "https://factory.talos.dev/schematics",
+            data=body.encode("utf-8"),
+            headers={"Content-Type": "application/yaml", "User-Agent": "curl/8"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+        sid = str(data.get("id", ""))
+        if re.match(r"^[0-9a-f]{64}$", sid):
+            return {"ok": True, "id": sid, "extensions": extensions}
+        return {"ok": False, "error": "Unexpected response from factory.talos.dev"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def _ip_to_int(ip: str) -> int:
@@ -1249,6 +1361,26 @@ def _validate_import_env(payload: Dict) -> Dict:
             elif not vmid_value:
                 add_warning(vmid_field, "Missing VMID; the wizard will use its default sequence.")
 
+            role_field = f"NODE_{index}_ROLE"
+            role_value = env.get(role_field, "").strip().lower()
+            if role_value and role_value not in {"control", "worker", "hybrid"}:
+                add_error(role_field, "Role must be one of: control, worker, hybrid.")
+
+        # etcd quorum: control-plane-capable nodes (control + hybrid) must be odd,
+        # and there must be at least one. An empty role defaults to hybrid.
+        cp_capable = 0
+        for index in range(1, node_count + 1):
+            role_value = env.get(f"NODE_{index}_ROLE", "").strip().lower() or "hybrid"
+            if role_value != "worker":
+                cp_capable += 1
+        if cp_capable == 0:
+            add_error("NODE_1_ROLE", "At least one node must be control-plane-capable (role control or hybrid).")
+        elif cp_capable % 2 == 0:
+            add_error(
+                "NODE_1_ROLE",
+                f"Control-plane-capable nodes (control + hybrid) must be odd for etcd quorum; got {cp_capable}.",
+            )
+
     if not any(issue["field"] in {"PROXMOX_HOST", "PROXMOX_API_TOKEN"} for issue in errors):
         proxmox_check = _validate_proxmox({
             "PROXMOX_HOST": env.get("PROXMOX_HOST", ""),
@@ -1687,6 +1819,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/detect-subnet":
             subnets = _detect_local_subnets()
             self._send_json({"ok": True, "subnets": subnets})
+            return
+
+        if path == "/api/detect-public-ip":
+            self._send_json(_detect_public_ip())
+            return
+
+        if path == "/api/latest-versions":
+            self._send_json(_fetch_latest_versions())
+            return
+
+        if path == "/api/generate-schematic":
+            self._send_json(_generate_talos_schematic())
             return
 
         if path == "/api/ping-check":

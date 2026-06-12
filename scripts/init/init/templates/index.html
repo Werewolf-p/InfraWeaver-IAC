@@ -277,6 +277,27 @@
       border-radius: 4px;
       padding: 1px 6px;
     }
+    /* 3-way node role selector (control / worker / hybrid) */
+    .node-role-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .node-role-select {
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--cyan);
+      background: rgba(68,136,255,0.12);
+      border: 1px solid rgba(68,136,255,0.25);
+      border-radius: 4px;
+      padding: 2px 6px;
+    }
+    .node-role-help {
+      cursor: help;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
     .node-main-row {
       display: grid;
       grid-template-columns: 1fr 130px;
@@ -750,6 +771,188 @@
       .form-grid { grid-template-columns: 1fr; }
       .btn-row { flex-direction: column; }
     }
+
+    /* ───────────────────────── Mobile / touch usability ───────────────────────── */
+    /* Comfortable tap targets on touch devices (no hover) regardless of width. */
+    @media (hover: none) and (pointer: coarse) {
+      .btn, .btn-discover, .preset-btn, button, select { min-height: 44px; }
+      input, textarea, select { min-height: 44px; }
+      .node-role-help, label .help-icon { font-size: 15px; padding: 4px; }
+    }
+
+    @media (max-width: 640px) {
+      .container { padding: 12px; }
+      .header { padding: 24px 8px 18px; }
+      /* The ASCII banner is wide — let it scroll horizontally instead of breaking layout. */
+      .ascii-logo {
+        font-size: 6px;
+        white-space: pre;
+        max-width: 100%;
+        overflow-x: auto;
+        margin-bottom: 14px;
+      }
+      .card { padding: 16px 14px; }
+      /* 16px inputs stop iOS Safari from auto-zooming on focus. */
+      input, textarea, select { font-size: 16px; padding: 10px 12px; }
+      /* Stack node fields and advanced grids in a single column. */
+      .node-main-row { grid-template-columns: 1fr; }
+      .node-adv-grid, .node-adv-grid-v2 { grid-template-columns: 1fr; }
+      .node-card-header { flex-wrap: wrap; gap: 8px; }
+      .node-role-wrap { flex-wrap: wrap; }
+      .preset-row { flex-wrap: wrap; }
+      .preset-btn { flex: 1 1 45%; }
+      /* Full-width, finger-sized primary actions. */
+      .btn, .btn-large { width: 100%; justify-content: center; padding: 14px 20px; }
+      .btn-discover { width: 100%; justify-content: center; }
+    }
+
+    @media (max-width: 400px) {
+      .ascii-logo { font-size: 5px; }
+      .preset-btn { flex: 1 1 100%; }
+    }
+
+    /* ───────────────────────── Automation & guidance layer ───────────────────────── */
+    .auto-bar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      background: rgba(10,14,20,0.96);
+      backdrop-filter: blur(6px);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 18px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+    }
+    .auto-bar-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .auto-readiness {
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .auto-readiness b { color: var(--green); }
+    .progress-track {
+      flex: 1 1 140px;
+      height: 8px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 999px;
+      overflow: hidden;
+      min-width: 120px;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--green-dim), var(--green));
+      transition: width 0.35s ease;
+    }
+    .btn-autopilot {
+      background: linear-gradient(90deg, rgba(0,255,136,0.16), rgba(68,136,255,0.16));
+      border: 1px solid var(--green-dim);
+      color: var(--green);
+      border-radius: 6px;
+      padding: 9px 16px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .btn-autopilot:hover:not(:disabled) { box-shadow: var(--glow); }
+    .btn-autopilot:disabled { opacity: 0.5; cursor: not-allowed; }
+    .section-chips {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .section-chip {
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .section-chip:hover { border-color: var(--blue-dim); color: var(--text); }
+    .section-chip.done { border-color: var(--green-dim); color: var(--green); }
+    .section-chip.active { background: rgba(68,136,255,0.14); border-color: var(--blue); color: var(--blue); }
+    .auto-nav-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .auto-nav-row .btn-discover { flex: 1 1 auto; justify-content: center; }
+    .card.section-focus {
+      box-shadow: 0 0 0 2px var(--blue-dim), 0 0 22px rgba(68,136,255,0.25);
+      transition: box-shadow 0.4s ease;
+    }
+    /* Inline field validation markers */
+    .iv-mark {
+      font-size: 12px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .iv-ok { color: var(--green); }
+    .iv-bad { color: var(--red); }
+    input.iv-invalid, select.iv-invalid { border-color: var(--red) !important; }
+    input.iv-valid, select.iv-valid { border-color: var(--green-dim) !important; }
+    @keyframes iv-shake {
+      0%,100% { transform: translateX(0); }
+      25% { transform: translateX(-5px); }
+      75% { transform: translateX(5px); }
+    }
+    .iv-shake { animation: iv-shake 0.3s; }
+    .draft-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      background: rgba(10,14,20,0.96);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 12px;
+      color: var(--text);
+      z-index: 60;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+    }
+    .draft-toast button {
+      background: rgba(68,136,255,0.14);
+      border: 1px solid var(--blue-dim);
+      color: var(--blue);
+      border-radius: 5px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+    }
+    @media (max-width: 640px) {
+      .auto-bar { padding: 10px; border-radius: 6px; }
+      .btn-autopilot { width: 100%; }
+      .auto-bar-top { flex-direction: column; align-items: stretch; }
+      /* In the column layout, reset flex so the track keeps its 8px height. */
+      .progress-track { flex: 0 0 8px; height: 8px; width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -786,6 +989,20 @@
 
   <!-- ═══════════════ CONFIG TAB ═══════════════ -->
   <div class="panel active setup-panel" id="panel-config">
+
+    <!-- Automation & guidance bar (populated by IWAuto on load) -->
+    <div class="auto-bar" id="auto-bar">
+      <div class="auto-bar-top">
+        <button class="btn-autopilot" id="btn-autopilot" type="button" onclick="IWAuto.autopilot()" title="Auto-fill sensible defaults, discover Proxmox, suggest IPs/VIPs, generate an SSH key, then validate">🪄 Autopilot</button>
+        <div class="progress-track" title="Setup readiness"><div class="progress-fill" id="auto-progress-fill"></div></div>
+        <div class="auto-readiness">Ready <b id="auto-readiness-pct">0%</b></div>
+      </div>
+      <div class="section-chips" id="auto-section-chips"></div>
+      <div class="auto-nav-row">
+        <button class="btn-discover" type="button" onclick="IWAuto.prevSection()">◀ Prev</button>
+        <button class="btn-discover" type="button" onclick="IWAuto.nextSection()">Next ▶</button>
+      </div>
+    </div>
 
     <!-- Domain -->
     <div class="card">
@@ -944,6 +1161,25 @@
           <input type="text" id="NODE_SUBNET_PREFIX" name="NODE_SUBNET_PREFIX" placeholder="24" />
           <div class="field-hint">/24 = 255.255.255.0</div>
         </div>
+        <div class="form-row">
+          <label>TALOS_VERSION
+            <button class="ip-range-detect" id="btn-fetch-versions" onclick="fetchLatestVersions()" type="button" title="Load the latest stable Talos + Kubernetes versions from upstream" style="margin-left:auto">🔄 Fetch latest</button>
+          </label>
+          <input type="text" id="TALOS_VERSION" name="TALOS_VERSION" placeholder="auto-loaded from upstream" />
+          <div class="field-hint" id="versions-hint">Auto-loaded from the latest Talos GitHub release</div>
+        </div>
+        <div class="form-row">
+          <label>KUBERNETES_VERSION</label>
+          <input type="text" id="KUBERNETES_VERSION" name="KUBERNETES_VERSION" placeholder="auto-loaded from upstream" />
+          <div class="field-hint">Auto-loaded from dl.k8s.io/release/stable.txt</div>
+        </div>
+        <div class="form-row full">
+          <label>TALOS_SCHEMATIC_ID
+            <button class="ip-range-detect" id="btn-gen-schematic" onclick="generateSchematic()" type="button" title="Generate a Talos factory schematic (siderolabs/iscsi-tools, required by Longhorn) from factory.talos.dev" style="margin-left:auto">🧬 Generate</button>
+          </label>
+          <input type="text" id="TALOS_SCHEMATIC_ID" name="TALOS_SCHEMATIC_ID" placeholder="auto-generated from factory.talos.dev" />
+          <div class="field-hint" id="schematic-hint">Talos factory schematic for system extensions (iscsi-tools). Auto-generated on open.</div>
+        </div>
         <div class="form-row full">
           <div class="subsection-title" style="display:flex;align-items:center;justify-content:space-between">
             <span>Control Plane Nodes</span>
@@ -952,209 +1188,14 @@
           <div class="ping-legend" style="margin-bottom:8px">
             <span>Ping status:</span><span>🟢 free</span><span>🔴 in use</span><span>⚪ unchecked</span>
           </div>
-          <div class="node-cards">
-            <!-- Node 1 -->
-            <div class="node-card">
-              <div class="node-card-header">
-                <span class="node-num">Node 1</span>
-                <span class="node-role">Control Plane</span>
-              </div>
-              <div class="node-main-row">
-                <div class="form-row">
-                  <label>IP <span id="ndot-NODE_1_IP" class="vip-dot">⚪</span></label>
-                  <input type="text" id="NODE_1_IP" name="NODE_1_IP" placeholder="10.10.0.90" onblur="pingNodeIp('NODE_1_IP')" />
-                </div>
-                <div class="form-row">
-                  <label>VM ID</label>
-                  <input type="text" id="NODE_1_VMID" name="NODE_1_VMID" placeholder="9310" />
-                </div>
-              </div>
-              <div class="form-row" style="margin-bottom:4px">
-                <label>Proxmox Host Node</label>
-                <select id="NODE_1_PVE_NODE" name="NODE_1_PVE_NODE" onchange="onPveNodeChange(1)">
-                  <option value="">— run 🔍 Discover first —</option>
-                </select>
-                <div class="node-res-badge" id="node-1-res-badge" style="display:none">
-                  <span class="node-res-chip" id="node-1-res-cpu">🖥 ? cores</span>
-                  <span class="node-res-chip" id="node-1-res-ram">🧮 ? GB RAM</span>
-                  <span class="node-res-chip" id="node-1-res-free">💾 ? GB free</span>
-                </div>
-              </div>
-              <details id="node-1-adv">
-                <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
-                <div class="preset-row">
-                  <span class="preset-row-label">Preset:</span>
-                  <button class="preset-btn" onclick="applyNodePreset(1,'minimal')" type="button">💻 Minimal<br><small style="opacity:0.7">2 CPU · 4 GB · 40 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(1,'standard')" type="button">⚡ Standard<br><small style="opacity:0.7">4 CPU · 8 GB · 80 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(1,'balanced')" type="button">🚀 Balanced<br><small style="opacity:0.7">6 CPU · 12 GB · 100 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(1,'performance')" type="button">🏎 Performance<br><small style="opacity:0.7">8 CPU · 16 GB · 150 GB</small></button>
-                </div>
-                <div class="node-adv-grid-v2">
-                  <div class="form-row">
-                    <label>CPU cores<span id="node-1-cpu-max-label" class="slider-max-hint"></span></label>
-                    <div class="slider-row">
-                      <input type="range" id="NODE_1_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(1)" />
-                      <span class="slider-val" id="node-1-cpu-val">4</span>
-                    </div>
-                    <input type="hidden" id="NODE_1_CPU" name="NODE_1_CPU" value="4" />
-                  </div>
-                  <div class="form-row">
-                    <label>RAM<span id="node-1-ram-max-label" class="slider-max-hint"></span></label>
-                    <div class="slider-row">
-                      <input type="range" id="NODE_1_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(1)" />
-                      <span class="slider-val" id="node-1-ram-val">8 GB</span>
-                    </div>
-                    <input type="hidden" id="NODE_1_MEMORY" name="NODE_1_MEMORY" value="8192" />
-                  </div>
-                  <div class="form-row">
-                    <label>Disk (GB)</label>
-                    <input type="number" id="NODE_1_DISK" name="NODE_1_DISK" value="100" min="20" />
-                  </div>
-                  <div class="form-row">
-                    <label>Datastore</label>
-                    <select id="NODE_1_DATASTORE" name="NODE_1_DATASTORE">
-                      <option value="">— discover PVE first —</option>
-                    </select>
-                    <div class="field-hint" id="node-1-ds-hint">VM disk pool — run Discover to load options</div>
-                  </div>
-                </div>
-              </details>
-            </div>
-            <!-- Node 2 -->
-            <div class="node-card">
-              <div class="node-card-header">
-                <span class="node-num">Node 2</span>
-                <span class="node-role">Control Plane</span>
-              </div>
-              <div class="node-main-row">
-                <div class="form-row">
-                  <label>IP <span id="ndot-NODE_2_IP" class="vip-dot">⚪</span></label>
-                  <input type="text" id="NODE_2_IP" name="NODE_2_IP" placeholder="10.10.0.91" onblur="pingNodeIp('NODE_2_IP')" />
-                </div>
-                <div class="form-row">
-                  <label>VM ID</label>
-                  <input type="text" id="NODE_2_VMID" name="NODE_2_VMID" placeholder="9311" />
-                </div>
-              </div>
-              <div class="form-row" style="margin-bottom:4px">
-                <label>Proxmox Host Node</label>
-                <select id="NODE_2_PVE_NODE" name="NODE_2_PVE_NODE" onchange="onPveNodeChange(2)">
-                  <option value="">— run 🔍 Discover first —</option>
-                </select>
-                <div class="node-res-badge" id="node-2-res-badge" style="display:none">
-                  <span class="node-res-chip" id="node-2-res-cpu">🖥 ? cores</span>
-                  <span class="node-res-chip" id="node-2-res-ram">🧮 ? GB RAM</span>
-                  <span class="node-res-chip" id="node-2-res-free">💾 ? GB free</span>
-                </div>
-              </div>
-              <details id="node-2-adv">
-                <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
-                <div class="preset-row">
-                  <span class="preset-row-label">Preset:</span>
-                  <button class="preset-btn" onclick="applyNodePreset(2,'minimal')" type="button">💻 Minimal<br><small style="opacity:0.7">2 CPU · 4 GB · 40 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(2,'standard')" type="button">⚡ Standard<br><small style="opacity:0.7">4 CPU · 8 GB · 80 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(2,'balanced')" type="button">🚀 Balanced<br><small style="opacity:0.7">6 CPU · 12 GB · 100 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(2,'performance')" type="button">🏎 Performance<br><small style="opacity:0.7">8 CPU · 16 GB · 150 GB</small></button>
-                </div>
-                <div class="node-adv-grid-v2">
-                  <div class="form-row">
-                    <label>CPU cores<span id="node-2-cpu-max-label" class="slider-max-hint"></span></label>
-                    <div class="slider-row">
-                      <input type="range" id="NODE_2_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(2)" />
-                      <span class="slider-val" id="node-2-cpu-val">4</span>
-                    </div>
-                    <input type="hidden" id="NODE_2_CPU" name="NODE_2_CPU" value="4" />
-                  </div>
-                  <div class="form-row">
-                    <label>RAM<span id="node-2-ram-max-label" class="slider-max-hint"></span></label>
-                    <div class="slider-row">
-                      <input type="range" id="NODE_2_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(2)" />
-                      <span class="slider-val" id="node-2-ram-val">8 GB</span>
-                    </div>
-                    <input type="hidden" id="NODE_2_MEMORY" name="NODE_2_MEMORY" value="8192" />
-                  </div>
-                  <div class="form-row">
-                    <label>Disk (GB)</label>
-                    <input type="number" id="NODE_2_DISK" name="NODE_2_DISK" value="100" min="20" />
-                  </div>
-                  <div class="form-row">
-                    <label>Datastore</label>
-                    <select id="NODE_2_DATASTORE" name="NODE_2_DATASTORE">
-                      <option value="">— discover PVE first —</option>
-                    </select>
-                    <div class="field-hint" id="node-2-ds-hint">VM disk pool — run Discover to load options</div>
-                  </div>
-                </div>
-              </details>
-            </div>
-            <!-- Node 3 -->
-            <div class="node-card">
-              <div class="node-card-header">
-                <span class="node-num">Node 3</span>
-                <span class="node-role">Control Plane</span>
-              </div>
-              <div class="node-main-row">
-                <div class="form-row">
-                  <label>IP <span id="ndot-NODE_3_IP" class="vip-dot">⚪</span></label>
-                  <input type="text" id="NODE_3_IP" name="NODE_3_IP" placeholder="10.10.0.92" onblur="pingNodeIp('NODE_3_IP')" />
-                </div>
-                <div class="form-row">
-                  <label>VM ID</label>
-                  <input type="text" id="NODE_3_VMID" name="NODE_3_VMID" placeholder="9312" />
-                </div>
-              </div>
-              <div class="form-row" style="margin-bottom:4px">
-                <label>Proxmox Host Node</label>
-                <select id="NODE_3_PVE_NODE" name="NODE_3_PVE_NODE" onchange="onPveNodeChange(3)">
-                  <option value="">— run 🔍 Discover first —</option>
-                </select>
-                <div class="node-res-badge" id="node-3-res-badge" style="display:none">
-                  <span class="node-res-chip" id="node-3-res-cpu">🖥 ? cores</span>
-                  <span class="node-res-chip" id="node-3-res-ram">🧮 ? GB RAM</span>
-                  <span class="node-res-chip" id="node-3-res-free">💾 ? GB free</span>
-                </div>
-              </div>
-              <details id="node-3-adv">
-                <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
-                <div class="preset-row">
-                  <span class="preset-row-label">Preset:</span>
-                  <button class="preset-btn" onclick="applyNodePreset(3,'minimal')" type="button">💻 Minimal<br><small style="opacity:0.7">2 CPU · 4 GB · 40 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(3,'standard')" type="button">⚡ Standard<br><small style="opacity:0.7">4 CPU · 8 GB · 80 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(3,'balanced')" type="button">🚀 Balanced<br><small style="opacity:0.7">6 CPU · 12 GB · 100 GB</small></button>
-                  <button class="preset-btn" onclick="applyNodePreset(3,'performance')" type="button">🏎 Performance<br><small style="opacity:0.7">8 CPU · 16 GB · 150 GB</small></button>
-                </div>
-                <div class="node-adv-grid-v2">
-                  <div class="form-row">
-                    <label>CPU cores<span id="node-3-cpu-max-label" class="slider-max-hint"></span></label>
-                    <div class="slider-row">
-                      <input type="range" id="NODE_3_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(3)" />
-                      <span class="slider-val" id="node-3-cpu-val">4</span>
-                    </div>
-                    <input type="hidden" id="NODE_3_CPU" name="NODE_3_CPU" value="4" />
-                  </div>
-                  <div class="form-row">
-                    <label>RAM<span id="node-3-ram-max-label" class="slider-max-hint"></span></label>
-                    <div class="slider-row">
-                      <input type="range" id="NODE_3_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(3)" />
-                      <span class="slider-val" id="node-3-ram-val">8 GB</span>
-                    </div>
-                    <input type="hidden" id="NODE_3_MEMORY" name="NODE_3_MEMORY" value="8192" />
-                  </div>
-                  <div class="form-row">
-                    <label>Disk (GB)</label>
-                    <input type="number" id="NODE_3_DISK" name="NODE_3_DISK" value="100" min="20" />
-                  </div>
-                  <div class="form-row">
-                    <label>Datastore</label>
-                    <select id="NODE_3_DATASTORE" name="NODE_3_DATASTORE">
-                      <option value="">— discover PVE first —</option>
-                    </select>
-                    <div class="field-hint" id="node-3-ds-hint">VM disk pool — run Discover to load options</div>
-                  </div>
-                </div>
-              </details>
-            </div>
+          <div id="iw-quorum-msg" style="font-size:11px;color:var(--text-dim);min-height:16px;margin-bottom:6px"></div>
+                    <div class="node-count-controls" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <button class="ip-range-detect" type="button" onclick="removeNode()" title="Remove the last node">− Remove node</button>
+            <span style="font-size:11px;color:var(--text-dim)"><b id="node-count-label">3</b> node(s) — control + hybrid count must be odd</span>
+            <button class="ip-range-detect" type="button" onclick="addNode()" title="Add a node">＋ Add node</button>
           </div>
+          <input type="hidden" id="NODE_COUNT" name="NODE_COUNT" value="3" />
+          <div class="node-cards" id="node-cards"></div>
           <!-- Hidden field: PVE_NODES map — auto-populated by discovery -->
           <input type="hidden" id="PVE_NODES" name="PVE_NODES" value="" />
         </div>
@@ -1566,8 +1607,10 @@
               <div class="ip-range-list" id="ip-range-list"></div>
               <div class="ip-range-actions">
                 <button class="ip-range-add" onclick="addIpRange('')">＋ Add range</button>
-                <button class="ip-range-detect" id="detect-btn" onclick="detectSubnets()">🔍 Auto-detect</button>
+                <button class="ip-range-detect" id="detect-btn" onclick="detectSubnets()">🔍 Auto-detect LAN</button>
+                <button class="ip-range-detect" id="detect-public-ip-btn" onclick="detectPublicIp()" title="Look up this machine's public IP and add it as a /32 allowlist entry">🌐 Detect public IP</button>
               </div>
+              <div id="public-ip-msg" style="font-size:11px;color:var(--text-dim);min-height:14px;margin-top:4px"></div>
               <div class="ip-ranges-note">
                 Enter CIDR ranges to allow for <em>internal</em> services. Examples: <code>192.168.1.0/24</code> (subnet), <code>192.168.1.42/32</code> (specific IP), <code>10.0.0.0/24</code> (home LAN).
               </div>
@@ -1697,10 +1740,10 @@
 const FIELDS = [
   'BASE_DOMAIN','ADMIN_EMAIL','GITHUB_REPO','GIT_REPO_URL','PROXMOX_API_TOKEN',
   'PROXMOX_HOST','PROXMOX_NODE_NAME','K8S_CLUSTER_NAME',
-  'NODE_GATEWAY','NODE_SUBNET_PREFIX','TALOS_DATASTORE',
-  'NODE_1_IP','NODE_1_VMID','NODE_1_PVE_NODE','NODE_1_DATASTORE','NODE_1_CPU','NODE_1_MEMORY','NODE_1_DISK',
-  'NODE_2_IP','NODE_2_VMID','NODE_2_PVE_NODE','NODE_2_DATASTORE','NODE_2_CPU','NODE_2_MEMORY','NODE_2_DISK',
-  'NODE_3_IP','NODE_3_VMID','NODE_3_PVE_NODE','NODE_3_DATASTORE','NODE_3_CPU','NODE_3_MEMORY','NODE_3_DISK',
+  'NODE_GATEWAY','NODE_SUBNET_PREFIX','TALOS_DATASTORE','TALOS_VERSION','KUBERNETES_VERSION','TALOS_SCHEMATIC_ID',
+  'NODE_1_IP','NODE_1_VMID','NODE_1_PVE_NODE','NODE_1_DATASTORE','NODE_1_CPU','NODE_1_MEMORY','NODE_1_DISK','NODE_1_ROLE',
+  'NODE_2_IP','NODE_2_VMID','NODE_2_PVE_NODE','NODE_2_DATASTORE','NODE_2_CPU','NODE_2_MEMORY','NODE_2_DISK','NODE_2_ROLE',
+  'NODE_3_IP','NODE_3_VMID','NODE_3_PVE_NODE','NODE_3_DATASTORE','NODE_3_CPU','NODE_3_MEMORY','NODE_3_DISK','NODE_3_ROLE',
   'PVE_NODES',
   'METALLB_VIP_RANGE','METALLB_TRAEFIK_VIP','METALLB_COREDNS_VIP',
   'CLUSTER_LOCAL_DOMAIN','ADMIN_USERNAME','ADMIN_NAME',
@@ -1905,7 +1948,86 @@ async function detectSubnets() {
   } catch(e) {
     btn.textContent = '✗ Error';
   }
-  setTimeout(() => { btn.textContent = '🔍 Auto-detect'; btn.disabled = false; }, 2000);
+  setTimeout(() => { btn.textContent = '🔍 Auto-detect LAN'; btn.disabled = false; }, 2000);
+}
+
+// ── Public IP auto-detect (adds <ip>/32 to the allowlist) ──
+async function detectPublicIp(auto = false) {
+  const btn = document.getElementById('detect-public-ip-btn');
+  const msg = document.getElementById('public-ip-msg');
+  if (btn) { btn.textContent = '⏳ Detecting…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/detect-public-ip');
+    const j = await r.json();
+    if (j.ok && j.ip) {
+      const cidr = j.ip + '/32';
+      const existing = new Set(ipRanges.filter(x => x.trim()));
+      if (!existing.has(cidr)) {
+        const emptyIdx = ipRanges.findIndex(x => !x.trim());
+        if (emptyIdx >= 0) ipRanges[emptyIdx] = cidr; else ipRanges.push(cidr);
+        renderIpRangeList();
+      }
+      if (msg) { msg.textContent = '🌐 Public IP ' + j.ip + ' added to the allowlist as ' + cidr; msg.style.color = 'var(--green)'; }
+      if (btn) btn.textContent = '✅ ' + j.ip;
+    } else {
+      if (msg) { msg.textContent = '⚠ ' + (j.error || 'Could not determine public IP'); msg.style.color = 'var(--yellow)'; }
+      if (btn) btn.textContent = '⚠ Failed';
+    }
+  } catch (e) {
+    if (msg) { msg.textContent = '✗ ' + e.message; msg.style.color = 'var(--red)'; }
+    if (btn) btn.textContent = '✗ Error';
+  }
+  setTimeout(() => { if (btn) { btn.textContent = '🌐 Detect public IP'; btn.disabled = false; } }, 2500);
+}
+
+// ── Talos / Kubernetes versions — load latest from upstream ──
+async function fetchLatestVersions(auto = false) {
+  const btn = document.getElementById('btn-fetch-versions');
+  const hint = document.getElementById('versions-hint');
+  if (btn) { btn.textContent = '⏳ Fetching…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/latest-versions');
+    const j = await r.json();
+    if (j.ok || j.talos || j.kubernetes) {
+      const tv = document.getElementById('TALOS_VERSION');
+      const kv = document.getElementById('KUBERNETES_VERSION');
+      // On auto-load only fill blanks; an explicit click refreshes to latest.
+      if (j.talos && tv && (!auto || !tv.value.trim())) tv.value = j.talos;
+      if (j.kubernetes && kv && (!auto || !kv.value.trim())) kv.value = j.kubernetes;
+      if (hint) { hint.textContent = `Latest upstream: Talos ${j.talos || '?'} · Kubernetes ${j.kubernetes || '?'}`; hint.style.color = 'var(--green)'; }
+      if (btn) btn.textContent = '✅ Loaded';
+    } else if (btn) { btn.textContent = '⚠ Failed'; }
+  } catch (e) {
+    if (hint && !auto) { hint.textContent = '✗ ' + e.message; hint.style.color = 'var(--red)'; }
+    if (btn) btn.textContent = '⚠ Offline';
+  }
+  setTimeout(() => { if (btn) { btn.textContent = '🔄 Fetch latest'; btn.disabled = false; } }, 2500);
+}
+
+// ── Talos factory schematic — generate from upstream ──
+async function generateSchematic(auto = false) {
+  const btn = document.getElementById('btn-gen-schematic');
+  const hint = document.getElementById('schematic-hint');
+  const field = document.getElementById('TALOS_SCHEMATIC_ID');
+  // On auto-load, don't overwrite an existing schematic.
+  if (auto && field && field.value.trim()) return;
+  if (btn) { btn.textContent = '⏳ Generating…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/generate-schematic');
+    const j = await r.json();
+    if (j.ok && j.id) {
+      if (field) field.value = j.id;
+      if (hint) { hint.textContent = `Schematic for ${(j.extensions||[]).join(', ')} — id ${j.id.slice(0,12)}…`; hint.style.color = 'var(--green)'; }
+      if (btn) btn.textContent = '✅ Generated';
+    } else {
+      if (hint && !auto) { hint.textContent = '⚠ ' + (j.error || 'Could not generate schematic'); hint.style.color = 'var(--yellow)'; }
+      if (btn) btn.textContent = '⚠ Failed';
+    }
+  } catch (e) {
+    if (hint && !auto) { hint.textContent = '✗ ' + e.message; hint.style.color = 'var(--red)'; }
+    if (btn) btn.textContent = '⚠ Offline';
+  }
+  setTimeout(() => { if (btn) { btn.textContent = '🧬 Generate'; btn.disabled = false; } }, 2500);
 }
 
 // ── MetalLB VIP auto-suggest ──
@@ -1982,6 +2104,115 @@ async function pingNodeIp(fieldId) {
   } catch(e) {}
 }
 
+// ── Dynamic node topology (variable node count) ──────────────────────────────
+function getNodeCount() {
+  const el = document.getElementById('NODE_COUNT');
+  let c = parseInt((el && el.value) || '3', 10);
+  if (!(c >= 1 && c <= 9)) c = 3;
+  return c;
+}
+function nodeRange() { const r = []; for (let n = 1; n <= getNodeCount(); n++) r.push(n); return r; }
+
+function nodeCardHTML(n) {
+  return `
+    <div class="node-card">
+      <div class="node-card-header">
+        <span class="node-num">Node ${n}</span>
+        <div class="node-role-wrap">
+          <select id="NODE_${n}_ROLE" name="NODE_${n}_ROLE" class="node-role-select" title="control = control-plane/etcd only (tainted, no workloads) · worker = workloads only (not in etcd quorum) · hybrid = control-plane AND schedulable for workloads">
+            <option value="hybrid" selected>Hybrid</option>
+            <option value="control">Control</option>
+            <option value="worker">Worker</option>
+          </select>
+          <span class="node-role-help" title="control = control-plane/etcd only · worker = workloads only, not in etcd quorum · hybrid = control-plane + schedulable. Control + hybrid count must be odd.">ⓘ</span>
+        </div>
+      </div>
+      <div class="node-main-row">
+        <div class="form-row">
+          <label>IP <span id="ndot-NODE_${n}_IP" class="vip-dot">⚪</span></label>
+          <input type="text" id="NODE_${n}_IP" name="NODE_${n}_IP" onblur="pingNodeIp('NODE_${n}_IP')" />
+        </div>
+        <div class="form-row">
+          <label>VM ID</label>
+          <input type="text" id="NODE_${n}_VMID" name="NODE_${n}_VMID" />
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:4px">
+        <label>Proxmox Host Node</label>
+        <select id="NODE_${n}_PVE_NODE" name="NODE_${n}_PVE_NODE" onchange="onPveNodeChange(${n})">
+          <option value="">— run 🔍 Discover first —</option>
+        </select>
+        <div class="node-res-badge" id="node-${n}-res-badge" style="display:none">
+          <span class="node-res-chip" id="node-${n}-res-cpu">🖥 ? cores</span>
+          <span class="node-res-chip" id="node-${n}-res-ram">🧮 ? GB RAM</span>
+          <span class="node-res-chip" id="node-${n}-res-free">💾 ? GB free</span>
+        </div>
+      </div>
+      <details id="node-${n}-adv">
+        <summary class="node-adv-summary">⚙ Advanced — CPU / RAM / Disk / Datastore</summary>
+        <div class="preset-row">
+          <span class="preset-row-label">Sizing:</span>
+          <button class="preset-btn auto-size-btn" type="button" onclick="autoSizeNode(${n})" title="Allocate ~50% of the selected Proxmox host's cores and RAM to this node">🤖 Auto-size<br><small style="opacity:0.7">from host capacity</small></button>
+        </div>
+        <div class="node-adv-grid-v2">
+          <div class="form-row">
+            <label>CPU cores<span id="node-${n}-cpu-max-label" class="slider-max-hint"></span></label>
+            <div class="slider-row">
+              <input type="range" id="NODE_${n}_CPU_SLIDER" min="1" max="16" value="4" oninput="syncCpuSlider(${n})" />
+              <span class="slider-val" id="node-${n}-cpu-val">4</span>
+            </div>
+            <input type="hidden" id="NODE_${n}_CPU" name="NODE_${n}_CPU" value="4" />
+          </div>
+          <div class="form-row">
+            <label>RAM<span id="node-${n}-ram-max-label" class="slider-max-hint"></span></label>
+            <div class="slider-row">
+              <input type="range" id="NODE_${n}_MEM_SLIDER" min="1024" max="32768" step="1024" value="8192" oninput="syncRamSlider(${n})" />
+              <span class="slider-val" id="node-${n}-ram-val">8 GB</span>
+            </div>
+            <input type="hidden" id="NODE_${n}_MEMORY" name="NODE_${n}_MEMORY" value="8192" />
+          </div>
+          <div class="form-row">
+            <label>Disk (GB)</label>
+            <input type="number" id="NODE_${n}_DISK" name="NODE_${n}_DISK" value="100" min="20" />
+          </div>
+          <div class="form-row">
+            <label>Datastore</label>
+            <select id="NODE_${n}_DATASTORE" name="NODE_${n}_DATASTORE">
+              <option value="">— discover PVE first —</option>
+            </select>
+            <div class="field-hint" id="node-${n}-ds-hint">VM disk pool — run Discover to load options</div>
+          </div>
+        </div>
+      </details>
+    </div>`;
+}
+
+function renderNodeCards() {
+  const wrap = document.getElementById('node-cards');
+  if (!wrap) return;
+  const c = getNodeCount();
+  const saved = {};
+  wrap.querySelectorAll('input,select').forEach(el => { if (el.id) saved[el.id] = el.value; });
+  let html = '';
+  for (let n = 1; n <= c; n++) html += nodeCardHTML(n);
+  wrap.innerHTML = html;
+  Object.keys(saved).forEach(id => { const el = document.getElementById(id); if (el && saved[id] !== '' && saved[id] != null) el.value = saved[id]; });
+  if (typeof syncAllSlidersFromValues === 'function') syncAllSlidersFromValues();
+  const lbl = document.getElementById('node-count-label'); if (lbl) lbl.textContent = c;
+  if (_discoveredAllNodes && _discoveredAllNodes.length) {
+    populatePveNodeDropdowns(_discoveredAllNodes, _discoveredDatastoresByNode, _discoveredNodeResources);
+  }
+  if (window.IWAuto && IWAuto.onNodesRendered) IWAuto.onNodesRendered();
+}
+function setNodeCount(c) {
+  c = Math.max(1, Math.min(9, c));
+  const el = document.getElementById('NODE_COUNT');
+  if (el) el.value = c;
+  renderNodeCards();
+}
+function addNode() { setNodeCount(getNodeCount() + 1); }
+function removeNode() { setNodeCount(getNodeCount() - 1); }
+
 async function suggestNodeIps() {
   const gw = document.getElementById('NODE_GATEWAY')?.value?.trim();
   const prefix = parseInt(document.getElementById('NODE_SUBNET_PREFIX')?.value?.trim() || '24');
@@ -1991,11 +2222,11 @@ async function suggestNodeIps() {
   try {
     const r = await fetch('/api/suggest-node-ips', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({gateway: gw, prefix})
+      body: JSON.stringify({gateway: gw, prefix, count: getNodeCount()})
     });
     const j = await r.json();
     if (j.ok && j.suggestions) {
-      ['NODE_1_IP','NODE_2_IP','NODE_3_IP'].forEach((fid, i) => {
+      nodeRange().map(n => 'NODE_' + n + '_IP').forEach((fid, i) => {
         const s = j.suggestions[i];
         if (!s) return;
         const el = document.getElementById(fid);
@@ -2089,6 +2320,7 @@ async function setupProxmoxUser() {
 // Module-level store for discovered Proxmox data (used by onPveNodeChange)
 let _discoveredDatastoresByNode = {};
 let _discoveredNodeResources = {};
+let _discoveredAllNodes = [];
 
 async function discoverProxmox() {
   const token = document.getElementById('PROXMOX_API_TOKEN')?.value?.trim();
@@ -2124,7 +2356,7 @@ async function discoverProxmox() {
       }
       // VMID suggestions
       if (j.vmid_suggestions?.length >= 3) {
-        ['NODE_1_VMID','NODE_2_VMID','NODE_3_VMID'].forEach((fid, i) => {
+        nodeRange().map(n => 'NODE_' + n + '_VMID').forEach((fid, i) => {
           const el = document.getElementById(fid);
           if (el && !el.value) el.value = j.vmid_suggestions[i];
         });
@@ -2168,7 +2400,7 @@ function populatePveNodeDropdowns(allNodes, datastoresByNode, nodeResourcesByNod
     else if (!pveNameSel.value) pveNameSel.value = allNodes[0] || '';
   }
 
-  for (let n = 1; n <= 3; n++) {
+  for (let n = 1; n <= getNodeCount(); n++) {
     const pveSel = document.getElementById(`NODE_${n}_PVE_NODE`);
     if (!pveSel) continue;
 
@@ -2257,7 +2489,7 @@ function onPveNodeChange(n) {
   _populateDatastoreSelect(n, pveNode, _discoveredDatastoresByNode);
   _updateNodeSliderLimits(n, pveNode, _discoveredNodeResources);
   // Also sync PROXMOX_NODE_NAME if all nodes share same PVE node
-  const allSame = [1,2,3].every(i => {
+  const allSame = nodeRange().every(i => {
     const s = document.getElementById(`NODE_${i}_PVE_NODE`);
     return s && (s.value === pveNode || s.value === '');
   });
@@ -2291,7 +2523,7 @@ function syncRamSlider(n) {
 
 // ── Sync all sliders from hidden inputs (called after loadEnv) ──
 function syncAllSlidersFromValues() {
-  for (let n = 1; n <= 3; n++) {
+  for (let n = 1; n <= getNodeCount(); n++) {
     const cpu = document.getElementById(`NODE_${n}_CPU`);
     const mem = document.getElementById(`NODE_${n}_MEMORY`);
     const cpuSlider = document.getElementById(`NODE_${n}_CPU_SLIDER`);
@@ -2342,6 +2574,37 @@ function applyNodePreset(n, preset) {
   btns.forEach(b => b.style.borderColor = '');
   event?.target?.closest('.preset-btn')?.style && (event.target.closest('.preset-btn').style.borderColor = 'var(--green)');
   setTimeout(() => btns.forEach(b => b.style.borderColor = ''), 1500);
+}
+
+// ── Dynamic node sizing from discovered host capacity (no fixed preset) ──
+// Allocates ~50% of the selected PVE host's cores and RAM (rounded to whole GB),
+// clamped to the discovered maximum. Falls back to the 'standard' preset only
+// when no discovery data is available yet.
+function autoSizeNode(n) {
+  const pveSel = document.getElementById(`NODE_${n}_PVE_NODE`);
+  const pveNode = pveSel?.value?.trim();
+  const res = pveNode ? _discoveredNodeResources[pveNode] : null;
+  if (!res || !res.cpu_cores || !res.mem_total_mb) {
+    applyNodePreset(n, 'standard');
+    return false;
+  }
+  const cores = Math.max(2, Math.min(res.cpu_cores, Math.floor(res.cpu_cores * 0.5)));
+  const ramGb = Math.max(4, Math.floor((res.mem_total_mb / 1024) * 0.5));
+  const memMb = ramGb * 1024;
+  const disk = parseInt(document.getElementById(`NODE_${n}_DISK`)?.value || '0', 10) || 100;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set(`NODE_${n}_CPU`, cores);
+  set(`NODE_${n}_MEMORY`, memMb);
+  set(`NODE_${n}_DISK`, disk);
+  const cpuSlider = document.getElementById(`NODE_${n}_CPU_SLIDER`);
+  const memSlider = document.getElementById(`NODE_${n}_MEM_SLIDER`);
+  if (cpuSlider) { cpuSlider.max = Math.max(cpuSlider.max, res.cpu_cores); cpuSlider.value = cores; }
+  if (memSlider) { memSlider.max = Math.max(memSlider.max, res.mem_total_mb); memSlider.value = memMb; }
+  const cpuVal = document.getElementById(`node-${n}-cpu-val`);
+  const ramVal = document.getElementById(`node-${n}-ram-val`);
+  if (cpuVal) cpuVal.textContent = cores;
+  if (ramVal) ramVal.textContent = `${ramGb} GB`;
+  return true;
 }
 
 // ── SSH key generation ──
@@ -2435,6 +2698,17 @@ function collectEnv() {
     const el = document.getElementById(f);
     if (el) data[f] = el.value.trim();
   });
+  // Dynamic node fields: NODE_COUNT + every NODE_n_* for the rendered cards.
+  // FIELDS only lists nodes 1–3, so collect the rest explicitly here.
+  const nc = (typeof getNodeCount === 'function') ? getNodeCount() : 3;
+  data['NODE_COUNT'] = String(nc);
+  const suffixes = ['IP','VMID','PVE_NODE','DATASTORE','CPU','MEMORY','DISK','ROLE'];
+  for (let n = 1; n <= nc; n++) {
+    suffixes.forEach(s => {
+      const el = document.getElementById('NODE_' + n + '_' + s);
+      if (el) data['NODE_' + n + '_' + s] = el.value.trim();
+    });
+  }
   // Feature flags: checkboxes → "true"/"false"
   ['ENABLE_MONITORING','ENABLE_EXTERNAL_DNS'].forEach(f => {
     const el = document.getElementById(f);
@@ -2481,6 +2755,12 @@ async function loadEnv() {
     const r = await fetch('/api/load-env');
     const j = await r.json();
     if (j.ok && j.data) {
+      // Render the correct number of node cards before populating per-node fields.
+      if (j.data.NODE_COUNT) {
+        const ncEl = document.getElementById('NODE_COUNT');
+        if (ncEl) ncEl.value = j.data.NODE_COUNT;
+        if (typeof renderNodeCards === 'function') renderNodeCards();
+      }
       Object.entries(j.data).forEach(([k, v]) => {
         const el = document.getElementById(k);
         if (el) {
@@ -2777,6 +3057,445 @@ window.addEventListener('load', () => {
   refreshChecklist().catch(() => {});
   updateStatus('dot-env', 'warn', 'env: checking...');
 });
+</script>
+
+<!-- ═══════════════ Automation & guidance layer (IWAuto) ═══════════════ -->
+<script>
+window.IWAuto = (function () {
+  "use strict";
+
+  // The 10 config cards, in DOM order, mapped to the fields that "complete" them.
+  const SECTIONS = [
+    { title: "Domain",   icon: "🌐", fields: ["BASE_DOMAIN"] },
+    { title: "Proxmox",  icon: "🖥", fields: ["PROXMOX_HOST", "PROXMOX_API_TOKEN"] },
+    { title: "Nodes",    icon: "🧩", fields: ["NODE_1_IP", "NODE_1_VMID"] },
+    { title: "Admin",    icon: "👤", fields: ["ADMIN_USERNAME"] },
+    { title: "SSH Key",  icon: "🔑", fields: ["DEPLOYER_SSH_KEY"] },
+    { title: "DNS",      icon: "🌎", fields: ["DNS_PROVIDER"] },
+    { title: "Email",    icon: "✉",  fields: ["SMTP_USERNAME", "SMTP_PASSWORD"] },
+    { title: "Repo",     icon: "📦", fields: ["GITHUB_REPO", "GIT_REPO_URL"] },
+    { title: "Env",      icon: "🏷", fields: [] },
+    { title: "Features", icon: "⚙",  fields: [] },
+  ];
+
+  // Fields that count toward the readiness % and get live validation.
+  const READINESS = [
+    "BASE_DOMAIN", "PROXMOX_HOST", "PROXMOX_API_TOKEN", "NODE_1_IP",
+    "ADMIN_USERNAME", "DEPLOYER_SSH_KEY", "DNS_PROVIDER",
+    "SMTP_USERNAME", "SMTP_PASSWORD", "GITHUB_REPO", "GIT_REPO_URL",
+  ];
+  // Non-node validated fields; per-node IP/VMID fields are added dynamically.
+  const VALIDATED_BASE = [
+    "BASE_DOMAIN", "PROXMOX_HOST", "NODE_GATEWAY", "METALLB_VIP_RANGE",
+  ];
+  function nodeFields() {
+    const out = [];
+    (typeof nodeRange === "function" ? nodeRange() : [1, 2, 3]).forEach((n) => {
+      out.push("NODE_" + n + "_IP", "NODE_" + n + "_VMID");
+    });
+    return out;
+  }
+  function VALIDATED_ALL() { return VALIDATED_BASE.concat(nodeFields()); }
+
+  let cards = [];
+  let current = 0;
+  let discovered = false;
+  let inited = false;
+
+  const $ = (id) => document.getElementById(id);
+  const val = (id) => ($(id) && String($(id).value || "").trim()) || "";
+
+  // ── Validators ────────────────────────────────────────────────────────────
+  const isIp = (s) => /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(s) &&
+    s.split(".").every((o) => Number(o) >= 0 && Number(o) <= 255);
+  const isDomain = (s) => /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i.test(s);
+  const isEmail = (s) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+  const isVmid = (s) => /^\d+$/.test(s) && Number(s) >= 100;
+  const isVipRange = (s) => {
+    const m = s.split("-");
+    return m.length === 2 && isIp(m[0].trim()) && isIp(m[1].trim());
+  };
+  function validateField(id) {
+    const v = val(id);
+    if (!v) return null; // empty → neutral
+    if (/_VMID$/.test(id)) return isVmid(v);
+    if (/_IP$/.test(id) || id === "PROXMOX_HOST" || id === "NODE_GATEWAY") return isIp(v);
+    if (id === "BASE_DOMAIN") return isDomain(v);
+    if (id === "ADMIN_EMAIL" || id === "SMTP_TO") return isEmail(v);
+    if (id === "METALLB_VIP_RANGE") return isVipRange(v);
+    return true;
+  }
+
+  // etcd quorum check over the 3 role selectors.
+  function quorumState() {
+    let cp = 0, total = 0;
+    (typeof nodeRange === "function" ? nodeRange() : [1, 2, 3]).forEach((n) => {
+      const el = $("NODE_" + n + "_ROLE");
+      if (!el) return;
+      total++;
+      if ((el.value || "hybrid") !== "worker") cp++;
+    });
+    if (total === 0) return { ok: true, msg: "" };
+    if (cp === 0) return { ok: false, msg: "Need ≥1 control/hybrid node" };
+    if (cp % 2 === 0) return { ok: false, msg: "Control+hybrid count must be odd (got " + cp + ")" };
+    return { ok: true, msg: cp + " control-plane node(s)" };
+  }
+
+  // ── Inline validation markers ─────────────────────────────────────────────
+  function ensureMark(id) {
+    let mark = $("iv-" + id);
+    if (mark) return mark;
+    const el = $(id);
+    if (!el) return null;
+    mark = document.createElement("span");
+    mark.id = "iv-" + id;
+    mark.className = "iv-mark";
+    el.parentNode.insertBefore(mark, el.nextSibling);
+    return mark;
+  }
+  function paint(id) {
+    const el = $(id);
+    if (!el) return;
+    const state = validateField(id);
+    const mark = ensureMark(id);
+    el.classList.remove("iv-valid", "iv-invalid");
+    if (mark) mark.textContent = "";
+    if (state === null) return;
+    if (state) { el.classList.add("iv-valid"); if (mark) { mark.textContent = "✓"; mark.className = "iv-mark iv-ok"; } }
+    else { el.classList.add("iv-invalid"); if (mark) { mark.textContent = "✕"; mark.className = "iv-mark iv-bad"; } }
+  }
+  function validateAll() {
+    let allOk = true;
+    VALIDATED_ALL().forEach((id) => { paint(id); if (validateField(id) === false) allOk = false; });
+    const q = quorumState();
+    const qEl = $("iw-quorum-msg");
+    if (qEl) { qEl.textContent = q.msg; qEl.style.color = q.ok ? "var(--text-dim)" : "var(--red)"; }
+    return allOk && q.ok;
+  }
+
+  // ── Readiness score + section chips ───────────────────────────────────────
+  function refresh() {
+    let done = 0;
+    READINESS.forEach((id) => { const v = val(id); if (v && validateField(id) !== false) done++; });
+    const pct = Math.round((done / READINESS.length) * 100);
+    const fill = $("auto-progress-fill"); if (fill) fill.style.width = pct + "%";
+    const pctEl = $("auto-readiness-pct"); if (pctEl) pctEl.textContent = pct + "%";
+    // chip completion
+    SECTIONS.forEach((sec, i) => {
+      const chip = $("chip-" + i);
+      if (!chip) return;
+      const complete = sec.fields.length > 0 && sec.fields.every((f) => {
+        const v = val(f); return v && validateField(f) !== false;
+      });
+      chip.classList.toggle("done", complete);
+      chip.classList.toggle("active", i === current);
+    });
+  }
+
+  // ── Guided section navigation ─────────────────────────────────────────────
+  function buildChips() {
+    const wrap = $("auto-section-chips");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    SECTIONS.forEach((sec, i) => {
+      const chip = document.createElement("span");
+      chip.id = "chip-" + i;
+      chip.className = "section-chip";
+      chip.innerHTML = sec.icon + " " + sec.title;
+      chip.onclick = () => goSection(i);
+      wrap.appendChild(chip);
+    });
+  }
+  function goSection(i) {
+    if (i < 0 || i >= cards.length) return;
+    current = i;
+    const card = cards[i];
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    cards.forEach((c) => c.classList.remove("section-focus"));
+    card.classList.add("section-focus");
+    setTimeout(() => card.classList.remove("section-focus"), 1600);
+    refresh();
+  }
+  function nextSection() { goSection(Math.min(current + 1, cards.length - 1)); }
+  function prevSection() { goSection(Math.max(current - 1, 0)); }
+
+  // ── Auto-discover on load / on credentials entered ────────────────────────
+  async function maybeAutoDiscover() {
+    if (discovered) return;
+    if (!isIp(val("PROXMOX_HOST")) || val("PROXMOX_API_TOKEN").length < 16) return;
+    discovered = true;
+    try {
+      if (typeof discoverProxmox === "function") await discoverProxmox();
+      if (!val("NODE_1_IP") && typeof suggestNodeIps === "function") { try { await suggestNodeIps(); } catch (e) {} }
+      if (!val("METALLB_VIP_RANGE") && typeof suggestVips === "function") { try { await suggestVips(); } catch (e) {} }
+    } catch (e) { discovered = false; }
+    validateAll(); refresh();
+  }
+
+  // ── One-click Autopilot ───────────────────────────────────────────────────
+  function setIfEmpty(id, v) { const el = $(id); if (el && v != null && v !== "" && !String(el.value || "").trim()) el.value = v; }
+  // Slugify a domain's first label → a valid cluster/k8s name.
+  function domainSlug() {
+    const d = val("BASE_DOMAIN");
+    if (!d) return "";
+    return d.split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+  }
+  // Derive values from the domain (dynamic — nothing hardcoded per-deployment).
+  function fillDefaults() {
+    const slug = domainSlug();
+    if (slug) {
+      setIfEmpty("K8S_CLUSTER_NAME", slug + "-cluster");
+      setIfEmpty("CLUSTER_LOCAL_DOMAIN", slug + ".local");
+    }
+    nodeRange().map((n) => "NODE_" + n + "_ROLE").forEach((id) => { const el = $(id); if (el && !el.value) el.value = "hybrid"; });
+  }
+  // Pull the LAN gateway + subnet prefix from the host's detected network.
+  async function deriveNetwork() {
+    if (val("NODE_GATEWAY") && val("NODE_SUBNET_PREFIX")) return;
+    try {
+      const r = await fetch("/api/detect-subnet");
+      const j = await r.json();
+      const sub = j && j.ok && j.subnets && j.subnets.find((s) => /^(10\.|192\.168\.|172\.)/.test(s.cidr));
+      if (!sub) return;
+      const parts = sub.cidr.split("/");
+      const prefix = parts[1];
+      const octets = parts[0].split(".");
+      octets[3] = "1"; // conventional gateway at .1
+      setIfEmpty("NODE_GATEWAY", octets.join("."));
+      setIfEmpty("NODE_SUBNET_PREFIX", prefix);
+    } catch (e) {}
+  }
+  async function autopilot() {
+    const btn = $("btn-autopilot");
+    const orig = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "🪄 Working…"; }
+    try {
+      fillDefaults();
+      // Discover the cluster from Proxmox (fills node names, datastores, VMIDs, capacity).
+      if (isIp(val("PROXMOX_HOST")) && val("PROXMOX_API_TOKEN")) {
+        try { if (typeof discoverProxmox === "function") await discoverProxmox(); discovered = true; } catch (e) {}
+      }
+      await deriveNetwork();
+      if (typeof suggestNodeIps === "function" && val("NODE_GATEWAY")) { try { await suggestNodeIps(); } catch (e) {} }
+      if (typeof suggestVips === "function" && val("NODE_GATEWAY")) { try { await suggestVips(); } catch (e) {} }
+      // Size nodes dynamically from discovered host capacity (falls back to standard).
+      nodeRange().forEach((n) => { try { if (typeof autoSizeNode === "function") autoSizeNode(n); } catch (e) {} });
+      try { if (typeof autofillAdmin === "function") autofillAdmin(); } catch (e) {}
+      if (!val("DEPLOYER_SSH_KEY") && typeof generateSshKey === "function") { try { await generateSshKey(); } catch (e) {} }
+      if (typeof detectPublicIp === "function") { try { await detectPublicIp(true); } catch (e) {} }
+      validateAll(); refresh();
+      toast("🪄 Autopilot loaded everything it could from your host — review any ✕ fields, then Save.");
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+  }
+
+  // ── Draft autosave (localStorage, secrets excluded) ───────────────────────
+  const DRAFT_KEY = "iw_init_draft_v1";
+  const isSecret = (id) => /TOKEN|SECRET|PASSWORD|_KEY$|_PAT$|DEPLOYER_SSH_KEY/i.test(id);
+  let saveTimer = null;
+  function saveDraft() {
+    try {
+      if (typeof FIELDS === "undefined") return;
+      const d = {};
+      FIELDS.forEach((f) => { if (isSecret(f)) return; const el = $(f); if (el && el.value) d[f] = el.value; });
+      nodeRange().map((n) => "NODE_" + n + "_ROLE").forEach((f) => { const el = $(f); if (el) d[f] = el.value; });
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ t: Date.now(), d }));
+    } catch (e) {}
+  }
+  function scheduleSaveDraft() { clearTimeout(saveTimer); saveTimer = setTimeout(saveDraft, 600); }
+  function offerRestore() {
+    let raw;
+    try { raw = localStorage.getItem(DRAFT_KEY); } catch (e) { return; }
+    if (!raw) return;
+    let parsed; try { parsed = JSON.parse(raw); } catch (e) { return; }
+    const d = parsed && parsed.d;
+    if (!d || !Object.keys(d).length) return;
+    // Only offer if the form currently looks empty (avoid clobbering a loaded .env).
+    if (val("BASE_DOMAIN") || val("PROXMOX_HOST")) return;
+    const when = new Date(parsed.t).toLocaleString();
+    const toastEl = document.createElement("div");
+    toastEl.className = "draft-toast";
+    toastEl.innerHTML = '<span>📝 Unsaved draft from ' + when + '</span>';
+    const yes = document.createElement("button"); yes.textContent = "Restore";
+    const no = document.createElement("button"); no.textContent = "Dismiss";
+    yes.onclick = () => {
+      Object.keys(d).forEach((f) => { const el = $(f); if (el) el.value = d[f]; });
+      toastEl.remove(); validateAll(); refresh();
+      if (typeof syncAllSlidersFromValues === "function") { try { syncAllSlidersFromValues(); } catch (e) {} }
+    };
+    no.onclick = () => toastEl.remove();
+    toastEl.appendChild(yes); toastEl.appendChild(no);
+    document.body.appendChild(toastEl);
+    setTimeout(() => { if (toastEl.parentNode) toastEl.remove(); }, 15000);
+  }
+
+  // ── Scroll-to-first-error (wraps save/deploy non-destructively) ────────────
+  function focusFirstError() {
+    for (const id of VALIDATED_ALL()) {
+      if (validateField(id) === false) {
+        const el = $(id);
+        if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("iv-shake"); setTimeout(() => el.classList.remove("iv-shake"), 400); el.focus(); }
+        return true;
+      }
+    }
+    return false;
+  }
+  function wrap(name) {
+    const orig = window[name];
+    if (typeof orig !== "function") return;
+    window[name] = function () { try { validateAll(); focusFirstError(); } catch (e) {} return orig.apply(this, arguments); };
+  }
+
+  // ── Mobile keyboard hints + utility buttons ───────────────────────────────
+  function applyInputModes() {
+    document.querySelectorAll('[id$="_VMID"], [id$="_DISK"]').forEach((el) => el.setAttribute("inputmode", "numeric"));
+    document.querySelectorAll('[id$="_IP"], #PROXMOX_HOST, #NODE_GATEWAY, #METALLB_VIP_RANGE').forEach((el) => {
+      el.setAttribute("inputmode", "decimal");
+      el.setAttribute("autocomplete", "off");
+      el.setAttribute("autocapitalize", "off");
+      el.setAttribute("spellcheck", "false");
+    });
+  }
+  function copySummary() {
+    if (typeof collectEnv !== "function") return;
+    const data = collectEnv();
+    const lines = Object.keys(data).sort().map((k) => k + "=" + (isSecret(k) ? "********" : data[k]));
+    const text = "# InfraWeaver init summary (secrets redacted)\n" + lines.join("\n");
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast("📋 Config summary copied (secrets redacted)"));
+    else toast("Clipboard unavailable");
+  }
+
+  // ── Toast ─────────────────────────────────────────────────────────────────
+  function toast(msg) {
+    const t = document.createElement("div");
+    t.className = "draft-toast";
+    t.innerHTML = "<span>" + msg + "</span>";
+    document.body.appendChild(t);
+    setTimeout(() => { if (t.parentNode) t.remove(); }, 4000);
+  }
+
+  // ── Dynamic placeholders + derived single VIPs ────────────────────────────
+  // Rewrite the example-IP placeholders to match the actual gateway subnet, so
+  // even the hints are derived rather than hardcoded.
+  function updateNodePlaceholders() {
+    const gw = val("NODE_GATEWAY");
+    if (!isIp(gw)) return;
+    const base = gw.split(".").slice(0, 3).join(".");
+    nodeRange().forEach((n) => {
+      const el = $("NODE_" + n + "_IP"); if (el) el.placeholder = base + "." + (89 + n);
+    });
+    const mr = $("METALLB_VIP_RANGE"); if (mr) mr.placeholder = base + ".200-" + base + ".210";
+  }
+  // Derive the Traefik/CoreDNS single VIPs from the first two IPs of the range.
+  function deriveSingleVips() {
+    const range = val("METALLB_VIP_RANGE");
+    const m = range.split("-");
+    if (m.length !== 2 || !isIp(m[0].trim())) return;
+    const start = m[0].trim();
+    const base = start.split(".").slice(0, 3).join(".");
+    const lastStart = parseInt(start.split(".")[3], 10);
+    const tv = $("METALLB_TRAEFIK_VIP"); if (tv && !tv.value.trim()) tv.value = base + "." + lastStart;
+    const cv = $("METALLB_COREDNS_VIP"); if (cv && !cv.value.trim()) cv.value = base + "." + (lastStart + 1);
+  }
+
+  // Re-bind per-node listeners + markers after node cards are (re)rendered.
+  // Node elements are recreated on every render, so bindings must be re-applied.
+  function onNodesRendered() {
+    if (typeof applyInputModes === "function") applyInputModes();
+    nodeFields().forEach((id) => {
+      const el = $(id); if (!el) return;
+      el.addEventListener("input", () => { paint(id); refresh(); });
+      el.addEventListener("blur", () => paint(id));
+      paint(id);
+    });
+    nodeRange().map((n) => "NODE_" + n + "_ROLE").forEach((id) => {
+      const el = $(id); if (el) el.addEventListener("change", () => { validateAll(); refresh(); });
+    });
+    updateNodePlaceholders();
+    refresh();
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  function init() {
+    if (inited) return; inited = true;
+    // Render the node cards from the dynamic template before anything binds.
+    if (typeof renderNodeCards === "function") renderNodeCards();
+    cards = Array.prototype.slice.call(document.querySelectorAll("#panel-config > .card"));
+    buildChips();
+    applyInputModes();
+
+    // Add a "copy summary" button into the nav row.
+    const navRow = document.querySelector("#auto-bar .auto-nav-row");
+    if (navRow) {
+      const b = document.createElement("button");
+      b.className = "btn-discover"; b.type = "button"; b.style.flex = "1 1 auto";
+      b.textContent = "📋 Summary"; b.onclick = copySummary;
+      navRow.appendChild(b);
+    }
+
+    // Derive cluster/local-domain names from the base domain as it is typed.
+    const bd = $("BASE_DOMAIN");
+    if (bd) bd.addEventListener("blur", () => { fillDefaults(); refresh(); });
+
+    // Live validation + readiness + draft autosave on every input.
+    VALIDATED_BASE.forEach((id) => { const el = $(id); if (el) { el.addEventListener("input", () => { paint(id); refresh(); }); el.addEventListener("blur", () => paint(id)); } });
+    document.addEventListener("input", (e) => {
+      if (e.target && e.target.id) { refresh(); scheduleSaveDraft(); }
+    });
+    // Per-node listeners are bound in onNodesRendered (cards are dynamic).
+    onNodesRendered();
+
+    // Auto-discover when credentials are entered.
+    ["PROXMOX_HOST", "PROXMOX_API_TOKEN"].forEach((id) => { const el = $(id); if (el) el.addEventListener("blur", () => { setTimeout(maybeAutoDiscover, 100); }); });
+
+    // When the gateway is set, auto-suggest node IPs + MetalLB VIPs (no clicks).
+    const gw = $("NODE_GATEWAY");
+    if (gw) gw.addEventListener("blur", async () => {
+      if (!isIp(val("NODE_GATEWAY"))) return;
+      updateNodePlaceholders();
+      if (!val("NODE_1_IP") && typeof suggestNodeIps === "function") { try { await suggestNodeIps(); } catch (e) {} }
+      if (!val("METALLB_VIP_RANGE") && typeof suggestVips === "function") { try { await suggestVips(); } catch (e) {} }
+      validateAll(); refresh();
+    });
+
+    // Live-derive the single Traefik/CoreDNS VIPs from the range as it is typed.
+    const mr = $("METALLB_VIP_RANGE");
+    if (mr) mr.addEventListener("blur", () => { deriveSingleVips(); refresh(); });
+
+    // Wrap save/deploy to scroll to the first invalid field first (non-blocking).
+    wrap("saveEnv"); wrap("startDeploy");
+
+    // Initial paint (loadEnv may still be running; re-run shortly after).
+    validateAll(); refresh(); updateNodePlaceholders();
+    setTimeout(() => { validateAll(); refresh(); offerRestore(); }, 1200);
+    setTimeout(maybeAutoDiscover, 1500);
+    // Auto-load this host's public IP once on open (the user can re-run via the button).
+    setTimeout(() => { if (typeof detectPublicIp === "function") { try { detectPublicIp(true); } catch (e) {} } }, 800);
+    // Auto-load the latest Talos + Kubernetes versions (blanks only).
+    setTimeout(() => { if (typeof fetchLatestVersions === "function") { try { fetchLatestVersions(true); } catch (e) {} } }, 900);
+    // Auto-generate the Talos factory schematic (blank only).
+    setTimeout(() => { if (typeof generateSchematic === "function") { try { generateSchematic(true); } catch (e) {} } }, 1100);
+    // Auto-detect the LAN allowlist ranges if none are set and VPN-only is off.
+    setTimeout(() => {
+      try {
+        const vpnOnly = $("vpn-only-toggle");
+        const hasRanges = typeof ipRanges !== "undefined" && ipRanges.some((x) => x && x.trim());
+        if (typeof detectSubnets === "function" && !hasRanges && !(vpnOnly && vpnOnly.checked)) detectSubnets();
+      } catch (e) {}
+    }, 1300);
+    // Auto-derive gateway + subnet from the host's LAN, then refresh placeholders.
+    setTimeout(() => { deriveNetwork().then(() => { updateNodePlaceholders(); validateAll(); refresh(); }).catch(() => {}); }, 1000);
+  }
+
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    setTimeout(init, 0);
+  } else {
+    window.addEventListener("load", init);
+  }
+
+  return { autopilot, nextSection, prevSection, goSection, validateAll, refresh, copySummary, focusFirstError, onNodesRendered };
+})();
 </script>
 </body>
 </html>
