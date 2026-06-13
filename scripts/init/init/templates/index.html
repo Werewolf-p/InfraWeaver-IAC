@@ -131,6 +131,30 @@
       max-width: 500px;
       margin: 0 auto;
     }
+    /* Top-right "Update" button — pulls latest from GitHub and restarts the wizard */
+    .btn-update-site {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(68,136,255,0.12);
+      border: 1px solid var(--blue-dim);
+      color: var(--blue);
+      border-radius: 6px;
+      padding: 7px 12px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+      z-index: 40;
+      transition: all 0.2s;
+    }
+    .btn-update-site:hover:not(:disabled) { background: rgba(68,136,255,0.2); box-shadow: var(--glow-blue); }
+    .btn-update-site:disabled { opacity: 0.6; cursor: not-allowed; }
+    @media (max-width: 640px) {
+      .btn-update-site { top: 6px; right: 6px; padding: 6px 9px; font-size: 10px; }
+    }
     .blink {
       animation: blink 1s step-end infinite;
     }
@@ -960,6 +984,7 @@
 
   <!-- Header -->
   <div class="header">
+    <button id="btn-update-site" class="btn-update-site" onclick="updateWebsite()" title="Pull the latest version from GitHub and restart the wizard">⟳ Update</button>
     <pre class="ascii-logo">
  ██╗███╗   ██╗███████╗██████╗  █████╗ ██╗    ██╗███████╗ █████╗ ██╗   ██╗███████╗██████╗
  ██║████╗  ██║██╔════╝██╔══██╗██╔══██╗██║    ██║██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗
@@ -2002,6 +2027,46 @@ async function fetchLatestVersions(auto = false) {
     if (btn) btn.textContent = '⚠ Offline';
   }
   setTimeout(() => { if (btn) { btn.textContent = '🔄 Fetch latest'; btn.disabled = false; } }, 2500);
+}
+
+// ── Update website — pull latest from GitHub + restart the wizard ──
+async function updateWebsite() {
+  const btn = document.getElementById('btn-update-site');
+  if (!confirm('Pull the latest version from GitHub and restart the wizard? The page will reload automatically.')) return;
+  if (btn) { btn.textContent = '⏳ Updating…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/self-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const j = await r.json();
+    if (j.ok) {
+      if (btn) btn.textContent = '✅ Restarting…';
+      // The server re-execs ~0.8s after responding; poll the (token-free) health
+      // endpoint until it answers again, then reload to load the new UI.
+      let tries = 0;
+      const poll = setInterval(async () => {
+        tries++;
+        try {
+          const h = await fetch('/api/health', { cache: 'no-store' });
+          if (h.ok) { clearInterval(poll); location.reload(); return; }
+        } catch (e) {}
+        if (tries > 40) {
+          clearInterval(poll);
+          if (btn) { btn.textContent = '↻ Reload'; btn.disabled = false; btn.onclick = () => location.reload(); }
+        }
+      }, 1000);
+    } else {
+      if (btn) { btn.textContent = '⚠ Failed'; btn.disabled = false; }
+      if (typeof showAlert === 'function') showAlert('config-alert', 'error', 'Update failed: ' + (j.error || 'unknown error'));
+    }
+  } catch (e) {
+    // A dropped connection here often means the server is already restarting.
+    if (btn) btn.textContent = '✅ Restarting…';
+    let tries = 0;
+    const poll = setInterval(async () => {
+      tries++;
+      try { const h = await fetch('/api/health', { cache: 'no-store' }); if (h.ok) { clearInterval(poll); location.reload(); return; } } catch (e2) {}
+      if (tries > 40) { clearInterval(poll); if (btn) { btn.textContent = '↻ Reload'; btn.disabled = false; btn.onclick = () => location.reload(); } }
+    }, 1000);
+  }
 }
 
 // ── Talos factory schematic — generate from upstream ──
