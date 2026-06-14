@@ -120,6 +120,10 @@ if re.match(r'^\d+\.\d+\.\d+\.\d+$', _gw):
         env_vars['METALLB_COREDNS_VIP'] = f'{_base}.201'
     if not env_vars.get('METALLB_VIP_RANGE'):
         env_vars['METALLB_VIP_RANGE'] = f'{_base}.200-{_base}.210'
+    # ip-pool.yaml references METALLB_VLAN3_POOL_RANGE for the vlan3-pool; it must
+    # exclude the .200/.201 VIPs (Traefik/CoreDNS) to avoid overlapping addresses.
+    if not env_vars.get('METALLB_VLAN3_POOL_RANGE'):
+        env_vars['METALLB_VLAN3_POOL_RANGE'] = f'{_base}.202-{_base}.210'
 if not env_vars.get('CLUSTER_LOCAL_DOMAIN'):
     _bd = env_vars.get('BASE_DOMAIN', '').strip()
     if _bd:
