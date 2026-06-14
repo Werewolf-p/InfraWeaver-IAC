@@ -14,6 +14,10 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: HEAD
     path: kubernetes/platform/external-dns/manifests
+    # Render through the envsubst CMP so ${PLACEHOLDER} config tokens
+    # (e.g. ${MGMT_SUBNET_CIDR}) resolve at sync time.
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: external-dns

@@ -10,6 +10,10 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/core/metallb/manifests
+    # Render through the envsubst CMP so ${PLACEHOLDER} config tokens
+    # (e.g. ${METALLB_TRAEFIK_VIP}, ${METALLB_COREDNS_VIP}) resolve at sync time.
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: metallb-system
