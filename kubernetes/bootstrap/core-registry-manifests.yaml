@@ -22,6 +22,11 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/core/registry
+    # Render through the envsubst CMP so ${BASE_DOMAIN} in the registry
+    # IngressRoute host resolves at sync time (else Traefik gets no route for
+    # the real registry host and image push/pull 404s).
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: registry
