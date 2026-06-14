@@ -52,9 +52,21 @@ for rtype in clusterrole clusterrolebinding; do
   done
 done
 
+# ArgoCD-native Helm does not run envsubst, so values.yaml's
+# `global.domain: argocd.int.${BASE_DOMAIN}` would otherwise reach argocd-cm.url
+# as a literal and crash argocd-server ("invalid character { in host name").
+# Resolve BASE_DOMAIN from .env (config-driven, never hardcoded) and override the
+# domain via --set so the first/bootstrap install is correct too. The self-managed
+# ApplicationSet keeps it correct thereafter (see scripts/sync-groups.sh).
+if [ -z "${BASE_DOMAIN:-}" ] && [ -f .env ]; then
+  BASE_DOMAIN="$(grep -E '^BASE_DOMAIN=' .env | head -1 | cut -d= -f2- | tr -d '"'\''')"
+fi
+: "${BASE_DOMAIN:?BASE_DOMAIN required (set in env or .env) to render argocd-cm.url}"
+
 helm --kubeconfig "$KB" upgrade --install argocd argo/argo-cd \
   --namespace argocd --skip-crds --timeout 10m --no-hooks \
-  -f kubernetes/core/argocd/values.yaml
+  -f kubernetes/core/argocd/values.yaml \
+  --set-string global.domain="argocd.int.${BASE_DOMAIN}"
 
 kubectl --kubeconfig "$KB" patch svc argocd-repo-server -n argocd \
   --type json -p '[{"op":"replace","path":"/spec/ports/0/targetPort","value":8081}]' 2>/dev/null || true

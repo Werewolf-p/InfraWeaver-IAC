@@ -35,6 +35,8 @@ spec:
             parameters:
               - name: replicaCount
                 value: '{{ if .replicas }}{{ .replicas }}{{ else }}1{{ end }}'
+              - name: global.domain
+                value: '{{ if eq .path.path "kubernetes/core/argocd" }}argocd.int.${BASE_DOMAIN}{{ end }}'
       destination:
         server: https://kubernetes.default.svc
         namespace: "{{ .namespace }}"
