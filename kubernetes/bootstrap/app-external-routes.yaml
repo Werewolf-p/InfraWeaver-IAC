@@ -13,6 +13,10 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/platform/external-routes/manifests
+    # Render through the envsubst CMP so ${PLACEHOLDER} config tokens
+    # (e.g. ${ADMIN_EMAIL}, ${BASE_DOMAIN}) resolve at sync time.
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: traefik
@@ -28,3 +32,4 @@ spec:
         maxDuration: 3m
     syncOptions:
       - CreateNamespace=false
+      - ServerSideApply=true

@@ -16,6 +16,10 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/core/cert-manager/manifests
+    # Render through the envsubst CMP so ${PLACEHOLDER} config tokens
+    # (e.g. ${ADMIN_EMAIL}, ${BASE_DOMAIN}) resolve at sync time.
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
@@ -31,6 +35,7 @@ spec:
         maxDuration: 3m
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true
   ignoreDifferences:
     - group: cert-manager.io
       kind: ClusterIssuer
