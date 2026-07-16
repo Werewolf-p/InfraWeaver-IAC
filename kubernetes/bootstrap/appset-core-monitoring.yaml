@@ -72,3 +72,24 @@ spec:
             - /spec/persistentVolumeClaimRetentionPolicy
           managedFieldsManagers:
             - kube-controller-manager
+        - kind: Secret
+          name: cilium-ca
+          namespace: kube-system
+          jsonPointers:
+            - /data
+        - kind: Secret
+          name: hubble-server-certs
+          namespace: kube-system
+          jsonPointers:
+            - /data
+        - kind: Secret
+          name: hubble-relay-client-certs
+          namespace: kube-system
+          jsonPointers:
+            - /data
+        - group: monitoring.coreos.com
+          kind: ServiceMonitor
+          name: hubble
+          namespace: kube-system
+          jsonPointers:
+            - /spec/endpoints

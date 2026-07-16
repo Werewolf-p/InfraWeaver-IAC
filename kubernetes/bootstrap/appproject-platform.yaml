@@ -33,9 +33,6 @@ spec:
   orphanedResources:
     warn: false   # argocd namespace always has Helm-managed resources not tracked by manifests app
     ignore:
-      # openbao-token is managed by workflow (not ArgoCD)
-      - kind: Secret
-        name: openbao-token
       # grafana-admin-secret is created by ExternalSecret (ESO-managed)
       - kind: Secret
         name: grafana-admin-secret

@@ -1,0 +1,88 @@
+# Nextcloud — RW gateway to the NAS `media` share.
+#
+# Plan reference: plans/advanced-storage.md §5.3 (Option A recommended).
+#
+# Nextcloud runs *without* a CSI mount of the NAS. Instead its built-in
+# "External Storage" app mounts `//<synology-host>/media` at container
+# runtime using the RW SMB credential (secret/platform/nas/media-rw in
+# OpenBao). This keeps Nextcloud's data-dir semantics simple, avoids
+# privileged CSI mounts for the RW path, and gives Nextcloud a per-user
+# NAS identity when users upload.
+#
+# What we ship in-cluster:
+#   - Postgres (dedicated, matches the n8n Postgres pattern in this repo)
+#   - Longhorn PVCs for Nextcloud config + Postgres data
+#   - Deployment + Service
+#   - IngressRoute (native auth; OIDC-to-Authentik configured in the app UI)
+#   - ExternalSecret pulling Nextcloud admin + DB creds + NAS RW creds
+#
+# What is manual (one-time, documented in runbook):
+#   1. On Synology: create `svc-nextcloud` with RW ACL on `media` only.
+#   2. Store creds in OpenBao at secret/platform/nas/media-rw (username,
+#      password) and secret/platform/nextcloud (admin_password, db_password).
+#   3. In the Nextcloud UI: Apps → External storage → Add `media` (SMB/CIFS),
+#      host from `NAS_SMB_HOST`, username/password from the mounted
+#      `/etc/nas-media-rw` secret, share `media`. Grant to the media group.
+
+name: nextcloud
+description: "Private file sync + sharing, with RW gateway to the NAS media share"
+namespace: nextcloud
+
+# Raw manifests only (no Helm chart) — mirrors the jellyfin catalog shape.
+
+ingressroute:
+  host: nextcloud.int.${BASE_DOMAIN}
+  entrypoint: websecure
+  port: 80
+
+# ── OpenBao secret ownership ──────────────────────────────────────────────────
+# seed-catalog-secrets.sh generates these into secret/platform/nextcloud on a
+# fresh install so the nextcloud-app-credentials ExternalSecret — and the Postgres
+# pod + postinstall Job that read the SAME ESO-synced Secret — always receive real
+# values. Without this, a fresh cluster has no such OpenBao path and the admin
+# password materialises EMPTY.
+#
+# That ExternalSecret uses deletionPolicy: Retain, under which ESO fails the
+# ENTIRE secret sync if ANY referenced property is absent in OpenBao (a missing
+# key is only skipped when deletionPolicy != Retain). So EVERY property it reads
+# from this path must be declared below, not just admin_*. validate-iac.sh step
+# 4/4 enforces this invariant.
+#
+# Nextcloud deploys via a hand-written bootstrap Application (kubernetes/bootstrap/
+# catalog-nextcloud.yaml) and is intentionally kept OUT of platform.yaml
+# catalog.enabled, so scripts/sync-catalog.sh cannot clobber that Application's
+# envsubst CMP source with a plain-directory one. The seeder therefore reaches
+# this app via its bootstrap-Application scan, not the enabled list.
+#
+# Key names use underscores to match the ExternalSecret remoteRef `property:` values
+# (see manifests/externalsecret.yaml → nextcloud-app-credentials).
+secrets:
+  path: platform/nextcloud
+  keys:
+    # Nextcloud admin — generated, so a fresh install is never left with a blank
+    # or guessable admin credential. The console reveals/rotates these from this
+    # same path (its own ExternalSecret also reads admin_user/admin_password here).
+    admin_user:
+      type: password
+      length: 20
+    admin_password:
+      type: password
+      length: 32
+    # Postgres password — shared by the Postgres pod (POSTGRES_PASSWORD) and
+    # Nextcloud's DB client because both consume the one nextcloud-app-credentials
+    # Secret. Generated once; the seeder then preserves it on every later deploy.
+    db_password:
+      type: password
+      length: 32
+    # db_host MUST equal the in-cluster Postgres Service name; db_user/db_name are
+    # the fixed identifiers Postgres is initialised with. Static, never generated —
+    # a random value here would point Nextcloud at a non-existent host/role.
+    db_host:
+      type: static
+      value: "postgresql-nextcloud"
+    db_name:
+      type: static
+      value: "nextcloud"
+    db_user:
+      type: static
+      value: "nextcloud"

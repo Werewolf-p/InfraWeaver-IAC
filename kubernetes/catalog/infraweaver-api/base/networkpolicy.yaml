@@ -64,14 +64,6 @@ spec:
       ports:
         - port: 80
           protocol: TCP
-    # OneDev git server (IaC version updates)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: onedev
-      ports:
-        - port: 80
-          protocol: TCP
     # External HTTPS (GitHub API, upstream services)
     - to:
         - ipBlock:

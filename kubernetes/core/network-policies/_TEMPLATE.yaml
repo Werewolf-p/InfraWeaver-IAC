@@ -1,0 +1,28 @@
+# Onboarding template — copy into manifests/, replace __NAMESPACE__, done.
+# This makes __NAMESPACE__ an airgapped void: deny everything except DNS,
+# intra-namespace, the Kubernetes API, Traefik ingress, and monitoring scrape.
+# Add anything else the app legitimately needs to manifests/allowlists.yaml.
+#
+# NOT synced by ArgoCD from this path (lives outside manifests/).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airgap-baseline
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/managed-by: gitops
+    infraweaver.io/posture: airgapped
+spec:
+  endpointSelector: {}                       # every pod in the namespace
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": __NAMESPACE__}}]  # intra-namespace
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]        # ingress via Traefik
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]     # Prometheus scrape
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": __NAMESPACE__}}]    # intra-namespace
+    - toEndpoints:                                                                        # cluster DNS only
+        - matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}
+      toPorts:
+        - ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]
+          rules: {dns: [{matchPattern: "*"}]}      # let Cilium learn FQDNs for toFQDNs allows
+    - toEntities: [kube-apiserver]                                                        # Kubernetes API

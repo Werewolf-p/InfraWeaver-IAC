@@ -43,6 +43,8 @@ spec:
       annotations:
         infraweaver.io/rebalance-memory: "true"
     spec:
+      # Game server needs no Kubernetes API access.
+      automountServiceAccountToken: false
       priorityClassName: game-server
       # Prefer the node platform services bias away from so game workloads stop contending with ArgoCD/Auth.
       affinity:

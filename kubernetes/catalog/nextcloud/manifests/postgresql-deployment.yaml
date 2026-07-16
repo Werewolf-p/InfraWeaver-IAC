@@ -1,0 +1,91 @@
+---
+# Postgres for Nextcloud — mirrors the n8n Postgres pattern
+# (kubernetes/platform/n8n/manifests/postgresql-n8n-deployment.yaml).
+# Single replica, credentials via ExternalSecret, RuntimeDefault seccomp.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgresql-nextcloud
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app: postgresql-nextcloud
+  template:
+    metadata:
+      labels:
+        app: postgresql-nextcloud
+    spec:
+      # Pinned to cp1: the data now lives on a node-local local-path-retain
+      # volume (off Longhorn to remove RWO Multi-Attach stalls). The PV has
+      # nodeAffinity to cp1, so this selector just makes intent explicit.
+      nodeSelector:
+        kubernetes.io/hostname: talos-prod-cp1
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 70
+        runAsNonRoot: true
+        runAsUser: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgresql
+          image: postgres:15-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-name } } }
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-user } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-password } } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - { name: POSTGRES_HOST_AUTH_METHOD, value: md5 }
+            - { name: POSTGRES_INITDB_ARGS, value: "--auth-host=md5 --auth-local=md5" }
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          livenessProbe:
+            exec: { command: ["/bin/sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"] }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec: { command: ["/bin/sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: false
+          volumeMounts:
+            - { name: postgresql-data, mountPath: /var/lib/postgresql/data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: run, mountPath: /var/run }
+      volumes:
+        - name: postgresql-data
+          persistentVolumeClaim:
+            claimName: postgresql-nextcloud-data-lp
+        - { name: tmp, emptyDir: {} }
+        - { name: run, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-nextcloud
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app: postgresql-nextcloud
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+  type: ClusterIP

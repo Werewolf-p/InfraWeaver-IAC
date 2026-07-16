@@ -1,4 +1,20 @@
 ---
+# Jellyfin IngressRoute — Traefik on `websecure`, wildcard TLS via the shared
+# `default` store, Cloudflare-proxied.
+#
+# AUTH DECISION (plan §5.4): forward-auth (Authentik) is intentionally NOT
+# applied to Jellyfin. The Authentik middleware performs a browser redirect
+# that breaks native Jellyfin apps (iOS, Android, tvOS, Roku, LG WebOS) and
+# Jellyfin's DLNA endpoints — every one of which is the primary way people
+# actually consume the service worldwide.
+#
+# Defence-in-depth without forward-auth:
+#   * Cloudflare proxy hides the origin IP; enable Cloudflare Access on the
+#     `/web/*` path only if you want an extra SSO factor for browser use.
+#   * Jellyfin's built-in auth is required for every user; disable anonymous
+#     access in the Jellyfin admin UI.
+#   * NAS credentials are RO (this catalog's `nas-media-ro`) so a Jellyfin
+#     compromise cannot delete or corrupt media (plan §3).
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -13,9 +29,8 @@ spec:
   routes:
     - match: Host(`jellyfin.int.${BASE_DOMAIN}`)
       kind: Rule
-      middlewares:
-        - name: forward-auth
-          namespace: traefik
+      # No forward-auth middleware — native clients depend on Jellyfin's own
+      # authentication, not a redirect-based SSO gate.
       services:
         - name: jellyfin
           port: 8096

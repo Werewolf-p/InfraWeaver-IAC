@@ -1,0 +1,16 @@
+# PENDING — not synced by ArgoCD. Apply ONE AT A TIME, watching the relevant
+# subsystem, because these namespaces are cluster infrastructure and a wrong rule
+# is cluster-wide.
+#
+# ✅ CLEARED (2026-06-29): the longhorn-system baseline that was staged here has been
+# applied + verified (Hubble-watched, zero policy drops) and PROMOTED to the synced
+# ../manifests/infra-airgap.yaml. The blocker was never networking — the longhorn
+# `priority-class` setting had drifted to empty, so instance-manager pods inherited the
+# cluster globalDefault PriorityClass `platform-default`, which never matched the empty
+# setting → handlePod "setting not synced" deleted the pod every reconcile → APIVersion
+# stayed 0 → the "version 6-1 not compatible with InstanceManagerAPIVersion 0" churn.
+# Fix was to reconcile the live setting back to the repo intent
+# (`priorityClass: platform-standard`, already in core/longhorn/values.yaml).
+#
+# Nothing is currently pending. New infra-tier baselines that still need the
+# apply-one-at-a-time + Hubble-watch treatment can be staged below before promotion.

@@ -1,0 +1,407 @@
+# cobalt-grove-45.yaml — git-tracked adoption of the live game-hub server "cobalt-grove-45".
+# Exported from the running cluster and pruned so catalog-game-hub-servers adopts it
+# with zero drift. OMITTED ON PURPOSE (console/controller owns these at runtime):
+#   - spec.replicas .............. start/stop is console-owned (app ignoreDifferences +
+#                                  RespectIgnoreDifferences). Pinning it here would let
+#                                  selfHeal restart a stopped server.
+#   - operational annotations .... infraweaver.io/last-started, autopause/crash/
+#                                  players-empty-since, deployment revision, restartedAt.
+#   - status / cluster-populated . uid, resourceVersion, generation, clusterIP,
+#                                  PVC volumeName + pv.* annotations.
+# KEPT: full pod spec incl. automountServiceAccountToken:false, init installer, probes,
+#       lifecycle preStop, and the NodePort (pinned for a stable player/router address).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app: cobalt-grove-45
+    infraweaver.io/egg: minecraft-java-paper
+    infraweaver.io/game: 'true'
+    infraweaver/egg: minecraft-java-paper
+    infraweaver/game: 'true'
+  name: cobalt-grove-45-container
+  namespace: game-hub
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: longhorn-game
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    # Client-side apply for this resource only. ArgoCD's server-side apply wrongly
+    # injects --force when a Deployment carries ignoreDifferences + serverSideDiff
+    # (--force is invalid with --server-side), which blocks every sync that has a
+    # diff. This manifest is ~11KB (well under the client-side apply limit), so
+    # client-side apply is safe and keeps GitOps sync working.
+    argocd.argoproj.io/sync-options: ServerSideApply=false
+    infraweaver.io/dns-hostname: cobalt-grove-45.games.example.com
+    infraweaver.io/egg-id: minecraft/java/paper
+    infraweaver.io/egg-source: pelican:minecraft/java/paper
+    infraweaver.io/groups: ''
+    infraweaver.io/image-version: java_25
+  labels:
+    app: cobalt-grove-45
+    infraweaver.io/egg: minecraft-java-paper
+    infraweaver.io/game: 'true'
+    infraweaver.io/game-type: minecraft-java-paper
+    infraweaver/egg: minecraft-java-paper
+    infraweaver/game: 'true'
+    infraweaver/game-type: minecraft-java-paper
+  name: cobalt-grove-45
+  namespace: game-hub
+spec:
+  selector:
+    matchLabels:
+      app: cobalt-grove-45
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        infraweaver.io/dns-hostname: cobalt-grove-45.games.example.com
+        infraweaver.io/egg-id: minecraft/java/paper
+        infraweaver.io/egg-source: pelican:minecraft/java/paper
+        infraweaver.io/groups: ''
+        infraweaver.io/image-version: java_25
+      labels:
+        app: cobalt-grove-45
+        infraweaver.io/egg: minecraft-java-paper
+        infraweaver.io/game: 'true'
+        infraweaver.io/game-type: minecraft-java-paper
+        infraweaver/egg: minecraft-java-paper
+        infraweaver/game: 'true'
+        infraweaver/game-type: minecraft-java-paper
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: ENABLE_RCON
+          value: 'true'
+        - name: RCON_PORT
+          value: '25575'
+        - name: RCON_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: game-hub-server-credentials
+              key: cobalt-grove-45-rcon-password
+        - name: SERVER_MEMORY
+          value: '1536'
+        - name: SERVER_IP
+          value: 0.0.0.0
+        - name: SERVER_PORT
+          value: '25565'
+        - name: RUNTIME_JAVA_MAJOR
+          value: '25'
+        - name: MINECRAFT_VERSION
+          value: latest
+        - name: SERVER_JARFILE
+          value: server.jar
+        - name: DL_PATH
+        - name: BUILD_NUMBER
+          value: latest
+        - name: MODPACK_VERSION
+          value: 1.0.12c
+        - name: EULA
+          value: 'TRUE'
+        - name: STARTUP
+          value: java -Xms128M -Xmx{{SERVER_MEMORY}}M -Dterminal.jline=false -Dterminal.ansi=true -jar
+            {{SERVER_JARFILE}}
+        - name: _IW_STOP_SIGNAL
+          value: '2'
+        - name: _IW_STOP_CMD
+          value: stop
+        - name: _IW_STOP_STDIN
+          value: '1'
+        image: ghcr.io/pterodactyl/yolks:java_25
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |-
+                # Locate game process once — used by all fallback tiers
+                GPID=""
+                for _P in $(ls /proc 2>/dev/null | grep '^[0-9]'); do
+                  _C=$(cat /proc/$_P/comm 2>/dev/null)
+                  case "$_C" in pause|sh|bash|sleep|init|tini|python3|"") continue;; esac
+                  GPID=$_P; break
+                done
+                # Tier 2: stdin write via shared PID namespace + TTY
+                if [ "${_IW_STOP_STDIN:-0}" = "1" ] && [ -n "$GPID" ]; then
+                  printf '%s\n' "${_IW_STOP_CMD}" >/proc/$GPID/fd/0 2>/dev/null && sleep 15 && exit 0
+                fi
+                # Tier 3: signal fallback
+                kill -${_IW_STOP_SIGNAL:-2} ${GPID:-1} 2>/dev/null || true
+                sleep 5
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - '{ [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || pgrep -P 1 > /dev/null 2>&1'
+          failureThreshold: 3
+          periodSeconds: 30
+        name: cobalt-grove-45
+        ports:
+        - containerPort: 25565
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - '{ [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || pgrep -P 1 > /dev/null 2>&1'
+          failureThreshold: 3
+          periodSeconds: 15
+        resources:
+          limits:
+            cpu: '1'
+            memory: 2Gi
+          requests:
+            cpu: '1'
+            memory: 2Gi
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - '{ [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || pgrep -P 1 > /dev/null 2>&1'
+          failureThreshold: 30
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        stdin: true
+        tty: true
+        volumeMounts:
+        - mountPath: /home/container
+          name: data
+      initContainers:
+      - command:
+        - ash
+        - -c
+        - |-
+          #!/bin/sh
+          if [ -f "/mnt/server/.installed" ]; then
+            echo "[install] Already installed — skipping"
+            exit 0
+          fi
+          #!/bin/ash
+          # Paper-family install script — patched by InfraWeaver to PaperMC v3
+          # (fill.papermc.io/v3); upstream v2 api.papermc.io was sunset.
+          # Server Files: /mnt/server
+          PROJECT=paper
+          API=https://fill.papermc.io/v3/projects/${PROJECT}
+
+          if [ -n "${DL_PATH}" ]; then
+              echo -e "Using supplied download url: ${DL_PATH}"
+              DOWNLOAD_URL=`eval echo $(echo ${DL_PATH} | sed -e 's/{{/${/g' -e 's/}}/}/g')`
+          else
+              ALL_VERSIONS=`curl -s ${API} | jq -r '[.versions | to_entries[] | .value[]]'`
+
+              if [ -z "${MINECRAFT_VERSION}" ] || [ "${MINECRAFT_VERSION}" = "latest" ]; then
+                  VALID=""
+              else
+                  VALID=`echo "${ALL_VERSIONS}" | jq -r --arg V "${MINECRAFT_VERSION}" 'index($V) // empty'`
+              fi
+
+              BUILD_JSON=""
+              if [ -z "${VALID}" ]; then
+                  echo -e "Resolving latest stable ${PROJECT} version compatible with Java ${RUNTIME_JAVA_MAJOR:-any}"
+                  for V in `echo "${ALL_VERSIONS}" | jq -r '.[0:25][]'`; do
+                      if [ -n "${RUNTIME_JAVA_MAJOR}" ]; then
+                          JAVA_MIN=`curl -s "${API}/versions/${V}" | jq -r '.version.java.version.minimum // 0'`
+                          if [ -n "${JAVA_MIN}" ] && [ "${JAVA_MIN}" -gt "${RUNTIME_JAVA_MAJOR}" ] 2>/dev/null; then
+                              continue
+                          fi
+                      fi
+                      CANDIDATE=`curl -s "${API}/versions/${V}/builds" | jq -c 'map(select(.channel=="STABLE")) | last // empty'`
+                      if [ -n "${CANDIDATE}" ] && [ "${CANDIDATE}" != "null" ]; then
+                          MINECRAFT_VERSION=${V}
+                          BUILD_JSON=${CANDIDATE}
+                          break
+                      fi
+                  done
+              else
+                  echo -e "Using version ${MINECRAFT_VERSION}"
+                  BUILDS=`curl -s "${API}/versions/${MINECRAFT_VERSION}/builds"`
+                  BUILD_JSON=`echo "${BUILDS}" | jq -c --arg B "${BUILD_NUMBER}" 'map(select((.id|tostring)==$B)) | .[0] // empty'`
+                  if [ -z "${BUILD_JSON}" ] || [ "${BUILD_JSON}" = "null" ]; then
+                      BUILD_JSON=`echo "${BUILDS}" | jq -c '(map(select(.channel=="STABLE")) | last) // last // empty'`
+                  fi
+              fi
+
+              if [ -z "${BUILD_JSON}" ] || [ "${BUILD_JSON}" = "null" ]; then
+                  echo -e "ERROR: could not resolve a ${PROJECT} build from ${API}"
+                  exit 1
+              fi
+
+              DL=`echo "${BUILD_JSON}" | jq -c '.downloads["server:default"] // (.downloads | to_entries | .[0].value)'`
+              DOWNLOAD_URL=`echo "${DL}" | jq -r '.url'`
+              BUILD_NUMBER=`echo "${BUILD_JSON}" | jq -r '.id'`
+              echo -e "MC Version: ${MINECRAFT_VERSION}"
+              echo -e "Build: ${BUILD_NUMBER}"
+          fi
+
+          cd /mnt/server
+
+          # Minecraft servers exit on first boot unless the Mojang EULA is accepted.
+          if [ ! -f eula.txt ] || ! grep -q '^eula=true' eula.txt 2>/dev/null; then echo "eula=true" > eula.txt; echo "Accepted Mojang EULA (eula.txt)"; fi
+
+          echo -e "Running curl -o ${SERVER_JARFILE} ${DOWNLOAD_URL}"
+          if [ -f "${SERVER_JARFILE}" ]; then
+              mv "${SERVER_JARFILE}" "${SERVER_JARFILE}.old"
+          fi
+          curl -fsSL -o "${SERVER_JARFILE}" "${DOWNLOAD_URL}"
+
+          if [ ! -f server.properties ]; then
+              echo -e "Downloading MC server.properties"
+              curl -o server.properties https://raw.githubusercontent.com/parkervcp/eggs/master/minecraft/java/server.properties
+          fi
+
+          chown -R 1000:1000 "/mnt/server"
+          touch "/mnt/server/.installed"
+          echo "[install] Installation complete"
+        env:
+        - name: SERVER_MEMORY
+          value: '1536'
+        - name: SERVER_IP
+          value: 0.0.0.0
+        - name: SERVER_PORT
+          value: '25565'
+        - name: RUNTIME_JAVA_MAJOR
+          value: '25'
+        - name: MINECRAFT_VERSION
+          value: latest
+        - name: SERVER_JARFILE
+          value: server.jar
+        - name: DL_PATH
+        - name: BUILD_NUMBER
+          value: latest
+        - name: MODPACK_VERSION
+          value: 1.0.12c
+        - name: EULA
+          value: 'TRUE'
+        - name: STARTUP
+          value: java -Xms128M -Xmx{{SERVER_MEMORY}}M -Dterminal.jline=false -Dterminal.ansi=true -jar
+            {{SERVER_JARFILE}}
+        - name: _IW_STOP_SIGNAL
+          value: '2'
+        - name: _IW_STOP_CMD
+          value: stop
+        - name: _IW_STOP_STDIN
+          value: '1'
+        image: ghcr.io/parkervcp/installers:alpine
+        imagePullPolicy: IfNotPresent
+        name: installer
+        resources:
+          limits:
+            cpu: '2'
+            memory: 2Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        securityContext:
+          runAsGroup: 0
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /mnt/server
+          name: data
+      # Boot-time (runs EVERY start, unlike the .installed-gated installer above)
+      # generic config-file templater. Applies this egg's Pterodactyl config.files
+      # from env via the shared parse.py, so server.properties rcon.password always
+      # tracks the ESO-backed Secret (Paper's own egg config.files carries no RCON;
+      # the enable-rcon/rcon.* keys are InfraWeaver's augmentation for the console
+      # command channel). Idempotent; never fatal on a single-file error.
+      - name: config-sync
+        image: python:3.12-alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -lc
+        - |
+          python3 -c 'import yaml' 2>/dev/null || apk add --no-cache py3-yaml >/dev/null 2>&1 || true
+          exec python3 /opt/iw/parse.py
+        env:
+        - name: IW_DATA_DIR
+          value: /home/container
+        - name: IW_CONFIG_FILES
+          value: '{"server.properties":{"parser":"properties","find":{"server-ip":"0.0.0.0","server-port":"{{server.build.default.port}}","query.port":"{{server.build.default.port}}","enable-rcon":"true","rcon.port":"{{server.build.env.RCON_PORT}}","rcon.password":"{{server.build.env.RCON_PASSWORD}}"}}}'
+        - name: SERVER_PORT
+          value: '25565'
+        - name: SERVER_MEMORY
+          value: '1536'
+        - name: RCON_PORT
+          value: '25575'
+        - name: RCON_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: game-hub-server-credentials
+              key: cobalt-grove-45-rcon-password
+        securityContext:
+          runAsGroup: 0
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /home/container
+          name: data
+        - mountPath: /opt/iw
+          name: egg-config-parser
+          readOnly: true
+      priorityClassName: game-server
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsUser: 1000
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 120
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            infraweaver/game: 'true'
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: cobalt-grove-45-container
+      - name: egg-config-parser
+        configMap:
+          name: game-hub-egg-config-parser
+          defaultMode: 420
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: cobalt-grove-45.games.example.com
+    external-dns.alpha.kubernetes.io/managed: 'true'
+    external-dns.alpha.kubernetes.io/target: 84.82.69.110
+    external-dns.alpha.kubernetes.io/ttl: '60'
+  labels:
+    app: cobalt-grove-45
+    infraweaver/game: 'true'
+  name: cobalt-grove-45
+  namespace: game-hub
+spec:
+  ports:
+  - name: game
+    nodePort: 31962
+    port: 25565
+    protocol: TCP
+    targetPort: 25565
+  selector:
+    app: cobalt-grove-45
+  type: NodePort

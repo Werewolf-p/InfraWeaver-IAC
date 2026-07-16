@@ -82,6 +82,13 @@ spec:
           value: ${BASE_DOMAIN}
         - name: NEXT_PUBLIC_BASE_DOMAIN
           value: ${BASE_DOMAIN}
+        # Public ingress IP for game-server DNS. Game servers are exposed via NodePort
+        # straight to the internet (bypassing Traefik), so their external-dns records
+        # need an explicit target (external-dns runs as a Helm app whose --default-targets
+        # placeholder is not env-substituted). The create-server route stamps this onto
+        # each game Service's external-dns target annotation.
+        - name: PUBLIC_INGRESS_IP
+          value: ${PUBLIC_INGRESS_IP}
         # AUTH_URL must include /api/auth so Auth.js v5 derives basePath="/api/auth"
         # and correctly parses actions from /api/auth/signin/authentik etc.
         # Without the path, basePath="/" and the regex extracts "api" as the action → UnknownAction.
@@ -133,29 +140,19 @@ spec:
               optional: true
         - name: GITHUB_REPO
           value: ${GITHUB_REPO}
+        # OneDev is decommissioned (removed 2026-07-03) — GitHub drives all
+        # git/config ops via GITHUB_REPO/GITHUB_TOKEN above.
         - name: GIT_PROVIDER
-          value: onedev
-        - name: ONEDEV_URL
-          value: http://onedev.onedev.svc.cluster.local
-        - name: ONEDEV_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: infraweaver-console-secret
-              key: onedev-token
-        - name: ONEDEV_PROJECT_ID
-          value: "2"
-        - name: ONEDEV_PROJECT_PATH
-          value: "InfraWeaver-platform"
-        - name: ONEDEV_BRANCH
-          value: main
-        - name: ONEDEV_USERNAME
-          value: infraweaver
+          value: github
         - name: GIT_WORKTREE_ROOT
           value: /git-cache
         - name: GATUS_URL
           value: http://gatus.gatus.svc.cluster.local:8080
+        # Cluster id MUST be "default" (or "local") — that is the id the
+        # infraweaver-api cluster registry maps to the in-cluster client. A custom
+        # id like "homelab-prod" makes /k8s/* 502 "Failed to fetch nodes".
         - name: CLUSTER_CONTEXTS
-          value: '[{"id":"homelab-prod","displayName":"Production","isLocal":true,"tags":["production"]}]'
+          value: '[{"id":"default","displayName":"Production","isLocal":true,"tags":["production"]}]'
         - name: LONGHORN_API
           value: http://longhorn-frontend.longhorn-system.svc.cluster.local:80
         - name: PROMETHEUS_URL
@@ -204,6 +201,49 @@ spec:
             secretKeyRef:
               name: infraweaver-console-secret
               key: dispatch-secret
+        # Token authenticating the hourly WordPress health-sweep CronJob to
+        # POST /api/wordpress/health-sweep (constant-time compared server-side).
+        # Optional: absent = token auth disabled, sweep still callable via session.
+        - name: WORDPRESS_HEALTH_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-health-cron-token
+              optional: true
+        # Shared token for the in-cluster users-reconcile CronJob's POST to
+        # /api/users/reconcile. Reuses the same ESO-synced secret VALUE as the
+        # health-sweep token (same in-cluster cron trust boundary) under a distinct
+        # env name so the two internal crons stay independently gateable. Optional:
+        # absent = token auth disabled, reconcile still callable via admin session.
+        - name: USERS_RECONCILE_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-health-cron-token
+              optional: true
+        # Shared token for the in-cluster roster-drift CronJob's GET to
+        # /api/security/roster-drift. Reuses the same ESO-synced secret VALUE as the
+        # reconcile/health-sweep tokens (same in-cluster cron trust boundary) under a
+        # distinct env name so the internal crons stay independently gateable.
+        # Optional: absent = token auth disabled, probe still callable via admin session.
+        - name: ROSTER_DRIFT_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-health-cron-token
+              optional: true
+        # C2 (SECURITY-SCAN-2026-07-08): shared fork↔canonical HMAC secret. The
+        # fork signs each forwarded feedback copy; the canonical verifies it before
+        # bypassing auth (replaces the old client-settable x-infraweaver-upstream
+        # header). MUST be the SAME value on the fork and the canonical. Optional:
+        # absent = cross-deployment ingest/forward disabled (fail-closed).
+        # Sourced from OpenBao (secret/platform/infraweaver-console#feedback-upstream-secret).
+        - name: FEEDBACK_UPSTREAM_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: feedback-upstream-secret
+              optional: true
         # Domain gate: the feedback review dashboard + its mutating/run-log APIs
         # only act on this canonical host, never inside a reused preview image.
         - name: FEEDBACK_DASHBOARD_HOST
@@ -233,32 +273,100 @@ spec:
               name: infraweaver-console-secret
               key: truenas-api-key
               optional: true
+        # UDM Pro connector — reconciles WAN port-forwards + reads WAN/CGNAT.
+        # Host + pinned cert fingerprint are non-secret literals (stable
+        # appliance). Refresh the pin after a UDM cert rotation with:
+        #   echo | openssl s_client -connect 10.0.0.1:443 2>/dev/null \
+        #     | openssl x509 -noout -fingerprint -sha256
+        # Connector credentials (username/password) + host + cert pin live in
+        # OpenBao at secret/platform/udm, written via the console Settings card
+        # (Settings → UDM Connector) and read at request time. These env values
+        # are an inert fallback; the stored config takes precedence.
+        - name: UDM_HOST
+          value: https://10.0.0.1
+        - name: UDM_CERT_SHA256
+          value: "13:8F:E3:EE:C6:34:B3:EB:DB:97:37:88:C1:88:E2:3F:5A:A4:99:E4:2C:66:32:30:9C:79:D6:A1:D7:F9:7B:F6"
+        # SMTP for the console's own mailer (user invitation emails). Host/port are
+        # non-secret constants (Office365 submission, STARTTLS on 587). Username +
+        # password are the SAME authenticated mailbox Authentik sends from. SMTP_FROM
+        # MUST resolve to that mailbox unless SendAs is granted to another address
+        # (O365 550 5.7.60); the overlay concretes the ${BASE_DOMAIN} placeholder.
+        - name: SMTP_HOST
+          value: smtp-mail.outlook.com
+        - name: SMTP_PORT
+          value: "587"
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: smtp-username
+              optional: true
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: smtp-password
+              optional: true
+        - name: SMTP_FROM
+          value: noreply@${BASE_DOMAIN}
+        # Nextcloud OCS API for offboard user deletion. In-cluster Service URL (the svc
+        # DNS name is a Nextcloud trusted domain). Admin credential reuses the existing
+        # secret/platform/nextcloud admin the deployment already runs with.
+        - name: NEXTCLOUD_URL
+          value: http://nextcloud.nextcloud.svc.cluster.local
+        - name: NEXTCLOUD_ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: nextcloud-admin-user
+              optional: true
+        - name: NEXTCLOUD_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: nextcloud-admin-password
+              optional: true
         resources:
           requests:
-            memory: 256Mi
-            cpu: 100m
+            memory: 384Mi
+            cpu: 250m
           limits:
-            memory: 512Mi
-            cpu: 500m
+            # Raised from 512Mi/500m: at 500m CPU the Next.js event loop gets
+            # throttled during k8s-API aggregation (posture/apps/cluster routes
+            # list all pods+ns), so /api/ping stalled past the liveness budget
+            # and the pod was SIGTERM-killed (exit 143) ~1×/hr. 1 CPU + 1Gi gives
+            # headroom to answer probes while a heavy request is in flight.
+            memory: 1Gi
+            cpu: "1"
         startupProbe:
           httpGet:
             path: /api/ping
             port: 3000
           failureThreshold: 30
           periodSeconds: 10
+          # /api/ping can momentarily exceed the 1s default under CPU/memory
+          # pressure (Next.js server, 500m CPU limit) → "context deadline
+          # exceeded" flaps. Give each probe attempt a realistic budget.
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /api/ping
             port: 3000
           initialDelaySeconds: 10
           periodSeconds: 10
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /api/ping
             port: 3000
           initialDelaySeconds: 0
           periodSeconds: 30
-          failureThreshold: 3
+          # Raised 3→6: a single slow /api/ping under transient CPU pressure must
+          # not restart a pod that is otherwise serving. 6×30s = 3min of sustained
+          # unresponsiveness before a kill (readiness still pulls it from the LB
+          # meanwhile), which distinguishes a real hang from a throttle blip.
+          failureThreshold: 6
+          timeoutSeconds: 5
         lifecycle:
           preStop:
             exec:

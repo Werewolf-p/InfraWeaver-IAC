@@ -75,7 +75,12 @@ server:
       - host: openbao.prod.local
         paths:
           - /
-      - host: openbao.int.${BASE_DOMAIN}
+      # NOTE: resolved literal, NOT ${BASE_DOMAIN}. This is a Helm valueFile consumed
+      # raw by ArgoCD's Helm source (multi-source $values ref in appset-core.yaml), so it
+      # bypasses the argocd-cmp-envsubst-plugin — a ${BASE_DOMAIN} here stays literal and
+      # selfHeal would overwrite the live Ingress with the broken host. Matches the
+      # already-hardcoded openbao.prod.local above. (BASE_DOMAIN=example.com)
+      - host: openbao.int.example.com
         paths:
           - /
     pathType: Prefix

@@ -1,0 +1,256 @@
+---
+# Post-install / post-upgrade automation for Nextcloud.
+#
+# Purpose:
+#   1. Enable and configure the `user_oidc` app so Authentik is the SSO IdP.
+#   2. Enable `files_external` and create External Storage mounts for each NAS
+#      provider (Synology + TrueNAS by default).
+#   3. Restrict each mount to a Nextcloud group (`nc-media-ro`, `nc-media-rw`,
+#      `nc-truenas`, `nc-synology`) so folder access follows the same group
+#      model as the InfraWeaver console's NAS_FOLDER_ACL_JSON.
+#
+# The script is idempotent: every step tests for the desired state first
+# and skips or updates without failing. Safe to run on every upgrade.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-postinstall-scripts
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: postinstall
+data:
+  configure.sh: |
+    #!/bin/sh
+    # ------------------------------------------------------------------
+    # Nextcloud post-install: OIDC + External Storage mounts
+    # Runs as www-data (UID 33) inside the same image the app uses, so
+    # `occ` picks up the app's config and DB automatically.
+    # ------------------------------------------------------------------
+    set -eu
+
+    OCC="php --define apc.enable_cli=1 /var/www/html/occ"
+
+    wait_installed() {
+      # `occ` fails until first-run migrations are done; the deployment
+      # startupProbe waits for status.php but that runs before app updates
+      # finish. Poll for a stable "installed=true".
+      for _ in $(seq 1 60); do
+        if $OCC status 2>/dev/null | grep -q 'installed: true'; then
+          return 0
+        fi
+        echo "waiting for Nextcloud install to settle..."
+        sleep 5
+      done
+      echo "Nextcloud did not become ready in time" >&2
+      exit 1
+    }
+
+    ensure_app() {
+      app="$1"
+      if ! $OCC app:list | awk '/Enabled:/{f=1;next}/Disabled:/{f=0}f' | grep -q "^  - ${app}:"; then
+        echo "installing app: ${app}"
+        $OCC app:install "${app}" || $OCC app:enable "${app}"
+      else
+        $OCC app:enable "${app}" >/dev/null 2>&1 || true
+      fi
+    }
+
+    upsert_oidc_provider() {
+      # user_oidc supports declarative config via `occ user_oidc:provider`
+      # in Nextcloud 27+. --check-bearer=0 keeps WebDAV/OAuth clients working.
+      # $OIDC_CLIENT_SECRET is referenced unbraced: this file is rendered by the
+      # envsubst CMP, whose fail-closed guard rejects any surviving ${...SECRET}
+      # token. The value still arrives at runtime from the Job's secretKeyRef.
+      if $OCC user_oidc:provider --help >/dev/null 2>&1; then
+        $OCC user_oidc:provider authentik \
+          --clientid="${OIDC_CLIENT_ID}" \
+          --clientsecret="$OIDC_CLIENT_SECRET" \
+          --discoveryuri="${OIDC_DISCOVERY_URL}" \
+          --scope="openid email profile nc_groups" \
+          --unique-uid=0 \
+          --mapping-uid=preferred_username \
+          --mapping-display-name=name \
+          --mapping-email=email \
+          --mapping-groups=nc_groups \
+          --group-provisioning=1 \
+          --check-bearer=0
+      else
+        echo "user_oidc:provider CLI not present; skipping OIDC provider config" >&2
+      fi
+    }
+
+    ensure_group() {
+      group="$1"
+      $OCC group:list | grep -q "^  - ${group}:" || $OCC group:add "${group}"
+    }
+
+    # Expose a directory that is ALREADY mounted into this pod (by the console's
+    # NAS flow, via the SMB CSI driver) as a Nextcloud external storage.
+    #
+    # Nextcloud does not re-authenticate to the NAS here: the kernel mount at
+    # $datadir already carries the scoped RW credential, and a read-only mount
+    # would surface as a read-only folder. That keeps exactly one credential path
+    # (OpenBao -> ExternalSecret -> CSI) instead of a second copy inside Nextcloud.
+    # List the mount ids currently bound to /$1, newline separated.
+    # occ emits JSON via PHP json_encode, which escapes "/" as "\/", so the
+    # mount point must be compared after parsing rather than by grepping the
+    # raw text — a grep for "\"mount_point\":\"/Media\"" never matches, and the
+    # caller then re-creates the mount on every run.
+    list_mount_ids() {
+      $OCC files_external:list --output=json | python3 -c "
+    import json,sys
+    mounts = json.load(sys.stdin)
+    print('\n'.join(str(m['mount_id']) for m in mounts if m['mount_point'] == '/$1'))
+    "
+    }
+
+    # Groups currently applicable to mount id $1, newline separated. Same
+    # json_encode caveat as list_mount_ids: parse the JSON, never grep it.
+    list_applicable_groups() {
+      $OCC files_external:list --output=json | python3 -c "
+    import json,sys
+    for m in json.load(sys.stdin):
+        if str(m['mount_id']) == '$1':
+            print('\n'.join(m.get('applicable_groups') or m.get('applicableGroups') or []))
+    "
+    }
+
+    add_local_mount() {
+      local_name="$1"     # e.g. "Media"
+      datadir="$2"        # e.g. /mnt/nas-media
+      groups="$3"         # space-separated Nextcloud groups allowed to see this mount
+
+      ids=$(list_mount_ids "${local_name}")
+      if [ -z "${ids}" ]; then
+        $OCC files_external:create "/${local_name}" local null::null \
+          --config datadir="${datadir}" --output=json >/dev/null
+        echo "created local mount ${local_name} -> ${datadir}"
+        ids=$(list_mount_ids "${local_name}")
+      else
+        echo "mount '${local_name}' already present; refreshing ACL to: ${groups}"
+      fi
+
+      keep=$(echo "${ids}" | head -n1)
+      if [ -z "${keep}" ]; then
+        echo "FATAL: mount /${local_name} was neither found nor created" >&2
+        return 1
+      fi
+
+      # A freshly created mount has no ACL, which in Nextcloud means "every
+      # user". Duplicates left behind by an earlier non-idempotent run are
+      # therefore world-visible and silently defeat the group restriction on
+      # the mount we do scope. Delete them, and treat a failure as fatal: a
+      # surviving duplicate IS the world-visible mount.
+      for mid in ${ids}; do
+        if [ "${mid}" != "${keep}" ]; then
+          echo "removing duplicate unscoped mount ${mid} for /${local_name}"
+          if ! $OCC files_external:delete --yes "${mid}" >/dev/null; then
+            echo "FATAL: could not delete duplicate unscoped mount ${mid} for /${local_name}" >&2
+            return 1
+          fi
+        fi
+      done
+
+      # ACL, add-then-remove. Never `--remove-all` first: a mount with zero
+      # applicable groups is visible to EVERY Nextcloud user, so clearing before
+      # adding opens a world-visible window on every run of this Job (it runs on
+      # each upgrade, not just install). Adding first means the ACL never passes
+      # through the empty set.
+      #
+      # More than one group is expected. `storage-<provider>-<share>-<hash>-rw`
+      # is reconciled by the console from RBAC storage grants (lib/nas/access.ts)
+      # and is the one that should decide who sees this folder. `nc-media-rw` is
+      # kept applicable so a cluster that predates storage scopes keeps working;
+      # drop it from NAS_MEDIA_ACCESS_GROUPS once every member has been re-granted
+      # through the console.
+      for g in ${groups}; do
+        ensure_group "$g"
+        $OCC files_external:applicable --add-group "${g}" "${keep}"
+      done
+
+      # Now drop any group that is applicable but no longer wanted. This is what
+      # makes a REVOKE take effect, so a failure here is fatal rather than
+      # swallowed: a stale applicable group keeps showing the folder to people
+      # whose access InfraWeaver has already taken away.
+      for g in $(list_applicable_groups "${keep}"); do
+        wanted=no
+        for want in ${groups}; do
+          if [ "${g}" = "${want}" ]; then wanted=yes; fi
+        done
+        if [ "${wanted}" = "no" ]; then
+          echo "removing stale applicable group ${g} from /${local_name}"
+          if ! $OCC files_external:applicable --remove-group "${g}" "${keep}"; then
+            echo "FATAL: could not remove stale group ${g} from /${local_name}" >&2
+            return 1
+          fi
+        fi
+      done
+
+      # Belt-and-suspenders: mark shareable=false so a group member cannot
+      # re-share into a broader audience.
+      $OCC files_external:option "${keep}" enable_sharing false >/dev/null 2>&1 || true
+    }
+
+    main() {
+      wait_installed
+
+      # Trusted proxies & overwrite settings — safe to re-apply.
+      $OCC config:system:set overwriteprotocol --value=https
+      # The host below is baked at render time by the envsubst CMP, so it needs no
+      # runtime environment. It previously read BASE_DOMAIN from an optional
+      # `platform-config` ConfigMap that does not exist in this cluster, so the
+      # guard fell through and trusted_domains[0] was never set.
+      $OCC config:system:set trusted_domains 0 --value="nextcloud.int.${BASE_DOMAIN}"
+      $OCC config:system:set trusted_domains 1 --value="nextcloud.nextcloud.svc.cluster.local"
+
+      # ── SSO ──────────────────────────────────────────────────────────
+      # Optional: a cluster without an Authentik client provisioned for Nextcloud
+      # has no client secret, and `user_oidc:provider` rejects an empty one. The
+      # script runs under `set -eu`, so gate rather than let it abort the Job and
+      # leave external storage unconfigured.
+      if [ -n "${OIDC_CLIENT_SECRET:-}" ] && [ -n "${OIDC_DISCOVERY_URL:-}" ]; then
+        ensure_app user_oidc
+        upsert_oidc_provider
+      else
+        echo "OIDC client secret or discovery URL not set; skipping SSO configuration"
+      fi
+
+      # ── External Storage + groups ────────────────────────────────────
+      ensure_app files_external
+      for g in nc-users nc-media-ro nc-media-rw; do
+        ensure_group "$g"
+      done
+
+      # NAS-backed media. The folder is attached to the Nextcloud Deployment by
+      # the console's "Mount to workload" flow at $NAS_MEDIA_PATH; all this does
+      # is surface it in the Files UI. If nothing has been mounted yet, skip —
+      # re-running this Job after the mount picks it up.
+      if [ -n "${NAS_MEDIA_PATH:-}" ]; then
+        media_groups="${NAS_MEDIA_ACCESS_GROUPS:-nc-media-rw}"
+        add_local_mount "Media" "${NAS_MEDIA_PATH}" "${media_groups}"
+        # The mount is scoped to those groups. Without membership nobody — not
+        # even the admin — sees it in the Files UI, so the storage looks broken.
+        #
+        # The admin is placed in the LOCAL fallback group only. The
+        # `storage-*` groups are reconciled from InfraWeaver RBAC on every grant,
+        # so a local `group:adduser` there would be undone on the next sync and
+        # would misrepresent who InfraWeaver believes has access. Grant the admin
+        # storage access in the console if they should appear there.
+        if [ -n "${NEXTCLOUD_ADMIN_USER:-}" ]; then
+          for g in ${media_groups}; do
+            case "$g" in
+              storage-*) continue ;;
+            esac
+            $OCC group:adduser "$g" "${NEXTCLOUD_ADMIN_USER}" >/dev/null 2>&1 || true
+            echo "ensured ${NEXTCLOUD_ADMIN_USER} is a member of $g"
+          done
+        fi
+      else
+        echo "NAS_MEDIA_PATH unset; no NAS external storage configured"
+      fi
+
+      echo "post-install complete."
+    }
+
+    main "$@"

@@ -53,7 +53,7 @@ The Onedev OIDC provider in Authentik must use `client_secret_post` auth method 
 - Save and test SSO login
 
 ### 8. MetalLB Control Plane VIP
-If you reboot the primary control plane node (`CP1`), the MetalLB VIP `10.10.0.200` may not re-announce until a second node becomes leader. To make it resilient across CP1 reboots:
+If you reboot the primary control plane node (`CP1`), the MetalLB VIP `10.0.0.200` may not re-announce until a second node becomes leader. To make it resilient across CP1 reboots:
 - After deploy, verify the VIP is in the MetalLB address pool: `kubernetes/core/metallb/manifests/`
 - Update your kubeconfig server URL to point to the VIP, not a node IP
 

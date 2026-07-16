@@ -1,0 +1,40 @@
+# .public-genericize.example — template for params/.public-genericize
+#
+# Copy to params/.public-genericize (that folder is gitignored, so the file — and
+# the real identifiers in it — are never committed or synced to the public mirror).
+#
+# scripts/sync-to-public.sh applies this map to the sanitized EXPORT tree BEFORE the
+# fail-closed content deny-scan: one `ERE_pattern|replacement` per line ('#' =
+# comment). Each real value is rewritten to a generic placeholder so base manifests,
+# Helm valueFiles, instance data (game servers, NAS shares), scripts, docs and
+# platform.yaml stay publishable as a forkable TEMPLATE — instead of being stripped
+# or hardcoding your real domain/IPs into the public mirror.
+#
+# It is applied to the export COPY only, never to the private source ArgoCD deploys,
+# so it can never affect prod. ENVSUBST-rendered manifests already carry
+# ${BASE_DOMAIN}-style tokens, so these subs are a no-op there.
+#
+# Pair this 1:1 with params/.public-deny: for every private identifier you DENY,
+# give its public placeholder here. If a deny pattern has no placeholder, the
+# deny-scan will just abort the sync when that value appears (fail-closed) — safe,
+# but the mirror never updates until you add the placeholder.
+#
+# Rules:
+#   - ERE syntax (grep -E / sed -E). GNU \b word-boundaries are supported.
+#   - The FIRST '|' splits pattern from replacement; do NOT use '|' inside either.
+#   - Replacements may use sed backrefs (\1 \2) to preserve capture groups.
+#
+# IMPORTANT: CI publishes via .github/workflows/sync-to-public.yml, which
+# materializes this map from the `PUBLIC_GENERICIZE_MAP` repo secret — NOT from this
+# file. Keep the secret and this file in sync, or CI's transform will differ from a
+# local `sync-to-public.sh` run.
+#
+your-real-domain\.com|example.com
+your-github-owner|example-owner
+# Real usernames / handles (word-boundaried to avoid over-matching):
+# \byourhandle\b|admin
+# Real RFC1918 ranges (preserve host octets via backrefs; map to a documentation range):
+# \b10\.10\.([0-9]+)\.([0-9]+)\b|10.0.\1.\2
+# \b10\.25\.([0-9]+)\.([0-9]+)\b|10.1.\1.\2
+# Real storage/export paths:
+# /mnt/YourPool/|/mnt/pool/

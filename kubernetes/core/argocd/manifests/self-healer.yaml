@@ -42,6 +42,11 @@ metadata:
   labels:
     app.kubernetes.io/name: argocd-self-healer
     infraweaver.io/auth: vpn
+  annotations:
+    # Hygiene automation fires on a short cycle; while its Job is active the
+    # CronJob health Lua reports Progressing, flapping the owning app (and
+    # bootstrap) every run. Exclude these from app health aggregation.
+    argocd.argoproj.io/ignore-healthcheck: "true"
 spec:
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
@@ -199,18 +204,36 @@ spec:
                       >/dev/null 2>&1 || true
                   }
                   
+                  # ── Console power-off set ────────────────────────────────
+                  # Apps the console has paused carry infraweaver.io/power=off (scaled to
+                  # 0 with auto-sync disabled). The self-healer must NEVER refresh or sync
+                  # them or they would be resurrected. Computed as a name set here rather
+                  # than threaded through the tab-stream below: an empty annotation field
+                  # collapses under IFS=$'\t' (tab is IFS-whitespace) and would misalign
+                  # positional fields, so membership is the robust check.
+                  POWERED_OFF=$(kubectl get applications -n "$NAMESPACE" \
+                    -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.annotations.infraweaver\.io/power}{"\n"}{end}' \
+                    2>/dev/null | grep '=off$' | cut -d= -f1 | tr '\n' ' ' || true)
+                  is_powered_off() { case " $POWERED_OFF " in *" $1 "*) return 0 ;; esac; return 1; }
+
                   # ── Collect all apps with annotations ────────────────────
                   APPS=$(kubectl get applications -n "$NAMESPACE" \
                     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.status.sync.status}{"\t"}{.status.operationState.phase}{"\t"}{.metadata.annotations.infraweaver\.io/transient}{"\t"}{.status.health.message}{"\n"}{end}' \
                     2>/dev/null || true)
-                  
+
                   REFRESHED=0 SYNCED=0 SKIPPED=0
                   SYNCED_APPS="" DEGRADED_ALERT_CANDIDATES="" DEGRADED_REFRESH_LIST=""
-                  
+
                   # ── Pass 1: categorize + hard-refresh ────────────────────
                   while IFS=$'\t' read -r APP HEALTH SYNC OP_PHASE TRANSIENT HEALTH_MESSAGE; do
                     [ -z "$APP" ] && continue
-                  
+
+                    # Skip apps the console has powered off — never resurrect them.
+                    if is_powered_off "$APP"; then
+                      echo "  SKIP  $APP — infraweaver.io/power=off (console-paused)"
+                      SKIPPED=$((SKIPPED+1)); continue
+                    fi
+
                     # Skip apps with a running sync/delete operation
                     if [ "$OP_PHASE" = "Running" ] || [ "$OP_PHASE" = "Terminating" ]; then
                       echo "  SKIP  $APP — operation in progress"
@@ -316,9 +339,10 @@ spec:
                   APPS2=$(kubectl get applications -n "$NAMESPACE" \
                     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.status.sync.status}{"\t"}{.status.operationState.phase}{"\n"}{end}' \
                     2>/dev/null || true)
-                  
+
                   while IFS=$'\t' read -r APP HEALTH SYNC OP_PHASE; do
                     [ -z "$APP" ] && continue
+                    is_powered_off "$APP" && continue
                     [ "$OP_PHASE" = "Running" ] && continue
                     [ "$SYNC" != "OutOfSync" ] && continue
                     echo "  SYNC  $APP [health=$HEALTH] — OutOfSync after refresh, triggering sync"
@@ -360,6 +384,7 @@ spec:
                     [ -z "$APP" ] && continue
                     # If app is no longer Degraded (or is now skipped), remove its tracking key
                     if [ "$HEALTH" != "Degraded" ] || [ "${TRANSIENT:-}" = "true" ] || \
+                       is_powered_off "$APP" || \
                        [ "$OP_PHASE" = "Running" ] || [ "$OP_PHASE" = "Terminating" ] || \
                        [ "$HEALTH" = "Suspended" ] || is_skip_alert "$APP" || \
                        echo "${HEALTH_MESSAGE:-}" | grep -qi 'progressing'; then

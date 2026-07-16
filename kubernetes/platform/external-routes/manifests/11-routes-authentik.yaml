@@ -20,8 +20,8 @@ spec:
       Access-Control-Max-Age: "86400"
 ---
 # Authentik — IngressRoute at auth.${BASE_DOMAIN}
-# No VPN restriction: users need to reach Authentik to log in via SSO
-# before connecting to services behind the VPN middleware.
+# Public + unauthenticated by design: users must reach Authentik to log in via SSO
+# before connecting to services gated by the forward-auth middleware.
 # Uses individual cert (platform-auth-tls) to avoid rate limit dependency on main bundle.
 #
 # Two routes:

@@ -8,9 +8,7 @@
 set -euo pipefail
 ENV=${ENV_NAME:?ENV_NAME required}
 KB=~/.kube/config-platform-$ENV
-# Variables exported from previous step
-SERVICE_TOKEN="${ESO_SERVICE_TOKEN:-}"
-OPENBAO_ADDR="${OPENBAO_CLUSTER_ADDR:-http://openbao.openbao.svc.cluster.local:8200}"
+# ESO authenticates to OpenBao via kubernetes auth (SA JWT); no static token needed.
 echo "==> Waiting for ESO deployment..."
 for i in $(seq 1 30); do
   if kubectl --kubeconfig "$KB" get deployment external-secrets -n external-secrets >/dev/null 2>&1; then break; fi
@@ -58,21 +56,13 @@ kube_apply_retry() {
 
 TMP1=$(mktemp); TMP2=$(mktemp); TMP3=$(mktemp); TMP4=$(mktemp)
 
-# Create external-secrets namespace + openbao-token secret for ESO
+# Create external-secrets namespace for ESO
 kubectl --kubeconfig "$KB" create namespace external-secrets \
   --dry-run=client -o yaml > "$TMP1"
 kube_apply_retry "$KB" "$TMP1"
 
-kubectl --kubeconfig "$KB" create secret generic openbao-token \
-  --namespace external-secrets \
-  --from-literal=token="$SERVICE_TOKEN" \
-  --dry-run=client -o yaml > "$TMP2"
-kube_apply_retry "$KB" "$TMP2"
-
-# Apply ClusterSecretStore pointing at in-cluster OpenBao
-sed "s|OPENBAO_ADDR_PLACEHOLDER|$OPENBAO_ADDR|g; s|PLACEHOLDER_REPLACED_BY_TOFU|$SERVICE_TOKEN|g" \
-  kubernetes/core/external-secrets/manifests/cluster-secret-store.yaml > "$TMP3"
-kube_apply_retry "$KB" "$TMP3"
+# Apply ClusterSecretStore (kubernetes auth — no token substitution needed)
+kube_apply_retry "$KB" kubernetes/core/external-secrets/manifests/cluster-secret-store.yaml
 
 # Create apps-grafana namespace
 kubectl --kubeconfig "$KB" create namespace apps-grafana \

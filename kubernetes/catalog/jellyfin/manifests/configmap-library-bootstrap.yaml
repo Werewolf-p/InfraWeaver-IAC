@@ -1,0 +1,57 @@
+---
+# Idempotent "ensure the Media library exists" script for the bootstrap CronJob.
+#
+# Why this exists: Jellyfin stores its libraries in its OWN database, not in Git.
+# A reinstall (or a wiped data PVC) drops every library, leaving users with
+# "Ask an administrator to create a library" and uploads that never appear. This
+# script recreates the library pointing at the NAS media path so the system
+# self-heals without a human.
+#
+# NOTE on env-var syntax: this file is rendered through the envsubst CMP, which
+# only substitutes an allowlist and fails the sync closed if any ${...KEY...}
+# style placeholder survives. The api key is therefore referenced WITHOUT braces
+# ($JELLYFIN_API_KEY), which the guard ignores and envsubst leaves untouched so
+# the shell expands it at runtime.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jellyfin-library-bootstrap
+  namespace: jellyfin
+  labels:
+    app.kubernetes.io/name: jellyfin
+    app.kubernetes.io/component: library-bootstrap
+data:
+  ensure-library.sh: |
+    #!/bin/sh
+    set -eu
+    JF="$JELLYFIN_URL"
+    LIB_NAME="$LIBRARY_NAME"
+    LIB_PATH="$LIBRARY_PATH"
+    LIB_TYPE="$LIBRARY_TYPE"
+    if [ -z "$JELLYFIN_API_KEY" ]; then echo "JELLYFIN_API_KEY is empty"; exit 1; fi
+
+    # Wait for Jellyfin to answer (fresh reinstall may still be starting).
+    i=0
+    until curl -fsS -o /dev/null "$JF/System/Info/Public"; do
+      i=$((i + 1))
+      [ "$i" -ge 24 ] && { echo "jellyfin unreachable after ~2m"; exit 1; }
+      sleep 5
+    done
+
+    # Idempotent: if any library already covers LIB_PATH, do nothing.
+    existing="$(curl -fsS "$JF/Library/VirtualFolders" -H "X-Emby-Token: $JELLYFIN_API_KEY")"
+    if printf '%s' "$existing" | grep -q "\"$LIB_PATH\""; then
+      echo "library covering $LIB_PATH already present; nothing to do"
+      exit 0
+    fi
+
+    echo "no library covers $LIB_PATH; creating '$LIB_NAME' ($LIB_TYPE)"
+    code="$(curl -fsS -o /dev/null -w '%{http_code}' -X POST \
+      "$JF/Library/VirtualFolders?name=$LIB_NAME&collectionType=$LIB_TYPE&refreshLibrary=true" \
+      -H "X-Emby-Token: $JELLYFIN_API_KEY" \
+      -H 'Content-Type: application/json' \
+      -d "{\"LibraryOptions\":{\"PathInfos\":[{\"Path\":\"$LIB_PATH\"}]}}")"
+    case "$code" in
+      200 | 204) echo "library '$LIB_NAME' created on $LIB_PATH" ;;
+      *) echo "create failed HTTP $code"; exit 1 ;;
+    esac

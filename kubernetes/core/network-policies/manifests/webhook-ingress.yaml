@@ -1,0 +1,61 @@
+---
+# Ingress from the kube-apiserver to admission/conversion webhooks.
+#
+# WHY THIS EXISTS
+# The kube-apiserver's webhook calls are SNATed to the calling node's cilium_host IP
+# (in the pod CIDR), so Cilium classifies them as `remote-node`/`host` identity (not
+# `kube-apiserver`). The shipped k8s NetworkPolicy `allow-webhook-from-apiserver`
+# rules allow ingress from a `namespaceSelector: kube-system` on the wrong port,
+# which never matches the host-network apiserver under Cilium. Once Cilium began
+# enforcing the (previously-inert) policies, the apiserver could no longer reach
+# these webhooks:
+#   - external-secrets validating webhook  -> every ExternalSecret apply timed out
+#   - kyverno admission webhook            -> policies silently not enforced (Ignore)
+#   - cert-manager-webhook-hetzner         -> hetzner DNS solver APIService calls dropped
+#
+# These CiliumNetworkPolicies allow the real identities (remote-node/host +
+# kube-apiserver) on each webhook's container port. Additive allows only.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-webhook-from-apiserver-cilium
+  namespace: external-secrets
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-webhook-fix}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets-webhook
+  ingress:
+    - fromEntities: [kube-apiserver, remote-node, host]
+      toPorts:
+        - ports: [{port: "10250", protocol: TCP}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-webhook-from-apiserver-cilium
+  namespace: kyverno
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-webhook-fix}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: admission-controller
+  ingress:
+    - fromEntities: [kube-apiserver, remote-node, host]
+      toPorts:
+        - ports: [{port: "9443", protocol: TCP}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-webhook-from-apiserver-cilium
+  namespace: cert-manager
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-webhook-fix}
+spec:
+  endpointSelector:
+    matchLabels:
+      app: cert-manager-webhook-hetzner
+  ingress:
+    - fromEntities: [kube-apiserver, remote-node, host]
+      toPorts:
+        - ports: [{port: "8443", protocol: TCP}]

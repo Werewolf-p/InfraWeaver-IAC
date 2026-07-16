@@ -32,9 +32,35 @@ remote_url="${2:-}"
 # renamed/forked.
 public_match="${PUBLIC_REPO_MATCH:-InfraWeaver-IAC}"
 
+# ── Local IaC validation gate ────────────────────────────────────────────────
+# GitHub branch protection / rulesets that would require the `validate-iac` CI
+# check are unavailable on this repo's plan (private repo, no GitHub Pro → the
+# protection + rulesets APIs 403). So the only place we can BLOCK a bad change
+# before it reaches main (which ArgoCD syncs to the cluster) is here, client-side.
+# Runs the same gates CI runs; fast and self-skipping when tooling is absent.
+# Escape hatch for emergencies: SKIP_IAC_VALIDATION=1 git push ...
+run_iac_validation() {
+  [ "${SKIP_IAC_VALIDATION:-0}" = "1" ] && {
+    echo "pre-push: SKIP_IAC_VALIDATION=1 — skipping IaC gates." >&2; return 0; }
+  local root; root="$(git rev-parse --show-toplevel)"
+  local rc=0
+  # NetworkPolicy ports must be POD ports, not Service ports (the authentik
+  # SSO-outage class). Self-skips if PyYAML is missing.
+  if [ -x "$root/scripts/validate-netpol-ports.sh" ]; then
+    bash "$root/scripts/validate-netpol-ports.sh" --repo-root "$root" || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "" >&2
+    echo "✖ pre-push BLOCKED: IaC validation failed (see above)." >&2
+    echo "  Fix the manifest, or override intentionally: SKIP_IAC_VALIDATION=1 git push ..." >&2
+    echo "" >&2
+  fi
+  return "$rc"
+}
+
 case "$remote_url" in
-  *"$public_match"*) : ;;   # pushing to the public mirror — guard applies
-  *) exit 0 ;;              # private infra repo or anything else — unrestricted
+  *"$public_match"*) : ;;   # pushing to the public mirror — guard applies below
+  *) run_iac_validation; exit $? ;;   # private infra repo / other — validate, then allow
 esac
 
 if [ "${ALLOW_PUBLIC_PUSH:-0}" = "1" ]; then

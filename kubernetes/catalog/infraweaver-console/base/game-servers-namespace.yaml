@@ -4,3 +4,14 @@ metadata:
   name: game-servers
   labels:
     app.kubernetes.io/managed-by: infraweaver
+---
+# Disable token automount on the namespace default SA. Fails closed for any pod
+# that does not explicitly opt in. Applies to pods created after this is synced.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: game-servers
+  labels:
+    app.kubernetes.io/managed-by: infraweaver
+automountServiceAccountToken: false

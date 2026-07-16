@@ -20,3 +20,27 @@ spec:
   resources:
     requests:
       storage: 5Gi
+---
+# Migration target: Jellyfin /config moved OFF Longhorn onto local-path-retain
+# pinned to cp1 (matches nextcloud/authentik/openbao/n8n pattern). Longhorn engine
+# proved unstable under I/O; local-path on /opt/local-path-provisioner is durable
+# on Talos. Consumer (deployment) is pinned to cp1 so the node-local PV is reachable.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jellyfin-data-0-lp
+  namespace: jellyfin
+  labels:
+    app.kubernetes.io/name: jellyfin
+    app.kubernetes.io/component: storage
+    infraweaver.io/source: community-apps
+  annotations:
+    infraweaver.io/unraid-path: "/config"
+    infraweaver.io/required: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 5Gi

@@ -22,10 +22,10 @@ identity:
   defaultCluster: ${DEFAULT_CLUSTER_ID}            # default cluster id (e.g. homelab-prod)
   tlsSecrets:
     public: platform-wildcard-tls                  # TLS secret for *.${BASE_DOMAIN}
-    internal: platform-wildcard-int-tls            # TLS secret for *.int.${BASE_DOMAIN}
-  accessTierMiddlewares:
-    vpn: vpn-only                                  # Traefik middleware marking the VPN tier
-    internal: internal-only                        # Traefik middleware marking the internal tier
+    internal: platform-int-wildcard-tls            # TLS secret for *.int.${BASE_DOMAIN}
+  # VPN is retired: internal routes are gated by Authentik (forward-auth), not a
+  # network tier. `authMiddleware` overrides the forward-auth middleware name.
+  authMiddleware: forward-auth
   # The collections below are ADDITIVE — entries EXTEND the console's built-in
   # defaults (cluster service hosts, nas_providers hosts, etc.), never replace
   # them. Leave empty to use defaults; add fork-specific entries as needed.
@@ -238,15 +238,15 @@ persistence:
     # TrueNAS prerequisites (one-time setup):
     #   1. Create dataset: Storage → Pools → Add Dataset "longhorn-backups"
     #   2. Sharing → NFS → Add Share: /mnt/tank/longhorn-backups
-    #   3. Set "All Dirs" and network access to 10.10.0.0/24
+    #   3. Set "All Dirs" and network access to 10.0.0.0/24
     #   4. Set Mapall User: root (Longhorn requires root NFS access)
     #
     # Fresh redeploy restore:
     #   Run scripts/restore-from-truenas.sh before deploying apps to
     #   restore the latest backup of each volume from TrueNAS.
     enabled: true
-    nfs_ip: "10.25.0.135"
-    nfs_path: "/mnt/Main/k8s-longhorn-backups"
+    nfs_ip: "10.1.0.135"
+    nfs_path: "/mnt/pool/k8s-longhorn-backups"
 
 # ── Backup Configuration ───────────────────────────────────────────────────────
 # Controls which backup providers are active. Set via BACKUP_PROVIDER in .env
@@ -283,7 +283,7 @@ backup:
 nas_providers:
   synology:
     enabled: true
-    host: "10.25.0.21"
+    host: "10.1.0.21"
     port: 5001
     protocol: "https"
     smb_enabled: true
@@ -295,7 +295,7 @@ nas_providers:
       - Mediaserver               # Media files — subfolders per user for isolation
   truenas:
     enabled: true
-    host: "10.25.0.135"
+    host: "10.1.0.135"
     port: 443
     protocol: "https"
     smb_enabled: true

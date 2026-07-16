@@ -1,21 +1,6 @@
 # External Secrets Operator — bridges Kubernetes Secrets with OpenBao (Vault-compatible)
-# After install, create a ClusterSecretStore pointing to your OpenBao instance:
-#
-#   apiVersion: external-secrets.io/v1
-#   kind: ClusterSecretStore
-#   metadata:
-#     name: openbao
-#   spec:
-#     provider:
-#       vault:
-#         server: "https://${OPENBAO_EXTERNAL_HOST}:8200"
-#         path: "secret"
-#         version: "v2"
-#         auth:
-#           tokenSecretRef:
-#             name: openbao-token
-#             namespace: external-secrets
-#             key: token
+# The ClusterSecretStore `openbao` lives in manifests/cluster-secret-store.yaml and
+# authenticates via OpenBao kubernetes auth (SA JWT), role `external-secrets`.
 repoURL: https://charts.external-secrets.io
 targetRevision: "0.*"
 chart: external-secrets

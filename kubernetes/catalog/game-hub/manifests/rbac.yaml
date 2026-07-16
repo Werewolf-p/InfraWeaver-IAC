@@ -33,6 +33,17 @@ rules:
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots", "volumesnapshotcontents", "volumesnapshotclasses"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  # ResourceQuota: capacity page reads `game-hub-quota` (read-only, best-effort;
+  # call is .catch(()=>null) so a missing grant silently drops quota display).
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list", "watch"]
+  # RBAC self-inspection: setup/status reads this Role/RoleBinding to report
+  # readiness. GET-only by design — provisioning is GitOps-owned, so the SA gets
+  # no create/update on roles (avoids an in-namespace privilege-escalation path).
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

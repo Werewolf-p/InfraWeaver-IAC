@@ -1,0 +1,90 @@
+# Infra-tier airgap baselines — applied + VERIFIED one namespace at a time
+# (Hubble-watched), per docs/ZERO-TRUST-COMPLETION-PLAN.md §P2.
+#
+# Synced by the core-network-policies ArgoCD app.
+#
+# Status:
+#   registry        ✅ applied + verified (fresh image pull succeeds through airgap)
+#   dns-system      ✅ applied + verified (internal + prod.local + upstream resolve)
+#   velero/minio    ⏸ deferred — namespace is the broken minio/velero stack (no running
+#                      pods); airgap has nothing to protect/verify until it is fixed.
+#   longhorn-system ✅ applied + verified (2026-06-29, Hubble-watched). The blocking
+#                      longhorn breakage was NOT networking: the `priority-class` setting
+#                      had drifted to empty, so instance-manager pods inherited the
+#                      cluster globalDefault PriorityClass `platform-default`, which never
+#                      matched the empty setting → handlePod "setting not synced" deleted
+#                      the pod every reconcile → it never lived long enough to report its
+#                      API version → APIVersion stayed 0 → "version 6-1 not compatible
+#                      with InstanceManagerAPIVersion 0" churn. Fix: reconcile the live
+#                      setting back to the repo intent (`priorityClass: platform-standard`
+#                      in core/longhorn/values.yaml). IMs then settled (APIVersion 6) and
+#                      this baseline applied with zero policy drops.
+#                      NOTE: backup-target is currently empty (no active NFS backup). When
+#                      Longhorn backupTarget is pointed at nfs://${TRUENAS_HOST}/..., add a
+#                      `toCIDR: [<truenas-ip>/32]` egress (port 2049 TCP/UDP) here, because
+#                      the instance-manager engine — selected by this policy — performs the
+#                      NFS backup IO to an external (non-cluster, non-node) host.
+---
+# registry (zot): nodes (host/remote-node) pull images directly from zot:5000; Traefik
+# fronts the external hostname; monitoring scrapes. zot makes no external egress.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airgap-baseline
+  namespace: registry
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped-infra}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEntities: [cluster, host, remote-node]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": registry}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]
+    - toEntities: [kube-apiserver]
+---
+# dns-system (homelab CoreDNS, LoadBalancer 10.0.0.201:53): serves LAN/world + in-cluster
+# clients, forwards to upstream 1.1.1.1/8.8.8.8 (world:53). No k8s plugin → no apiserver.
+# host=node health/ready probes (8080/8181). WORLD ingress/egress on :53 is essential —
+# without it the entire homelab loses DNS.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airgap-baseline
+  namespace: dns-system
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped-infra}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEntities: [world]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]
+    - fromEntities: [cluster, host, remote-node]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": dns-system}}]
+    - toEntities: [world]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]
+---
+# longhorn-system (storage): instance-managers need node<->node (remote-node) + pod<->pod
+# (cluster) + engine<->manager + host (kubelet/CSI) traffic; longhorn-manager talks to the
+# kube-apiserver; DNS via in-cluster CoreDNS. Ingress from Traefik (longhorn-ui) + monitoring
+# scrape. Intentionally permissive intra-cluster — tighten per-component later. See header
+# note re: TrueNAS NFS egress when a backup-target is configured.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: airgap-baseline
+  namespace: longhorn-system
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped-infra}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEntities: [cluster, host, remote-node]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEntities: [cluster, host, remote-node, kube-apiserver]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]

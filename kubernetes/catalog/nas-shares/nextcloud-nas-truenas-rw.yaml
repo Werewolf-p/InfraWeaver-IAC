@@ -1,0 +1,28 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nas-truenas-rw
+  namespace: nextcloud
+  labels:
+    infraweaver.io/nas-share: 'true'
+    infraweaver.io/component: nas-credentials
+    infraweaver.io/provider: truenas
+    infraweaver.io/access: rw
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: nas-truenas-rw
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: username
+      remoteRef:
+        key: secret/platform/nas/creds/truenas-rw
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: secret/platform/nas/creds/truenas-rw
+        property: password

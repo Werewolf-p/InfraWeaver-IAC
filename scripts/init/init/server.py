@@ -227,7 +227,7 @@ ALL_ENV_DEFAULTS = {**GENERAL_DEFAULTS, **DNS_ENV_DEFAULTS, **CLUSTER_DEFAULTS, 
 
 def _detect_local_subnets() -> list:
     """Detect local IPv4 subnets from system network interfaces.
-    Returns list of {'cidr': '10.25.0.0/24', 'ip': '10.25.0.5'} dicts.
+    Returns list of {'cidr': '10.1.0.0/24', 'ip': '10.1.0.5'} dicts.
     """
     import socket
     import struct

@@ -46,6 +46,21 @@ jobs:
           fi
           mkdir -p params
           printf '%s\n' "$PUBLIC_DENY_LIST" > params/.public-deny
+      - name: Materialize genericize-map for the export transform
+        # params/.public-genericize is gitignored (it pairs real identifiers with
+        # their public placeholders), so it is absent from the CI checkout. Without
+        # it sync-to-public.sh skips the genericize transform and the fail-closed
+        # deny-scan then aborts on the real values that base manifests still carry.
+        # Restore it from the PUBLIC_GENERICIZE_MAP secret and fail hard if unset.
+        env:
+          PUBLIC_GENERICIZE_MAP: ${{ secrets.PUBLIC_GENERICIZE_MAP }}
+        run: |
+          if [ -z "$PUBLIC_GENERICIZE_MAP" ]; then
+            echo "::error::PUBLIC_GENERICIZE_MAP secret is not set — refusing to sync without the export genericize transform." >&2
+            exit 1
+          fi
+          mkdir -p params
+          printf '%s\n' "$PUBLIC_GENERICIZE_MAP" > params/.public-genericize
       - name: Configure write-scoped deploy key (SSH)
         # Push with an SSH deploy key bound to ONLY the public repo (read-write),
         # instead of a broad account token. Fail hard if the key is missing.

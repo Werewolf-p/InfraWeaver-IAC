@@ -1,0 +1,30 @@
+---
+# Ingress allow so the hourly health-sweep CronJob pod can reach the console pod
+# on :3000. The console's `default-deny-ingress` + `infraweaver-console` policies
+# only permit ingress from the `traefik` namespace, so a same-namespace sweep pod
+# is otherwise dropped (curl: connection timed out). k8s NetworkPolicy ingress is
+# additive (a union across policies), so this ADDS the sweep pod as an allowed
+# source without weakening the Traefik-only rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-wp-health-sweep-to-console
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-console
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: infraweaver-console
+              infraweaver.io/component: iwsl
+      ports:
+        - port: 3000
+          protocol: TCP

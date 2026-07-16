@@ -46,7 +46,7 @@ fi
 
 log "Fetching latest from GitHub..."
 run_update_cmd git fetch --quiet github main || {
-  log "GitHub fetch failed — falling back to origin (Onedev)"
+  log "GitHub fetch failed — falling back to origin"
   run_update_cmd git fetch --quiet origin main || { log "All fetches failed"; exit 1; }
   git remote set-head github -a 2>/dev/null || true
 }

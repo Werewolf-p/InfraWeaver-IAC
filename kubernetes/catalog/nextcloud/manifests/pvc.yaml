@@ -1,0 +1,75 @@
+---
+# Longhorn PVC — Nextcloud application config + local data cache.
+# Media itself lives on the NAS (mounted at runtime by the External Storage
+# app), but the web uploader chunks big files and stages EVERY chunk under
+# data/<user>/uploads/ on THIS volume before streaming them to the NAS. So the
+# usable browser-upload ceiling is roughly this volume's free space. Sized to
+# 40Gi to cover typical movies; bounded by cp3's ~49Gi free (3 Longhorn
+# replicas). For files larger than this, upload via WebDAV to the internal
+# endpoint (part_file_in_storage writes straight to the NAS, skipping Longhorn).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-data
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: config
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 40Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql-nextcloud-data
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: database
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+# local-path-retain migration targets (off Longhorn to kill RWO Multi-Attach
+# stalls on reschedule, matching the authentik/openbao/n8n Postgres pattern).
+# WaitForFirstConsumer + node-local: the PV binds to whichever node the first
+# consumer lands on; the deployments pin nodeSelector talos-prod-cp2. local-path
+# has no size quota, so nextcloud-data-lp's real chunk-staging ceiling is cp2's
+# free disk (~200Gi), not the old 40Gi Longhorn cap — this is what unblocks very
+# large uploads. Data copied from the Longhorn PVCs by a one-shot migration Job.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql-nextcloud-data-lp
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: database
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-data-lp
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: config
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 100Gi

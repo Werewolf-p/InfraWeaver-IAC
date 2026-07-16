@@ -118,7 +118,6 @@ config:
     - apps-homepage
     - apps-gatus
     - apps-stirling-pdf
-    - apps-onedev
     - apps-immich
 
 # ── Webhook interception — namespace-level bypass ─────────────────────────────

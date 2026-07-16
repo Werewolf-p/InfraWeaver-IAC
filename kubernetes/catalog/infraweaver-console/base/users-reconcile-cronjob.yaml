@@ -1,0 +1,85 @@
+# Users reconcile — every 5 minutes, server-driven.
+#
+# POSTs to the console's own /api/users/reconcile, which converges every user in
+# users.yaml toward its desired state with no operator action:
+#   - a user with no Authentik login yet + no live invite → auto-sends their
+#     Authentik enrollment ("setup") mail;
+#   - once a user has enrolled, the next tick attaches their storage access groups
+#     and materializes their Jellyfin account (Nextcloud JITs on first SSO login).
+# This is the async continuation that finishes provisioning after the interactive
+# enrollment step, so "change users.yaml / RBAC" is all an operator ever does.
+#
+# Auth: the shared token is the SAME ESO-managed secret VALUE the console reads
+# (`infraweaver-console-secret` key `wordpress-health-cron-token`, synced from
+# OpenBao `secret/platform/infraweaver-console`), exposed to the console as
+# USERS_RECONCILE_CRON_TOKEN. The console middleware (proxy.ts) lets this request
+# past the session gate only when the token matches; the route handler re-validates
+# it (defence in depth).
+#
+# Networking: the pod carries `infraweaver.io/component: iwsl`, so the existing
+# health-sweep CiliumNetworkPolicy (egress to CoreDNS + the console Service:3000)
+# and NetworkPolicy (console ingress from these pods) already cover it — same
+# in-cluster reach, no new network rules.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: users-reconcile
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "*/5 * * * *" # every 5 minutes
+  concurrencyPolicy: Replace # kill a wedged reconcile, never let a hung pod block the schedule
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: users-reconcile
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-health-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # Origin matches the request host so the console's CSRF same-origin
+              # guard passes independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 240
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/users/reconcile

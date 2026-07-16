@@ -94,7 +94,10 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-    # External HTTPS only (GitHub API for GitOps commits, OIDC discovery)
+    # External HTTPS + SMTP submission (GitHub API for GitOps commits, OIDC
+    # discovery, and the console mailer's O365 submission on 587 — user invitation,
+    # provisioned-credential, and RBAC-change emails). Without 587 the mailer's TCP
+    # connect to smtp-mail.outlook.com times out and no console email is delivered.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -102,6 +105,29 @@ spec:
               - 10.0.0.0/8
               - 172.16.0.0/12
               - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 587
+          protocol: TCP
+    # Prometheus (kube-prometheus-stack) — the firewall UI's blocked-flows API
+    # queries hubble_drop_total; without this the console reports the dataplane
+    # as not ready and every firewall panel stays empty. Pod port 9090.
+    # Appended last: the prod overlay JSON-patches earlier egress rules by index.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9090
+          protocol: TCP
+    # UDM / UniFi gateway (10.0.0.1:443) — the UDM connector reads WAN status and
+    # reconciles port-forward rules. Explicit /32 allow: the external-HTTPS rule
+    # above excludes 10.0.0.0/8, so the gateway is otherwise unreachable. Appended
+    # last so the prod overlay's index-4 egress patch is unaffected.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.1/32
       ports:
         - port: 443
           protocol: TCP

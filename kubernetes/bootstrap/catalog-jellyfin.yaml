@@ -1,0 +1,62 @@
+---
+# catalog-jellyfin — plain-manifest catalog app.
+#
+# The `platform-catalog-apps` ApplicationSet only generates Applications for
+# Helm-based apps (those with an `application.yaml`). Manifest-based catalog
+# apps get a hand-written Application here, alongside game-hub and the console.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-jellyfin-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: catalog-app
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/jellyfin/manifests
+    # Render through the envsubst CMP so ${BASE_DOMAIN} in the IngressRoute Host
+    # rule resolves at sync time. A plain directory source applies the YAML
+    # verbatim, so without this the router matches the literal host
+    # "jellyfin.int.${BASE_DOMAIN}" and every real request 404s — while ArgoCD
+    # still reports Synced/Healthy, because the literal is what git asked for.
+    plugin:
+      name: envsubst-v1.0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: jellyfin
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'
+    # The console's NAS mount flow appends volumes/volumeMounts to this
+    # Deployment in git; ArgoCD applies them. Pod-template defaults set by the
+    # apiserver are not drift.
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/spec/volumes/0/persistentVolumeClaim/readOnly

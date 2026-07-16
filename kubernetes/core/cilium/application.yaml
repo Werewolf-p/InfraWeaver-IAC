@@ -1,0 +1,12 @@
+# Cilium CNI + Hubble — helm source consumed by appset-core (platform-core ApplicationSet).
+# STAGED: do NOT merge to main until the Talos machine-config flip (cni.name=none) is
+# ready to run in the same window. Installing Cilium while Talos still owns flannel as the
+# CNI leaves cilium-agent pods Pending/CrashLooping until the CNI handoff. See
+# docs/CILIUM-HUBBLE-MIGRATION-RUNBOOK.md.
+repoURL: https://helm.cilium.io
+targetRevision: "1.17.4"
+chart: cilium
+releaseName: cilium
+namespace: kube-system
+# Cilium must not be pruned out from under the dataplane.
+serverSideApply: "true"

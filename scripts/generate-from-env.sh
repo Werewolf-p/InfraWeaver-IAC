@@ -3,7 +3,7 @@
 # This replaces ALL occurrences of ${VAR_NAME} in kubernetes/ and envs/ YAML/TFVars files
 # with the corresponding value from .env.
 # Run this BEFORE ArgoCD bootstrap — the substituted files must be in the local git repo
-# that ArgoCD watches (local Onedev, not the public GitHub template).
+# that ArgoCD watches (the private deploy repo, not the public GitHub template).
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"

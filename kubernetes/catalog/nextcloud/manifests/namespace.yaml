@@ -1,0 +1,13 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nextcloud
+  labels:
+    # Baseline PSA — Nextcloud's official image runs as UID 33 (www-data)
+    # without privileged capabilities, so we do not need the `privileged`
+    # PSA used by the linuxserver images (contrast: jellyfin).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: restricted
+    infraweaver.io/source: catalog

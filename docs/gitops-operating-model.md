@@ -167,7 +167,8 @@ recognize. Performed by the feedback dispatch (`/approve`) and reversible
 
 ```sh
 # Validate everything the way CI does:
-scripts/validate-iac.sh
+scripts/validate-iac.sh             # render + schema + secret-leak gate
+scripts/validate-netpol-ports.sh    # NetworkPolicy ports must be POD ports, not Service ports
 
 # Render what ArgoCD will apply for an app:
 kubectl kustomize kubernetes/catalog/<app>/overlays/prod

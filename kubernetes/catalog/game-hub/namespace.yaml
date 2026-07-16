@@ -4,3 +4,19 @@ metadata:
   name: game-hub
   labels:
     app.kubernetes.io/part-of: infraweaver
+  annotations:
+    # Never let a git change or app-delete cascade into deleting this namespace
+    # (and every game-server PVC inside it). Deletion must be a deliberate manual act.
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+---
+# Disable token automount on the namespace default SA. Game server pods use the
+# default SA and need no API access; this fails closed for any pod that does not
+# explicitly opt in. Applies to pods created after this is synced.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: game-hub
+  labels:
+    app.kubernetes.io/part-of: infraweaver
+automountServiceAccountToken: false

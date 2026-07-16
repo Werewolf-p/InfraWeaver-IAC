@@ -1,0 +1,239 @@
+---
+# ── Authentik Invitation Enrollment Flow Blueprint ───────────────────────────
+# Backs the console "Users → Invite" button (/api/users/invite).
+#
+# The invite endpoint creates an Authentik Invitation (with fixed_data.email and
+# single_use) tied to THIS flow, then hands the operator a link of the form:
+#   https://auth.<domain>/if/flow/default-invitation-flow/?itoken=<invite-uuid>
+#
+# Flow order:
+#   0  Invitation stage  — requires a valid ?itoken=, merges fixed_data (email)
+#                          into prompt_data, deletes the invite when single_use.
+#   10 Prompt stage      — invitee picks a username + full name + password
+#                          (email prefilled from the invitation's fixed_data).
+#   20 User write        — creates the account as an ACTIVE INTERNAL user, and
+#                          (bounded group-grant policy) adds it to any EXISTING
+#                          Authentik groups named in the invitation's
+#                          fixed_data.groups.
+#   30 User login        — signs the freshly enrolled user in.
+#
+# Password confirmation (password vs password_repeat) is validated by Authentik
+# core automatically when a prompt stage carries two password fields, so no
+# extra validation policy is needed here.
+#
+# Group grant: the console invite endpoint (rbac:admin only) records the chosen
+# RBAC group names on the invitation's fixed_data.groups. Those merge into
+# prompt_data at the invitation stage; the `default-invitation-group-grant`
+# expression policy below — bound to the user-write stage and re-evaluated at
+# execution time — resolves each name to a PRE-EXISTING Authentik group and adds
+# the new user to it. It never creates groups and silently ignores unknown names,
+# so it can only confer membership an operator explicitly picked.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-invitation-flow
+  namespace: authentik
+data:
+  invitation-flow.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Invitation Enrollment
+    entries:
+      # ── Enrollment flow the invite link points at ─────────────────────────
+      - model: authentik_flows.flow
+        state: present
+        id: invitation-flow
+        identifiers:
+          slug: default-invitation-flow
+        attrs:
+          name: Invitation Enrollment
+          title: Welcome — set up your account
+          designation: enrollment
+          authentication: require_unauthenticated
+          denied_action: message_continue
+
+      # ── Invitation stage — token is mandatory (no open self-signup) ───────
+      - model: authentik_stages_invitation.invitationstage
+        state: present
+        id: invitation-stage
+        identifiers:
+          name: default-invitation-stage
+        attrs:
+          continue_flow_without_invitation: false
+
+      # ── Prompt fields (self-contained, not shared with other flows) ───────
+      - model: authentik_stages_prompt.prompt
+        state: present
+        id: invitation-field-username
+        identifiers:
+          name: default-invitation-field-username
+        attrs:
+          field_key: username
+          label: Username
+          type: username
+          required: true
+          placeholder: Username
+          order: 10
+      - model: authentik_stages_prompt.prompt
+        state: present
+        id: invitation-field-name
+        identifiers:
+          name: default-invitation-field-name
+        attrs:
+          field_key: name
+          label: Full name
+          type: text
+          required: true
+          placeholder: Full name
+          order: 20
+      # Email is prefilled from the invitation's fixed_data.email at runtime.
+      - model: authentik_stages_prompt.prompt
+        state: present
+        id: invitation-field-email
+        identifiers:
+          name: default-invitation-field-email
+        attrs:
+          field_key: email
+          label: Email
+          type: email
+          required: true
+          placeholder: Email
+          order: 30
+      - model: authentik_stages_prompt.prompt
+        state: present
+        id: invitation-field-password
+        identifiers:
+          name: default-invitation-field-password
+        attrs:
+          field_key: password
+          label: Password
+          type: password
+          required: true
+          placeholder: Password
+          order: 40
+      - model: authentik_stages_prompt.prompt
+        state: present
+        id: invitation-field-password-repeat
+        identifiers:
+          name: default-invitation-field-password-repeat
+        attrs:
+          field_key: password_repeat
+          label: Confirm password
+          type: password
+          required: true
+          placeholder: Confirm password
+          order: 50
+
+      # ── Prompt stage binding those fields ─────────────────────────────────
+      - model: authentik_stages_prompt.promptstage
+        state: present
+        id: invitation-prompt
+        identifiers:
+          name: default-invitation-prompt
+        attrs:
+          fields:
+            - !KeyOf invitation-field-username
+            - !KeyOf invitation-field-name
+            - !KeyOf invitation-field-email
+            - !KeyOf invitation-field-password
+            - !KeyOf invitation-field-password-repeat
+
+      # ── User write — active internal platform user under /users ───────────
+      - model: authentik_stages_user_write.userwritestage
+        state: present
+        id: invitation-user-write
+        identifiers:
+          name: default-invitation-user-write
+        attrs:
+          user_creation_mode: always_create
+          create_users_as_inactive: false
+          user_type: internal
+          user_path: users
+
+      # ── Log the newly enrolled user in ────────────────────────────────────
+      - model: authentik_stages_user_login.userloginstage
+        state: present
+        id: invitation-login
+        identifiers:
+          name: default-invitation-login
+
+      # ── Bounded group grant ───────────────────────────────────────────────
+      # Runs immediately before user-write. Adds the enrolling user to the
+      # pre-existing Authentik groups the operator selected on the invitation
+      # (carried in fixed_data.groups -> prompt_data.groups). Never creates a
+      # group; unknown names are dropped; capped at 20 names.
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        id: invitation-group-grant
+        identifiers:
+          name: default-invitation-group-grant
+        attrs:
+          expression: |
+            from authentik.core.models import Group
+
+            prompt_data = request.context.get("prompt_data", {})
+            wanted = prompt_data.get("groups") or []
+            if isinstance(wanted, str):
+                wanted = [wanted]
+            wanted = [str(name).strip() for name in wanted if str(name).strip()][:20]
+
+            # Consume the marker so user-write does not persist it as a stray
+            # user attribute.
+            prompt_data.pop("groups", None)
+
+            if wanted:
+                matched = list(Group.objects.filter(name__in=wanted))
+                plan = request.context.get("flow_plan")
+                if plan is not None and matched:
+                    existing = list(plan.context.get("groups", []))
+                    plan.context["groups"] = existing + matched
+
+            # Never blocks enrollment; grant is best-effort over existing groups.
+            return True
+
+      # ── Flow stage bindings (order = execution order) ─────────────────────
+      - model: authentik_flows.flowstagebinding
+        state: present
+        identifiers:
+          target: !KeyOf invitation-flow
+          stage: !KeyOf invitation-stage
+        attrs:
+          order: 0
+          evaluate_on_plan: true
+          re_evaluate_policies: false
+      - model: authentik_flows.flowstagebinding
+        state: present
+        identifiers:
+          target: !KeyOf invitation-flow
+          stage: !KeyOf invitation-prompt
+        attrs:
+          order: 10
+      - model: authentik_flows.flowstagebinding
+        state: present
+        id: invitation-user-write-binding
+        identifiers:
+          target: !KeyOf invitation-flow
+          stage: !KeyOf invitation-user-write
+        attrs:
+          order: 20
+          # Evaluate the group-grant policy when the flow REACHES user-write (not
+          # at plan time), so prompt_data.groups is already populated.
+          evaluate_on_plan: false
+          re_evaluate_policies: true
+      - model: authentik_flows.flowstagebinding
+        state: present
+        identifiers:
+          target: !KeyOf invitation-flow
+          stage: !KeyOf invitation-login
+        attrs:
+          order: 30
+
+      # ── Bind the bounded group-grant policy onto the user-write stage ──────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf invitation-user-write-binding
+          policy: !KeyOf invitation-group-grant
+          order: 0
+        attrs:
+          enabled: true

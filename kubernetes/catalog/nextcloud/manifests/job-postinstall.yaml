@@ -1,0 +1,125 @@
+---
+# Post-install Job — runs the occ script from `configmap-postinstall.yaml`.
+#
+# Idempotent: safe to re-run on every deploy. ArgoCD PostSync + Sync hooks
+# take care of the timing (see the annotations below).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nextcloud-postinstall
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: postinstall
+  annotations:
+    # Run after the Deployment is healthy on Sync and PostSync so an
+    # upgrade also re-runs the script (occ takes care of no-ops).
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nextcloud
+        app.kubernetes.io/component: postinstall
+    spec:
+      restartPolicy: OnFailure
+      # `nextcloud-data` is a ReadWriteOnce Longhorn volume, and ReadWriteOnce is
+      # node-scoped: this Job can only attach it on the node already running the
+      # Nextcloud pod. Scheduled anywhere else it fails with Multi-Attach, and as
+      # a PostSync hook it then blocks the entire Application sync indefinitely.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: nextcloud
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        # www-data — same UID as the app pod so occ writes as the correct owner.
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+      # Wait for the app pod to be Ready before running occ. This is a busybox
+      # loop, not a sidecar, so the Job actually terminates.
+      initContainers:
+        - name: wait-for-app
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              i=0
+              until wget -qO- "http://nextcloud.nextcloud.svc.cluster.local/status.php" | grep -q '"installed":true'; do
+                i=$((i+1)); [ $i -gt 60 ] && echo "gave up waiting for Nextcloud" && exit 1
+                sleep 5
+              done
+      containers:
+        - name: occ
+          image: nextcloud:29-apache
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/scripts/configure.sh"]
+          env:
+            # Must match the mount path chosen in the console when the NAS folder
+            # is mounted into the nextcloud Deployment.
+            - { name: NAS_MEDIA_PATH, value: "/mnt/nas-media" }
+            # Groups allowed to see /Media, space separated. Whoever is in ANY of
+            # them sees the folder; everyone else does not (a mount with no group
+            # is visible to every user).
+            #
+            #   storage-truenas-infraweaver-media-c9e46201be8c-rw
+            #       the `media` folder of the `infraweaver` share on `truenas` —
+            #       i.e. RBAC scope /nas/truenas/infraweaver/media. Membership is
+            #       reconciled by the console from storage grants and must not be
+            #       edited by hand. Regenerate the name with the console's storage
+            #       access panel if the folder ever moves; the `c9e46201be8c` suffix is
+            #       a hash of the scope (see lib/nas/access-policy.ts).
+            #   storage-truenas-infraweaver-rw
+            #       the whole share, so a share-level grant also reveals /Media.
+            #   nc-media-rw
+            #       the pre-scopes local group. Retained so this cluster keeps
+            #       working through the migration; drop it once every member has
+            #       been re-granted through the console.
+            #
+            # Only `-rw` groups appear here, so a `storage-viewer` grant confers NAS/SMB
+            # read access but NO Nextcloud mount. That is deliberate, not an oversight:
+            # this is ONE `Local` mount and files_external's read-only flag is per-mount,
+            # never per-group. Adding the `-ro` groups here would silently give viewers
+            # WRITE. A second, read-only mount cannot target viewers alone either, because
+            # `storage-contributor` is a member of both `-ro` and `-rw` (the superset in
+            # console lib/nas/access.ts), so contributors would see a duplicate /Media.
+            # Making viewers work needs the console to mint a viewer-only group first.
+            - name: NAS_MEDIA_ACCESS_GROUPS
+              value: "storage-truenas-infraweaver-media-c9e46201be8c-rw storage-truenas-infraweaver-rw nc-media-rw"
+            # Needed to place the admin in the local fallback group, which the NAS
+            # external storage is also scoped to.
+            - { name: NEXTCLOUD_ADMIN_USER, valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: admin-user } } }
+            - { name: OIDC_CLIENT_ID,     valueFrom: { secretKeyRef: { name: nextcloud-oidc-credentials, key: client-id } } }
+            - { name: OIDC_CLIENT_SECRET, valueFrom: { secretKeyRef: { name: nextcloud-oidc-credentials, key: client-secret } } }
+            - { name: OIDC_DISCOVERY_URL, valueFrom: { secretKeyRef: { name: nextcloud-oidc-credentials, key: discovery-url } } }
+            - { name: POSTGRES_HOST,     valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-host } } }
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-name } } }
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-user } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: nextcloud-app-credentials, key: db-password } } }
+          volumeMounts:
+            - { name: nextcloud-data, mountPath: /var/www/html }
+            - { name: scripts,        mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 1000m, memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: nextcloud-data
+          persistentVolumeClaim: { claimName: nextcloud-data }
+        - name: scripts
+          configMap:
+            name: nextcloud-postinstall-scripts
+            defaultMode: 0555
+        # Both NAS secrets are optional so the Job still works on a cluster
+        # that only has one provider (e.g. Synology-only). The script skips
+        # any provider whose credential files are absent.

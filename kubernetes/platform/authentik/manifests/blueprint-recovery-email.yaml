@@ -1,0 +1,51 @@
+---
+# ── Authentik Recovery Email Stage Blueprint ─────────────────────────────────
+# Adds outbound-email capability to the recovery flow. Without an EmailStage,
+# authentik has NO flow that sends mail — `POST /core/users/{id}/recovery_email/`
+# (the console "send set-password link" action) 400s and invites/recovery links
+# have to be hand-delivered.
+#
+# This declares the EmailStage and binds it at order 0 of the built-in
+# `default-recovery-flow` (which the default brand uses for recovery), so the
+# admin-initiated recovery_email action can email a "set your password" link:
+#   EmailStage(0) -> password prompt(10) -> user write(20)
+# When the user clicks the emailed link (token in URL), the EmailStage sees the
+# pending token and continues straight to the prompt.
+#
+# Depends on working SMTP: FROM is AUTHENTIK_EMAIL__FROM (= authenticated mailbox,
+# see values.yaml) and use_global_settings pulls host/port/creds from the global
+# AUTHENTIK_EMAIL__* config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-recovery-email
+  namespace: authentik
+data:
+  recovery-email.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Recovery Email
+    entries:
+      # ── Email stage — sends the set-password link via global SMTP ─────────
+      - model: authentik_stages_email.emailstage
+        state: present
+        id: default-recovery-email
+        identifiers:
+          name: default-recovery-email
+        attrs:
+          use_global_settings: true
+          activate_user_on_success: true
+          token_expiry: minutes=30
+          subject: "InfraWeaver — set your password"
+          template: email/password_reset.html
+
+      # ── Bind it at the start of the default recovery flow ─────────────────
+      - model: authentik_flows.flowstagebinding
+        state: present
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-recovery-flow]]
+          stage: !KeyOf default-recovery-email
+        attrs:
+          order: 0
+          evaluate_on_plan: true
+          re_evaluate_policies: false

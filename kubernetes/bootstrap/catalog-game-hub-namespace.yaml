@@ -1,0 +1,45 @@
+---
+# catalog-game-hub-namespace.yaml — ArgoCD Application for game-hub namespace scaffolding.
+# Renders kubernetes/catalog/game-hub (root kustomization):
+#   - Namespace (protected: Prune=false,Delete=false)
+#   - hardened default ServiceAccount (automountServiceAccountToken:false) — the durable
+#     token backstop for EVERY game pod, including API-created servers (palworld,
+#     cobalt-grove) that are not tracked under servers/
+#   - ResourceQuota + LimitRange (resource guardrails)
+#   - console Role/RoleBinding (adopts the already-live objects)
+#   - scale-schedule machinery, shipped dormant (scaleUp/DownEnabled=false)
+#
+# Disjoint from catalog-game-hub-servers (which owns servers/ deployments) — no overlap.
+# prune:false + no resources-finalizer: this app owns the Namespace, so neither a git
+# removal nor an app-delete is allowed to cascade into namespace/PVC deletion.
+# selfHeal:true: re-applies SA hardening / quota / limits if they drift.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-game-hub-namespace
+  namespace: argocd
+  labels:
+    infraweaver.io/type: namespace-scaffold
+    infraweaver.io/source: game-hub
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/game-hub
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: game-hub
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true

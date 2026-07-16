@@ -18,6 +18,8 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/core/buildkit
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: build

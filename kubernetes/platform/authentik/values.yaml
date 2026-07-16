@@ -16,8 +16,8 @@ global:
       subPath: favicon.png
       readOnly: true
     - name: authentik-media
-      mountPath: /web/dist/assets/icons/banner.jpg
-      subPath: banner.jpg
+      mountPath: /web/dist/assets/icons/banner.png
+      subPath: banner.png
       readOnly: true
 
   # Inject secrets from ExternalSecret-managed K8s secret (authentik-secrets)
@@ -38,7 +38,13 @@ global:
           name: authentik-secrets
           key: bootstrap-token
     - name: AUTHENTIK_BOOTSTRAP_EMAIL
-      value: "akadmin@${BASE_DOMAIN}"
+      # Sourced from the envsubst-rendered ConfigMap (manifests/email-configmap.yaml).
+      # A literal "akadmin@${BASE_DOMAIN}" here is NOT substituted — this app's
+      # Helm source bypasses the envsubst CMP plugin.
+      valueFrom:
+        configMapKeyRef:
+          name: authentik-email-addresses
+          key: bootstrap-email
     - name: AUTHENTIK_ADMIN_PASSWORD
       valueFrom:
         secretKeyRef:
@@ -62,6 +68,16 @@ global:
         secretKeyRef:
           name: authentik-smtp-secret
           key: smtp-password
+    # FROM must equal the authenticated SMTP mailbox. Office365/Outlook submission
+    # rejects a From that differs from the login mailbox (550 5.7.60 "not allowed to
+    # send as this sender") unless SendAs is granted. Sourcing FROM from the SAME
+    # secret key as the username guarantees they always match — no drift on rotation.
+    # (Overrides the chart's authentik.email.from.)
+    - name: AUTHENTIK_EMAIL__FROM
+      valueFrom:
+        secretKeyRef:
+          name: authentik-smtp-secret
+          key: smtp-username
     # 4 Gunicorn workers — reduces the chance of a request hitting a worker that
     # is being recycled (max_requests reached). With 4 workers, 3 remain available
     # while one restarts, eliminating the intermittent "flow infinite load" on first click.
@@ -80,7 +96,10 @@ authentik:
     use_tls: true
     use_ssl: false
     timeout: 30
-    from: "noreply@${BASE_DOMAIN}"
+    # NOTE: `from` is intentionally NOT set here. It is injected via the
+    # AUTHENTIK_EMAIL__FROM env var (see global.env above), sourced from the
+    # envsubst-rendered authentik-email-addresses ConfigMap. Setting it here with
+    # "${BASE_DOMAIN}" would reach the pod literally (this Helm source skips envsubst).
   postgresql:
     host: "authentik-postgresql"
     name: "authentik"
@@ -97,6 +116,8 @@ blueprints:
     - authentik-blueprint-apps
     - authentik-blueprint-access-control
     - authentik-blueprint-forward-auth
+    - authentik-blueprint-invitation-flow
+    - authentik-blueprint-recovery-email
 
 postgresql:
   enabled: true

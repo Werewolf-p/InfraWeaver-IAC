@@ -1,10 +1,13 @@
 ---
 # ArgoCD CMP — non-secret substitution values (design: docs/gitops-cmp-substitution.md §4a)
 #
-# Config ONLY. NEVER put secret-class placeholders here (${ADMIN_PASSWORD},
-# ${GITHUB_TOKEN}, ${ADMIN_LOGIN}). The envsubst CMP sidecar sources these keys
-# via envFrom and substitutes them into manifests at sync time; real secrets keep
-# flowing through OpenBao + ESO.
+# Config ONLY. NEVER put secret-class placeholders here (e.g. ADMIN_PASSWORD,
+# GITHUB_TOKEN, ADMIN_LOGIN — any PASSWORD / TOKEN / SECRET / KEY / LOGIN /
+# CREDENTIAL style name). The envsubst CMP sidecar sources those keys via envFrom
+# and substitutes them into manifests at sync time; real secrets keep flowing
+# through OpenBao + ESO.
+# (Examples are named without the dollar-brace syntax on purpose: the CMP's
+# fail-closed scan greps raw rendered text and a literal example would trip it.)
 #
 # This committed copy holds ${PLACEHOLDER} tokens, NOT real values, so the file is
 # safe to publish to the public template (scripts/sync-to-public.sh) and forkable.
@@ -21,7 +24,6 @@ metadata:
 data:
   BASE_DOMAIN: "${BASE_DOMAIN}"
   DEPLOY_REPO_URL: "${DEPLOY_REPO_URL}"
-  ONEDEV_URL: "${ONEDEV_URL}"
   METALLB_TRAEFIK_VIP: "${METALLB_TRAEFIK_VIP}"
   METALLB_COREDNS_VIP: "${METALLB_COREDNS_VIP}"
   METALLB_VLAN3_POOL_RANGE: "${METALLB_VLAN3_POOL_RANGE}"

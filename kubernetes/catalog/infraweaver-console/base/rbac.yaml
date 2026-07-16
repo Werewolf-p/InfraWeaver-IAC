@@ -57,6 +57,12 @@ rules:
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets", "secretstores", "clustersecretstores"]
     verbs: ["get", "list", "watch"]
+  # Pod firewall UI: list CNPs to show a pod's active exceptions, and
+  # create/patch/delete the per-app `<app>-<direction>-allowlist` policies that
+  # one-click Allow / remove-exception manage (cluster:admin gated in the API).
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -72,44 +78,12 @@ subjects:
   - kind: ServiceAccount
     name: infraweaver-console
     namespace: infraweaver-console
----
-# Role: full game-hub resource management (deploy/delete game servers)
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: infraweaver-console-game-hub
-  namespace: game-hub
-  labels:
-    app: infraweaver-console
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/exec", "pods/log", "services", "configmaps", "secrets", "persistentvolumeclaims", "endpoints"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "update", "patch"]
-  - apiGroups: ["autoscaling"]
-    resources: ["horizontalpodautoscalers"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: infraweaver-console-game-hub
-  namespace: game-hub
-  labels:
-    app: infraweaver-console
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: infraweaver-console-game-hub
-subjects:
-  - kind: ServiceAccount
-    name: infraweaver-console
-    namespace: infraweaver-console
+# NOTE: the game-hub-scoped Role/RoleBinding `infraweaver-console-game-hub`
+# is owned by the game-hub namespace bundle
+# (kubernetes/catalog/game-hub/manifests/rbac.yaml), which carries the
+# authoritative superset (events, statefulsets, batch, volumesnapshots).
+# Do NOT re-declare it here — a duplicate triggers an ArgoCD
+# SharedResourceWarning / OutOfSync on this Application.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -134,6 +108,54 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: infraweaver-console-configmaps
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-console
+    namespace: infraweaver-console
+---
+# Role: full WordPress Manager addon resource management in the `wordpress`
+# namespace. The cluster-wide infraweaver-console-reader only grants read on
+# networkpolicies/ingressroutes and lacks `update` on PVCs, so site provisioning
+# (createSite/deleteSite + plugin wp-cli exec) needs create/update/delete here.
+# `events` (create/patch) lets the reconcile publish the deduped SsoGateUnavailable
+# Warning Event to the notification bell when a stuck SSO gate defers on Authentik
+# being unavailable (reconcile-alerts.ts); the cluster-wide reader is events:read-only.
+# Scoped to one namespace for least privilege, mirroring the game-hub Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-console-wordpress
+  namespace: wordpress
+  labels:
+    app: infraweaver-console
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log", "services", "configmaps", "secrets", "persistentvolumeclaims", "endpoints", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes", "middlewares"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-console-wordpress
+  namespace: wordpress
+  labels:
+    app: infraweaver-console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-console-wordpress
 subjects:
   - kind: ServiceAccount
     name: infraweaver-console

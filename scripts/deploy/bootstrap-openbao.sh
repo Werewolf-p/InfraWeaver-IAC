@@ -545,39 +545,22 @@ if [ -z "$EXISTING_TRUENAS" ]; then
   echo "==> NAS/TrueNAS credentials seeded (platform/nas/truenas)"
 fi
 
-# ── OneDev pull secret (dockerconfigjson for GHCR/registry) ──────────────────
-# This secret is used by the InfraWeaver console and node agent to pull images.
-# The value must be base64-encoded JSON (ExternalSecret uses decodingStrategy: Base64).
-EXISTING_PULL=$(curl -s -H "X-Vault-Token: $ROOT_TOKEN" \
-  "${LOCAL_OPENBAO}/v1/secret/data/platform/onedev-pull-secret" | \
-  python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('data',{}).get('dockerconfigjson',''))" 2>/dev/null || echo "")
-if [ -z "$EXISTING_PULL" ]; then
-  REG_USER="${REGISTRY_USERNAME:-infraweaver}"
-  REG_PASS="${REGISTRY_PASSWORD:-$(openssl rand -base64 20 | tr -d '/+=')}"
-  REG_HOST="${REGISTRY_HOST:-onedev.int.example.com}"
-  AUTH_B64=$(echo -n "${REG_USER}:${REG_PASS}" | base64 -w0)
-  DOCKER_CFG="{\"auths\":{\"${REG_HOST}\":{\"username\":\"${REG_USER}\",\"password\":\"${REG_PASS}\",\"auth\":\"${AUTH_B64}\"}}}"
-  DOCKER_CFG_B64=$(echo -n "$DOCKER_CFG" | base64 -w0)
-  curl -s -X POST "${LOCAL_OPENBAO}/v1/secret/data/platform/onedev-pull-secret" \
-    -H "X-Vault-Token: $ROOT_TOKEN" -H "Content-Type: application/json" \
-    -d "{\"data\": {\"dockerconfigjson\": \"${DOCKER_CFG_B64}\"}}" > /dev/null
-  echo "==> onedev-pull-secret seeded (platform/onedev-pull-secret)"
-fi
+# NOTE: the legacy OneDev pull secret (platform/onedev-pull-secret, pointing at the
+# now-dead onedev.int registry) was removed 2026-06-14 — OneDev is decommissioned and
+# no workload references it. Images are pulled via the GHCR secret (below) and the
+# self-hosted Zot registry-pull-secret. See externalsecret-registry.yaml.
 
 # ── GHCR pull secret (for infraweaver-console and infraweaver-system namespaces) ──
-# Creates kubernetes.io/dockerconfigjson secrets directly (not via ExternalSecret)
+# Seeded into OpenBao (secret/platform/ghcr-pull-secret); the ghcr-pull-secret
+# ExternalSecrets in the console + node catalog bases project it into both
+# namespaces. No plaintext dockerconfigjson is applied to the cluster here.
+# Use a read-only token (classic PAT, `read:packages` scope only).
 if [ -n "${GITHUB_TOKEN:-}" ]; then
-  for NS in infraweaver-console infraweaver-system; do
-    kubectl --kubeconfig "$KB" create namespace "$NS" --dry-run=client -o yaml \
-      | kubectl --kubeconfig "$KB" apply -f - 2>/dev/null || true
-    kubectl --kubeconfig "$KB" create secret docker-registry ghcr-pull-secret \
-      --namespace="$NS" \
-      --docker-server=ghcr.io \
-      --docker-username="${GITHUB_ACTOR:-${GITHUB_ORG:-your-org}}" \
-      --docker-password="${GITHUB_TOKEN}" \
-      --dry-run=client -o yaml | kubectl --kubeconfig "$KB" apply -f -
-  done
-  echo "==> GHCR pull secrets created in infraweaver-console and infraweaver-system"
+  GHCR_USER="${GITHUB_ACTOR:-${GITHUB_ORG:-your-org}}" \
+  GHCR_TOKEN="${GITHUB_TOKEN}" \
+    bash "$(dirname "${BASH_SOURCE[0]}")/seed-ghcr-pull-secret.sh" \
+      "$LOCAL_OPENBAO" "$ROOT_TOKEN" --force
+  echo "==> GHCR pull credential seeded into OpenBao; ESO will project ghcr-pull-secret"
 fi
 
 # ── InfraWeaver Console additional secrets ───────────────────────────────────
@@ -628,54 +611,81 @@ path "secret/data/platform/*" { capabilities = ["read","list"] }
 path "secret/metadata/platform/*" { capabilities = ["read","list"] }
 path "secret/data/infraweaver/*" { capabilities = ["read","list","create","update","delete"] }
 path "secret/metadata/infraweaver/*" { capabilities = ["read","list","create","update","delete"] }
+path "secret/data/iwsl/*" { capabilities = ["read","list"] }
+path "secret/metadata/iwsl/*" { capabilities = ["read","list"] }
+# game-hub server credentials (PR#82) — app catalog secrets, read-only for ESO
+path "secret/data/catalog/*" { capabilities = ["read","list"] }
+path "secret/metadata/catalog/*" { capabilities = ["read","list"] }
 EOF'
 echo "==> ESO policy platform-k8s written"
+
+# Console runtime policy (attached to the console's OpenBao token, -policy=wordpress).
+# Covers the WordPress Manager addon's KV paths plus the UDM connector config the
+# console settings card writes to secret/platform/udm. Policies are referenced by
+# name and evaluated per-request, so updating this content lifts the live token's
+# permissions without recreating the token or restarting the console.
+kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
+  env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 sh -c \
+  'bao policy write wordpress - <<EOF
+path "secret/data/wordpress/*" { capabilities = ["create","read","update","delete"] }
+path "secret/metadata/wordpress/*" { capabilities = ["read","delete","list"] }
+# InfraWeaver console UDM connector (settings card writes host + api-key here)
+path "secret/data/platform/udm" { capabilities = ["create","read","update"] }
+path "secret/metadata/platform/udm" { capabilities = ["read"] }
+# InfraWeaver console NAS provider registry (Storage "Add provider" writes the
+# dynamic Synology/TrueNAS list + credentials here, read at request time)
+path "secret/data/platform/nas/providers" { capabilities = ["create","read","update"] }
+path "secret/metadata/platform/nas/providers" { capabilities = ["read"] }
+# Flat per-provider SMB creds the assign ExternalSecret projects into the CSI
+# credential Secret (ESO reads these via secret/data/platform/* below).
+path "secret/data/platform/nas/creds/*" { capabilities = ["create","read","update"] }
+path "secret/metadata/platform/nas/creds/*" { capabilities = ["read","delete"] }
+# Local app accounts the console provisions from RBAC grants (Jellyfin today):
+# the service-account credential plus one generated password per user. Jellyfin
+# native/TV clients cannot use OIDC, so these local passwords are the only way in
+# and the console must be able to re-read them to hand them to their owner.
+path "secret/data/platform/app-accounts/*" { capabilities = ["create","read","update","delete"] }
+path "secret/metadata/platform/app-accounts/*" { capabilities = ["read","delete","list"] }
+EOF'
+echo "==> Console runtime policy wordpress written"
 
 # Tune token auth to allow long-lived tokens (use bao CLI)
 kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
   env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 \
   bao auth tune -max-lease-ttl=87600h token/ 2>/dev/null || true
 
-# Create ESO service token — periodic (30-day period), ESO auto-renews it.
-# Periodic tokens expire if not renewed within the period, which is the
-# correct security posture: a compromised token self-destructs within 30 days.
-# ESO renews tokens automatically as long as it's running.
-# 30 days (720h) provides a larger safety buffer vs the 7-day original:
-# during planned maintenance/upgrades ESO may restart and need time to re-acquire the token.
-SERVICE_TOKEN=$(kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
-  env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 bao token create \
-    -policy=platform-k8s \
-    -policy=default \
-    -period=720h \
-    -orphan \
-    -display-name="eso-${ENV}-periodic" \
-    -renewable=true \
-    -format=json 2>/dev/null | \
-  python3 -c "import json,sys; print(json.load(sys.stdin)['auth']['client_token'])" \
-  2>/dev/null || echo "")
+# ── ESO authenticates via Kubernetes auth (SA JWT) — no static token ──────────
+# ESO logs in to OpenBao's kubernetes auth backend using its own auto-rotated pod
+# ServiceAccount token (external-secrets/external-secrets), role `external-secrets`
+# (policy platform-k8s). SA JWTs never expire as a class — this replaced the old
+# periodic token that recurred as a cluster-wide outage every ~30 days.
+# Prereq: the openbao SA holds system:auth-delegator so OpenBao can call the
+# TokenReview API (kubernetes/core/openbao/manifests/rbac.yaml).
 
-if [ -z "$SERVICE_TOKEN" ]; then
-  echo "⚠ Could not create ESO service token — skipping"
-  kill $PF_PID 2>/dev/null || true
-  exit 0
-fi
+# Enable + configure the kubernetes auth method (idempotent). With
+# disable_local_ca_jwt=false (default) OpenBao uses its own mounted CA + SA token
+# to call TokenReview.
+kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
+  env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 \
+  bao auth enable kubernetes 2>/dev/null || true
+kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
+  env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 \
+  bao write auth/kubernetes/config kubernetes_host=https://kubernetes.default.svc
+
+# Register the ESO role: bound to its ServiceAccount, scoped to platform-k8s.
+kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
+  env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 \
+  bao write auth/kubernetes/role/external-secrets \
+    bound_service_account_names=external-secrets \
+    bound_service_account_namespaces=external-secrets \
+    token_policies=platform-k8s \
+    token_ttl=1h
+echo "==> ESO kubernetes auth role 'external-secrets' registered (policy platform-k8s)"
 
 # Close port-forward before kubectl operations
 kill $PF_PID 2>/dev/null || true
 
-# Store the ESO service token in a k8s secret so local deploys can retrieve it
-# (GitHub Actions reads it from GITHUB_ENV; local deploys read from this secret)
+# Ensure the external-secrets namespace exists (the ClusterSecretStore + ESO land here)
 kubectl --kubeconfig "$KB" create namespace external-secrets --dry-run=client -o yaml \
   | kubectl --kubeconfig "$KB" apply -f - 2>/dev/null || true
-kubectl --kubeconfig "$KB" create secret generic openbao-eso-token \
-  -n kube-system \
-  --from-literal=token="${SERVICE_TOKEN}" \
-  --dry-run=client -o yaml | kubectl --kubeconfig "$KB" apply -f -
-echo "==> ESO service token stored in k8s secret (kube-system/openbao-eso-token)"
-
-# Export for GitHub Actions (if running in CI)
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  echo "ESO_SERVICE_TOKEN=${SERVICE_TOKEN}" >> "$GITHUB_ENV"
-  echo "OPENBAO_CLUSTER_ADDR=http://openbao.openbao.svc.cluster.local:8200" >> "$GITHUB_ENV"
-fi
 

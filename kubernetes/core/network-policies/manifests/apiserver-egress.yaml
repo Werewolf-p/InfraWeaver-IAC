@@ -1,0 +1,132 @@
+---
+# Egress to the kube-apiserver for namespaces that run a default-deny-egress posture.
+#
+# WHY THIS EXISTS
+# Each of these namespaces ships a k8s NetworkPolicy `allow-egress-k8s-api` whose
+# rule targets `ipBlock: ${MGMT_SUBNET_CIDR}` (+ 10.96.0.1/32). Under Cilium's
+# default identity model, traffic to the apiserver carries the reserved
+# `kube-apiserver` identity (the ClusterIP is DNATed to a node:6443 endpoint), and
+# `policy-cidr-match-mode` is NOT set to `nodes`, so CIDR-based rules never match it.
+# Result: every controller/operator in these namespaces lost apiserver egress when
+# Cilium began actually enforcing these (previously-inert under flannel) policies —
+# breaking the ArgoCD application-controller, external-secrets, kyverno, etc.
+#
+# These CiliumNetworkPolicies express the SAME intent as the broken k8s rules using
+# the `kube-apiserver` entity, which is the correct/portable way under Cilium.
+# They are purely additive allows (the namespaces keep their default-deny-egress).
+#
+# Managed by the core-network-policies ArgoCD app (path: this directory).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: argocd
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+# ArgoCD application-controller also needs egress to argocd-redis (same namespace).
+# The namespace's allow-intra-namespace NetworkPolicy only covers INGRESS, so under
+# default-deny-egress the controller could not reach redis (i/o timeout) and stopped
+# reconciling. This adds the missing intra-namespace egress.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-intra-namespace
+  namespace: argocd
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - {}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: authentik
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: cert-manager
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: external-dns
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: external-secrets
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: falco
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: infraweaver-console
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: kyverno
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: openbao
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver]

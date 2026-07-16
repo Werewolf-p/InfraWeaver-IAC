@@ -56,7 +56,7 @@ n8n dispatches coding agents that:
 - Push **config** changes → OneDev (`InfraWeaver-infra`)
 
 Env vars needed in n8n:
-- `CODING_AGENT_DISPATCH_URL=http://10.10.0.108:9876`
+- `CODING_AGENT_DISPATCH_URL=http://10.0.0.108:9876`
 - `GITHUB_TOKEN` — for code repo pushes
 - `ONEDEV_INFRA_URL=http://onedev.onedev.svc.cluster.local/InfraWeaver-infra`
 - `ONEDEV_TOKEN` — OneDev API access token

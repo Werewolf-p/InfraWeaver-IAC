@@ -7,11 +7,19 @@ resources:
   - externalsecret-ghcr.yaml
   - externalsecret-registry.yaml
   - externalsecret.yaml
+  - externalsecret-iwsl-iw-keys.yaml
+  - ciliumnetworkpolicy-udm-egress.yaml
+  - ciliumnetworkpolicy-wp-health-egress.yaml
+  - health-sweep-cronjob.yaml
+  - users-reconcile-cronjob.yaml
+  - roster-drift-cronjob.yaml
+  - networkpolicy-wp-health.yaml
   - game-servers-namespace.yaml
   - game-servers-pool.yaml
   - hpa.yaml
   - ingressroute.yaml
   - networkpolicy.yaml
+  - policyexception-automount.yaml
   - poddisruptionbudget.yaml
   - rbac.yaml
   - service-account.yaml

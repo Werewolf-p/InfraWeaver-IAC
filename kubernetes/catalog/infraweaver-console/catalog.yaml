@@ -18,4 +18,54 @@ secrets:
       type: password
     argocd-token:
       type: password
+    # Shared token the console verifies on POST/GET from the in-cluster hygiene
+    # CronJobs (wordpress-connector-health-sweep, users-reconcile, roster-drift).
+    # All three read it from infraweaver-console-secret[wordpress-health-cron-token]
+    # (ESO-synced from this same path), so declaring it here means seed-catalog-
+    # secrets.sh auto-generates it on a fresh install — without it ESO can't sync
+    # the key and both the console pod and every hygiene CronJob fail to start.
+    wordpress-health-cron-token:
+      type: password
+      length: 64
+    # ── Remaining properties the console ExternalSecret pulls from THIS path ───
+    # The ExternalSecret uses deletionPolicy: Retain, under which ESO fails the
+    # ENTIRE secret sync if ANY referenced property is absent in OpenBao (a
+    # missing key is only skipped when deletionPolicy != Retain). So every
+    # property the ExternalSecret reads from secret/platform/infraweaver-console
+    # MUST exist here on a fresh install, or the console pod + all three hygiene
+    # CronJobs never receive their Secret. validate-iac.sh step 4/4 enforces this.
+    #
+    # Shared HMAC the console signs dispatch mutation POSTs with; the dispatch
+    # systemd unit on the runner reads the SAME value from this OpenBao path, so
+    # generating it here is the single source of truth.
+    dispatch-secret:
+      type: password
+      length: 64
+    # Fork↔canonical feedback-ingest HMAC. Generated for the canonical; a fork
+    # that federates upstream overwrites it with the shared value.
+    feedback-upstream-secret:
+      type: password
+      length: 64
+    # Externally/bootstrap-provided values — declared as empty placeholders so the
+    # property always EXISTS (Retain sync succeeds). bootstrap-openbao.sh and/or an
+    # operator overwrite them with real values, which the idempotent seeder then
+    # preserves (it only (re)writes keys whose current value is empty).
+    github-token:
+      type: static
+      value: ""
+    authentik-token:
+      type: static
+      value: ""
+    openbao-token:
+      type: static
+      value: ""
+    cloudflare-api-token:
+      type: static
+      value: ""
+    cf-zone-id:
+      type: static
+      value: ""
+    dns-provider:
+      type: static
+      value: ""
 replicas: "2"

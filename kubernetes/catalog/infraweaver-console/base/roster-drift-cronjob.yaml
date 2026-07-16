@@ -1,0 +1,86 @@
+# Roster-drift probe — hourly, server-driven.
+#
+# GETs the console's own /api/security/roster-drift, which lists the live Authentik
+# directory and flags every ACTIVE account users.yaml does not account for:
+#   - unmanaged     — active account absent from users.yaml by username AND email
+#                     (ak-outpost-* outpost service accounts are excluded);
+#   - suspicious    — username matching e2e-* / test-* / *-test (left-behind harness
+#                     accounts), flagged regardless of roster membership.
+# An unmanaged/suspicious account that is a privileged-group member or an Authentik
+# superuser is an ESCALATION: the route emits a `result:"failure"` security audit
+# entry (log-based alert). The response is 200 with the report either way, so this
+# Job only goes red when the endpoint is unreachable, not when drift is found.
+#
+# Auth: the shared token is the SAME ESO-managed secret VALUE the console reads
+# (`infraweaver-console-secret` key `wordpress-health-cron-token`, synced from
+# OpenBao `secret/platform/infraweaver-console`), exposed to the console as
+# ROSTER_DRIFT_CRON_TOKEN. The console middleware (proxy.ts) lets this GET past the
+# session gate only when the token matches; the route handler re-validates it
+# (defence in depth).
+#
+# Networking: the pod carries `infraweaver.io/component: iwsl`, so the existing
+# health-sweep CiliumNetworkPolicy (egress to CoreDNS + the console Service:3000)
+# and NetworkPolicy (console ingress from these pods) already cover it — same
+# in-cluster reach, no new network rules.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: roster-drift
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "17 * * * *" # hourly, offset to avoid colliding with the reconcile sweep
+  concurrencyPolicy: Replace # kill a wedged scan, never let a hung pod block the schedule
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: roster-drift
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-health-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # Origin matches the request host so the console's CSRF same-origin
+              # guard passes independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 240
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/security/roster-drift

@@ -1,0 +1,220 @@
+# THE HOLES — every exception to the airgap, one block per reason, with WHY.
+# If a flow isn't allowed here (or by a namespace's own policies elsewhere), it's
+# denied. This file is the single audit surface for "what is allowed out/across".
+# Mirrors what is LIVE. The console "allow next time" feature appends here.
+---
+# WHY: the console's API drives ArgoCD (GitOps view, app sync) → it must reach argocd.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-argocd, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": argocd}}]
+---
+# WHY: the matching ingress side — argocd-server must accept calls from the console.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-ingress-from-console, namespace: argocd, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": argocd-server}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-console}}]
+---
+# WHY: the WordPress Manager addon reads/writes secrets in OpenBao (KV) when
+# provisioning sites — OPENBAO_ADDR=openbao.openbao.svc:8200. The console's
+# allow-console-to-argocd policy (endpointSelector {}) puts all console pods into
+# egress-enforcement, and no hole permitted openbao, so create-site hung on a
+# vault connection timeout. Egress side: console → openbao:8200.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-openbao, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": openbao}}]
+      toPorts: [{ports: [{port: "8200", protocol: TCP}]}]
+---
+# WHY: the matching ingress side — openbao must accept the console's KV calls.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-ingress-from-console, namespace: openbao, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-console}}]
+      toPorts: [{ports: [{port: "8200", protocol: TCP}]}]
+---
+# WHY: cert-manager needs the K8s API, ACME/CA endpoints (world), and DNS-01 providers
+# to issue/renew certificates. Scoped to entities, not blanket allow.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-egress-ops, namespace: cert-manager, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver, world, cluster]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]
+---
+# WHY: external-dns needs the K8s API and the DNS provider API (world) to manage records.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-egress-ops, namespace: external-dns, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [kube-apiserver, world, cluster]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]
+---
+# WHY: tradesphere's one real external dependency — the Binance market/trade API.
+# FQDN-scoped (not blanket world): only *.binance.com:443 is reachable.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-egress-binance, namespace: tradesphere, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toFQDNs: [{matchPattern: "*.binance.com"}, {matchName: "api.binance.com"}, {matchName: "fapi.binance.com"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+---
+# WHY: the infraweaver-node agent (infraweaver-system) reports to / is driven by the
+# console API (infraweaver-console, port 3001). Egress side. Observed dropped after the
+# airgap migration — legitimate platform control-plane flow.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-node-to-api, namespace: infraweaver-system, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {app: infraweaver-node}}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-console, app: infraweaver-api}}]
+      toPorts: [{ports: [{port: "3001", protocol: TCP}]}]
+---
+# WHY: the matching ingress side — infraweaver-api must accept calls from the node agent.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-ingress-from-node, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {app: infraweaver-api}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-system, app: infraweaver-node}}]
+      toPorts: [{ports: [{port: "3001", protocol: TCP}]}]
+---
+# WHY: game-server pods run Pelican/parkervcp install scripts that download game
+# artifacts from the public internet on first boot (e.g. SpongeVanilla, TShock,
+# SteamCMD, GitHub release assets). The airgap baseline blocks all outbound, which
+# leaves the install init container hanging on curl forever. Download hosts vary
+# per egg, so this opens world:443/80 — but SCOPED to actual game-server pods only
+# (label infraweaver.io/game=true), not the whole namespace. DNS is already opened
+# by the airgap baseline; restated here so this hole is self-contained for audit.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-game-downloads, namespace: game-hub, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"infraweaver.io/game": "true"}}
+  egress:
+    - toEntities: [world]
+      toPorts: [{ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+---
+# WHY: players connect to game servers from outside the cluster via a NodePort on a
+# node (typically the router forwards the public game port → the node's NodePort).
+# Cilium sees that DNAT'd traffic with host / remote-node / world identity — none of
+# which the airgap baseline's ingress allows (it only permits game-hub, traefik, and
+# monitoring endpoints) — so every player packet was dropped and servers reported
+# "Port Closed". This opens ingress to actual game pods only (label
+# infraweaver.io/game=true) from the entities a NodePort path can present. Not
+# port-scoped on purpose: each egg exposes only its own game port(s), nothing else
+# listens on these pods, and ports vary per game (25565, 2456-2458, 27015, …) so a
+# per-egg port list would be brittle. This is the ingress twin of allow-game-downloads.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-game-ingress, namespace: game-hub, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"infraweaver.io/game": "true"}}
+  ingress:
+    - fromEntities: [world, cluster, host, remote-node, health]
+---
+# WHY: the console delivers game-server commands via Tier-1 native RCON, which
+# connects DIRECTLY to a game pod's RCON port (podIP:25575) — not through the K8s
+# API like exec/logs. The console's airgap egress baseline blocks cross-namespace
+# traffic, so RCON timed out and commands silently fell back to the (unreachable)
+# PTY-stdin path. Open console -> game-hub egress. Ingress side is already covered
+# by game-hub/allow-game-ingress (cluster entity). Scoped to the game-hub namespace.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-gamehub-rcon, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-hub}}]
+---
+# WHY: Jellyfin's OIDC covers only its web UI, so native/TV clients sign in against a
+# LOCAL Jellyfin account. The console therefore provisions those accounts over
+# Jellyfin's admin API (jellyfin.jellyfin.svc:8096) whenever an RBAC grant at
+# `/jellyfin` changes — see lib/jellyfin/access.ts. The console's airgap egress
+# baseline blocks cross-namespace traffic, so without this the reconcile fails with
+# "Jellyfin is unreachable" and a granted user never gets an account.
+#
+# Egress only. Jellyfin's namespace runs an EGRESS-ONLY baseline
+# (jellyfin-egress, below) — it never selects endpoints for ingress, so ingress
+# stays default-allow and Traefik + every NodePort/DLNA media client keep working.
+# This console→jellyfin egress hole is still required for the admin-API reconcile.
+#
+# Port is the POD port (8096), not a Service port — Cilium egress policy is evaluated
+# after service translation.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-jellyfin, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": jellyfin}}]
+      toPorts: [{ports: [{port: "8096", protocol: TCP}]}]
+---
+# WHY: user offboard deletes the departing user's Nextcloud account over the OCS
+# Provisioning API (nextcloud.nextcloud.svc:80) — see lib/nextcloud/deprovision.ts.
+# The console's airgap egress baseline blocks cross-namespace traffic, so without this
+# the Nextcloud offboard step fails "Nextcloud is unreachable" (access is still revoked
+# by the Authentik disable + group-strip, but the residual user row would linger).
+#
+# Egress only, mirroring allow-console-to-jellyfin: nextcloud's namespace has an
+# egress-only CiliumNetworkPolicy, so its ingress stays default-allow and this hole
+# is sufficient. Port is the POD port (80), evaluated after service translation.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-nextcloud, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": nextcloud}}]
+      toPorts: [{ports: [{port: "80", protocol: TCP}]}]
+---
+# WHY: Jellyfin was the last user namespace with NO network policy at all, so a
+# compromised media server could freely reach every other namespace (openbao,
+# argocd, app databases). This is an EGRESS-ONLY baseline: it selects all jellyfin
+# pods for egress but never for ingress, so ingress stays default-allow — Traefik,
+# NodePort clients (8096/8920) and LAN discovery (7359/1900 UDP) are untouched, per
+# the deliberate "no ingress policy on jellyfin" design noted above.
+#
+# Egress is now default-deny except the media server's real dependencies:
+#   - intra-namespace (the library-bootstrap CronJob curls jellyfin:8096)
+#   - cluster DNS
+#   - authentik (the SSO/OIDC plugin's server-side token exchange, 80/443)
+#   - the internet on 80/443 (TMDB metadata + artwork, plugin repo, updates)
+# NAS media is a node-level CSI mount, not pod egress, so it is unaffected.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: jellyfin-egress, namespace: jellyfin, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: egress-airgapped}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": jellyfin}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": authentik}}]
+      toPorts: [{ports: [{port: "80", protocol: TCP}, {port: "443", protocol: TCP}]}]
+    - toEntities: [world]
+      toPorts: [{ports: [{port: "80", protocol: TCP}, {port: "443", protocol: TCP}]}]

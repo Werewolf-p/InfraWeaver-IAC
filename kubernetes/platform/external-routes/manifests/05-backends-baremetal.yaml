@@ -1,0 +1,48 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bm-bitwarden
+  namespace: traefik
+  labels:
+    infraweaver.io/managed-route: bitwarden
+spec:
+  ports:
+    - port: 30032
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: bm-bitwarden
+  namespace: traefik
+  labels:
+    infraweaver.io/managed-route: bitwarden
+subsets:
+  - addresses:
+      - ip: 10.1.0.135
+    ports:
+      - port: 30032
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bm-truenas
+  namespace: traefik
+  labels:
+    infraweaver.io/managed-route: truenas
+spec:
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: bm-truenas
+  namespace: traefik
+  labels:
+    infraweaver.io/managed-route: truenas
+subsets:
+  - addresses:
+      - ip: 10.1.0.135
+    ports:
+      - port: 80

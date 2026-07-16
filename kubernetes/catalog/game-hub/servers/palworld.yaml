@@ -1,0 +1,382 @@
+# palworld.yaml — git-tracked adoption of the live game-hub server "palworld".
+# Exported from the running cluster and pruned so catalog-game-hub-servers adopts it
+# with zero drift. OMITTED ON PURPOSE (console/controller owns these at runtime):
+#   - spec.replicas .............. start/stop is console-owned (app ignoreDifferences +
+#                                  RespectIgnoreDifferences). Pinning it here would let
+#                                  selfHeal restart a stopped server.
+#   - operational annotations .... infraweaver.io/last-started, autopause/crash/
+#                                  players-empty-since, deployment revision, restartedAt.
+#   - status / cluster-populated . uid, resourceVersion, generation, clusterIP,
+#                                  PVC volumeName + pv.* annotations.
+# KEPT: full pod spec incl. automountServiceAccountToken:false, init installer, probes,
+#       lifecycle preStop, and the NodePort (pinned for a stable player/router address).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app: palworld
+    infraweaver.io/egg: steamcmd_servers-palworld
+    infraweaver.io/game: 'true'
+    infraweaver/egg: steamcmd_servers-palworld
+    infraweaver/game: 'true'
+  name: palworld-container
+  namespace: game-hub
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: longhorn-game
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    infraweaver.io/dns-hostname: palworld.games.example.com
+    infraweaver.io/egg-id: steamcmd_servers/palworld
+    infraweaver.io/egg-source: pelican:steamcmd_servers/palworld
+    infraweaver.io/groups: ''
+    infraweaver.io/image-version: debian
+  labels:
+    app: palworld
+    infraweaver.io/egg: steamcmd_servers-palworld
+    infraweaver.io/game: 'true'
+    infraweaver.io/game-type: steamcmd_servers-palworld
+    infraweaver/egg: steamcmd_servers-palworld
+    infraweaver/game: 'true'
+    infraweaver/game-type: steamcmd_servers-palworld
+  name: palworld
+  namespace: game-hub
+spec:
+  selector:
+    matchLabels:
+      app: palworld
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        infraweaver.io/dns-hostname: palworld.games.example.com
+        infraweaver.io/egg-id: steamcmd_servers/palworld
+        infraweaver.io/egg-source: pelican:steamcmd_servers/palworld
+        infraweaver.io/groups: ''
+        infraweaver.io/image-version: debian
+      labels:
+        app: palworld
+        infraweaver.io/egg: steamcmd_servers-palworld
+        infraweaver.io/game: 'true'
+        infraweaver.io/game-type: steamcmd_servers-palworld
+        infraweaver/egg: steamcmd_servers-palworld
+        infraweaver/game: 'true'
+        infraweaver/game-type: steamcmd_servers-palworld
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: SERVER_MEMORY
+          value: '1536'
+        - name: SERVER_IP
+          value: 0.0.0.0
+        - name: SERVER_PORT
+          value: '8211'
+        - name: SRCDS_APPID
+          value: '2394010'
+        - name: AUTO_UPDATE
+          value: '1'
+        - name: MAX_PLAYERS
+          value: '32'
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: game-hub-server-credentials
+              key: palworld-admin-password
+        - name: PUBLIC_IP
+        - name: SERVER_NAME
+          value: A Pterodactyl hosted Palworld Server
+        - name: SERVER_PASSWORD
+        - name: RCON_PORT
+          value: '25575'
+        - name: RCON_ENABLE
+          value: 'True'
+        - name: ENABLE_ENEMY
+          value: 'True'
+        - name: SERVER_DESCRIPTION
+        - name: STARTUP
+          value: ./PalworldServerConfigParser; (while read cmd; do rcon -s -a "localhost:$RCON_PORT" -p
+            "$ADMIN_PASSWORD" "$cmd";done) < /dev/stdin & /home/container/Pal/Binaries/Linux/PalServer-Linux-Shipping
+            Pal -publiclobby -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS -port={{SERVER_PORT}}
+            -publicport={{SERVER_PORT}} -servername="{{SERVER_NAME}}" -players={{MAX_PLAYERS}} $(if [
+            -n "$SERVER_PASSWORD" ]; then echo "-serverpassword=\"${SERVER_PASSWORD}\""; fi) -adminpassword="{{ADMIN_PASSWORD}}"
+            -rcon
+        - name: _IW_STOP_SIGNAL
+          value: '2'
+        - name: _IW_STOP_CMD
+          value: shutdown 15
+        - name: _IW_STOP_STDIN
+          value: '1'
+        image: ghcr.io/parkervcp/steamcmd:debian
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |-
+                # Locate game process once — used by all fallback tiers
+                GPID=""
+                for _P in $(ls /proc 2>/dev/null | grep '^[0-9]'); do
+                  _C=$(cat /proc/$_P/comm 2>/dev/null)
+                  case "$_C" in pause|sh|bash|sleep|init|tini|python3|"") continue;; esac
+                  GPID=$_P; break
+                done
+                # Tier 2: stdin write via shared PID namespace + TTY
+                if [ "${_IW_STOP_STDIN:-0}" = "1" ] && [ -n "$GPID" ]; then
+                  printf '%s\n' "${_IW_STOP_CMD}" >/proc/$GPID/fd/0 2>/dev/null && sleep 15 && exit 0
+                fi
+                # Tier 3: signal fallback
+                kill -${_IW_STOP_SIGNAL:-2} ${GPID:-1} 2>/dev/null || true
+                sleep 5
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - '{ [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || { [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63E7 [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63E7 [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || pgrep -P 1 > /dev/null 2>&1'
+          failureThreshold: 3
+          periodSeconds: 30
+        name: palworld
+        ports:
+        - containerPort: 8211
+          protocol: UDP
+        - containerPort: 25575
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - '{ [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || { [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63E7 [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63E7 [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || pgrep -P 1 > /dev/null 2>&1'
+          failureThreshold: 3
+          periodSeconds: 15
+        resources:
+          limits:
+            cpu: '1'
+            memory: 2Gi
+          requests:
+            cpu: '1'
+            memory: 2Gi
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - '{ [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63DD [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || { [ -r /proc/net/tcp ] && grep -Eiq " [0-9A-F]+:63E7 [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp;
+              } || { [ -r /proc/net/tcp6 ] && grep -Eiq " [0-9A-F]+:63E7 [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp6;
+              } || pgrep -P 1 > /dev/null 2>&1'
+          failureThreshold: 60
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        stdin: true
+        tty: true
+        volumeMounts:
+        - mountPath: /home/container
+          name: data
+      initContainers:
+      - command:
+        - bash
+        - -c
+        - |-
+          #!/bin/sh
+          if [ -f "/mnt/server/.installed" ]; then
+            echo "[install] Already installed — skipping"
+            exit 0
+          fi
+          #!/bin/bash
+          # steamcmd Base Installation Script
+          #
+          # Server Files: /mnt/server
+          # Image to install with is 'ghcr.io/parkervcp/installers:debian'
+
+
+          # Install packages. Default packages below are not required if using our existing install image thus speeding up the install process.
+          #apt -y update
+          #apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates
+
+          ## just in case someone removed the defaults.
+          if [[ "${STEAM_USER}" == "" ]] || [[ "${STEAM_PASS}" == "" ]]; then
+              echo -e "steam user is not set.\n"
+              echo -e "Using anonymous user.\n"
+              STEAM_USER=anonymous
+              STEAM_PASS=""
+              STEAM_AUTH=""
+          else
+              echo -e "user set to ${STEAM_USER}"
+          fi
+
+          ## download and install steamcmd
+          cd /tmp
+          mkdir -p /mnt/server/steamcmd
+          curl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+          tar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd
+          mkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing
+          cd /mnt/server/steamcmd
+
+          # SteamCMD fails otherwise for some reason, even running as root.
+          # This is changed at the end of the install process anyways.
+          chown -R root:root /mnt
+          export HOME=/mnt/server
+
+          ## install game using steamcmd
+          ./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ "${WINDOWS_INSTALL}" == "1" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) +app_update ${SRCDS_APPID} $( [[ -z ${SRCDS_BETAID} ]] || printf %s "-beta ${SRCDS_BETAID}" ) $( [[ -z ${SRCDS_BETAPASS} ]] || printf %s "-betapassword ${SRCDS_BETAPASS}" ) ${INSTALL_FLAGS} validate +quit ## other flags may be needed depending on install. looking at you cs 1.6
+
+          ## set up 32 bit libraries
+          mkdir -p /mnt/server/.steam/sdk32
+          cp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so
+
+          ## set up 64 bit libraries
+          mkdir -p /mnt/server/.steam/sdk64
+          cp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so
+          ## add below your custom commands if needed
+
+          ## copy template config file
+          echo "Copy template config file into config folder!"
+          if [ -f "/mnt/server/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini" ]; then
+              echo "Config file already exitis, backing up and overwriting with a new one"
+              mv /mnt/server/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini /mnt/server/Pal/Saved/Config/LinuxServer/PalWorldSettings_$(date +"%Y%m%d%H%M%S").ini
+              cp /mnt/server/DefaultPalWorldSettings.ini /mnt/server/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini
+          else
+              echo "Creating new config file"
+              mkdir -p /mnt/server/Pal/Saved/Config/LinuxServer
+              cp /mnt/server/DefaultPalWorldSettings.ini /mnt/server/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini
+          fi
+
+          cd /mnt/server
+          # Download self made replace tool
+          echo "Downloading config parser application"
+          curl -sSL -o PalworldServerConfigParser https://raw.githubusercontent.com/parkervcp/eggs/master/game_eggs/steamcmd_servers/palworld/PalworldServerConfigParser-linux-amd64
+          chmod +x PalworldServerConfigParser
+          ## install end
+          echo "-----------------------------------------"
+          echo "Installation completed..."
+          echo "-----------------------------------------"
+          chown -R 1000:1000 "/mnt/server"
+          touch "/mnt/server/.installed"
+          echo "[install] Installation complete"
+        env:
+        - name: SERVER_MEMORY
+          value: '1536'
+        - name: SERVER_IP
+          value: 0.0.0.0
+        - name: SERVER_PORT
+          value: '8211'
+        - name: SRCDS_APPID
+          value: '2394010'
+        - name: AUTO_UPDATE
+          value: '1'
+        - name: MAX_PLAYERS
+          value: '32'
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: game-hub-server-credentials
+              key: palworld-admin-password
+        - name: PUBLIC_IP
+        - name: SERVER_NAME
+          value: A Pterodactyl hosted Palworld Server
+        - name: SERVER_PASSWORD
+        - name: RCON_PORT
+          value: '25575'
+        - name: RCON_ENABLE
+          value: 'True'
+        - name: ENABLE_ENEMY
+          value: 'True'
+        - name: SERVER_DESCRIPTION
+        - name: STARTUP
+          value: ./PalworldServerConfigParser; (while read cmd; do rcon -s -a "localhost:$RCON_PORT" -p
+            "$ADMIN_PASSWORD" "$cmd";done) < /dev/stdin & /home/container/Pal/Binaries/Linux/PalServer-Linux-Shipping
+            Pal -publiclobby -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS -port={{SERVER_PORT}}
+            -publicport={{SERVER_PORT}} -servername="{{SERVER_NAME}}" -players={{MAX_PLAYERS}} $(if [
+            -n "$SERVER_PASSWORD" ]; then echo "-serverpassword=\"${SERVER_PASSWORD}\""; fi) -adminpassword="{{ADMIN_PASSWORD}}"
+            -rcon
+        - name: _IW_STOP_SIGNAL
+          value: '2'
+        - name: _IW_STOP_CMD
+          value: shutdown 15
+        - name: _IW_STOP_STDIN
+          value: '1'
+        image: ghcr.io/parkervcp/installers:debian
+        imagePullPolicy: IfNotPresent
+        name: installer
+        resources:
+          limits:
+            cpu: '2'
+            memory: 2Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        securityContext:
+          runAsGroup: 0
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /mnt/server
+          name: data
+      priorityClassName: game-server
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsUser: 1000
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 120
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            infraweaver/game: 'true'
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: palworld-container
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: palworld.games.example.com
+    external-dns.alpha.kubernetes.io/managed: 'true'
+    external-dns.alpha.kubernetes.io/target: 84.82.69.110
+    external-dns.alpha.kubernetes.io/ttl: '60'
+  labels:
+    app: palworld
+    infraweaver/game: 'true'
+  name: palworld
+  namespace: game-hub
+spec:
+  ports:
+  - name: game
+    nodePort: 32255
+    port: 8211
+    protocol: UDP
+    targetPort: 8211
+  - name: rcon
+    nodePort: 31003
+    port: 25575
+    protocol: TCP
+    targetPort: 25575
+  selector:
+    app: palworld
+  type: NodePort

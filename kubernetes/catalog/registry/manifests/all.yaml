@@ -124,16 +124,6 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       priorityClassName: platform-standard
-      # Keep registry away from onedev to avoid both going down on same node disruption
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 80
-            podAffinityTerm:
-              labelSelector:
-                matchLabels:
-                  app: onedev
-              topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: false
         runAsUser: 0

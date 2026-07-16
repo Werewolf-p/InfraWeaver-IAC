@@ -2,7 +2,6 @@
 # Seed or patch new platform secrets in OpenBao:
 #   - secret/platform/minio-velero   (MinIO credentials for Velero backups)
 #   - secret/platform/discord        (Discord webhook URL for Alertmanager)
-#   - secret/platform/onedev         (OneDev admin password)
 #
 # Usage: seed-openbao-platform.sh <LOCAL_OPENBAO_URL> <ROOT_TOKEN>
 # Example: seed-openbao-platform.sh http://localhost:8200 hvs.xxxxx
@@ -58,22 +57,5 @@ else
   echo "==> Discord webhook already configured — preserving"
 fi
 
-# ── OneDev admin password ─────────────────────────────────────────────────────
-echo "==> Checking secret/platform/onedev..."
-EXISTING_ONEDEV=$(curl -sf "${LOCAL_OPENBAO}/v1/secret/data/platform/onedev" \
-  -H "$BAO_HEADER" 2>/dev/null || echo "")
-
-if [ -z "$EXISTING_ONEDEV" ]; then
-  ONEDEV_PASS=$(openssl rand -base64 24 | tr -d '/+=')
-  curl -s -X POST "${LOCAL_OPENBAO}/v1/secret/data/platform/onedev" \
-    -H "$BAO_HEADER" \
-    -H "Content-Type: application/json" \
-    -d "{\"data\":{\"admin-password\":\"${ONEDEV_PASS}\"}}" > /dev/null
-  echo "==> OneDev admin password created (auto-generated)"
-  echo "    Login at https://onedev.int.${BASE_DOMAIN} with user 'admin' and the generated password"
-  echo "    Retrieve: bao kv get secret/platform/onedev"
-else
-  echo "==> OneDev secret already configured — preserving"
-fi
 
 echo "==> Platform secrets seeding complete"

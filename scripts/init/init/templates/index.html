@@ -1178,7 +1178,7 @@
         </div>
         <div class="form-row">
           <label>NODE_GATEWAY</label>
-          <input type="text" id="NODE_GATEWAY" name="NODE_GATEWAY" placeholder="10.10.0.1" />
+          <input type="text" id="NODE_GATEWAY" name="NODE_GATEWAY" placeholder="10.0.0.1" />
           <div class="field-hint">Default gateway for the Talos node subnet</div>
         </div>
         <div class="form-row">
@@ -1239,7 +1239,7 @@
           <div class="form-grid">
             <div class="form-row">
               <label>METALLB_VIP_RANGE</label>
-              <input type="text" id="METALLB_VIP_RANGE" name="METALLB_VIP_RANGE" placeholder="10.10.0.200-10.10.0.210" />
+              <input type="text" id="METALLB_VIP_RANGE" name="METALLB_VIP_RANGE" placeholder="10.0.0.200-10.0.0.210" />
               <div class="field-hint">Full pool range — must cover all individual VIPs below</div>
             </div>
             <div class="form-row">
@@ -1251,12 +1251,12 @@
           <div class="vip-grid">
             <div class="form-row">
               <label><span id="vdot-METALLB_TRAEFIK_VIP" class="vip-dot">⚪</span> METALLB_TRAEFIK_VIP</label>
-              <input type="text" id="METALLB_TRAEFIK_VIP" name="METALLB_TRAEFIK_VIP" placeholder="10.10.0.200" onblur="pingVip('METALLB_TRAEFIK_VIP')" />
+              <input type="text" id="METALLB_TRAEFIK_VIP" name="METALLB_TRAEFIK_VIP" placeholder="10.0.0.200" onblur="pingVip('METALLB_TRAEFIK_VIP')" />
               <div class="field-hint">Main ingress — all HTTP/S traffic enters here</div>
             </div>
             <div class="form-row">
               <label><span id="vdot-METALLB_COREDNS_VIP" class="vip-dot">⚪</span> METALLB_COREDNS_VIP</label>
-              <input type="text" id="METALLB_COREDNS_VIP" name="METALLB_COREDNS_VIP" placeholder="10.10.0.201" onblur="pingVip('METALLB_COREDNS_VIP')" />
+              <input type="text" id="METALLB_COREDNS_VIP" name="METALLB_COREDNS_VIP" placeholder="10.0.0.201" onblur="pingVip('METALLB_COREDNS_VIP')" />
               <div class="field-hint">Internal DNS — resolves <code>*.int.yourdomain.com</code></div>
             </div>
           </div>
@@ -1926,7 +1926,7 @@ function validateCidrInput(input) {
   const cidrRe = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
   if (!cidrRe.test(val)) {
     input.classList.add('invalid');
-    input.title = 'Invalid CIDR — use format like 10.25.0.0/24';
+    input.title = 'Invalid CIDR — use format like 10.1.0.0/24';
   } else {
     input.classList.remove('invalid');
     input.title = '';

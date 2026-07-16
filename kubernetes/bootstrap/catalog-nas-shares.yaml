@@ -1,0 +1,75 @@
+---
+# catalog-nas-shares — syncs the PersistentVolumes, PersistentVolumeClaims and
+# credential ExternalSecrets that the console's NAS mount flow generates into
+# `kubernetes/catalog/nas-shares/`.
+#
+# Without this Application those manifests are committed to git and never
+# applied, so a "successful" mount in the UI would produce no volume in the
+# cluster. The `catalog` Application next to it is a non-recursive directory
+# source rooted at `kubernetes/catalog`, so it does not pick this subdirectory up.
+#
+# Resources here span namespaces (a PVC per consuming namespace) and include the
+# cluster-scoped PersistentVolumes, so `destination.namespace` is only the
+# fallback for any resource that omits one — every generated resource sets it.
+#
+# `prune: true` is safe and intended: unmounting deletes the PV/PVC manifest, and
+# the PVs carry `persistentVolumeReclaimPolicy: Retain` with no provisioner, so
+# pruning removes the Kubernetes objects and leaves the NAS directory untouched.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-nas-shares
+  namespace: argocd
+  labels:
+    infraweaver.io/type: catalog-app
+    infraweaver.io/component: nas-storage
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/nas-shares
+    directory:
+      recurse: false
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'
+    # A bound PV is stamped by the PV controller; that is not drift.
+    - kind: PersistentVolume
+      jsonPointers:
+        - /status
+      jqPathExpressions:
+        - '.spec.claimRef.uid'
+        - '.spec.claimRef.resourceVersion'
+    - kind: PersistentVolumeClaim
+      jsonPointers:
+        - /status
+      jqPathExpressions:
+        - '.spec.volumeMode'

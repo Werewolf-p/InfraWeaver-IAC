@@ -43,15 +43,44 @@ git -C "$SRC" archive --format=tar HEAD | tar -x -C "$WORK/pub"
 echo "==> stripping IaC + concrete per-cluster config from the export"
 ( cd "$WORK/pub"
   rm -rf terraform ansible envs params
-  rm -f docs/SECURITY-REMEDIATION-RUNBOOK.md .last-params-backup .sops.yaml .env
+  # private-apps/ = private-only development apps; never published to the public mirror.
+  rm -rf private-apps
+  # users.yaml = real people (names, emails, RBAC grants). The console reads/writes it
+  # via the GitHub API from the PRIVATE repo root, so it must stay tracked here — but it
+  # must NEVER reach the public mirror. Strip it structurally (not just via the deny-scan)
+  # and publish users.example.yaml as the forker-facing template instead.
+  rm -f docs/SECURITY-REMEDIATION-RUNBOOK.md .last-params-backup .sops.yaml .env users.yaml
   # concrete prod overlays (real domain/IPs) — keep base/ + overlays/local stays gitignored
   find . -depth -type d -name prod -path '*/overlays/*' -exec rm -rf {} +
   find . -type f \( -name '*.tfvars' -o -name '*.tfstate' -o -name '*.tfstate.*' \
        -o -name '*.key' -o -name '*.pem' \) -delete )
 
+# Genericize residual real identifiers into generic placeholders so base manifests,
+# Helm valueFiles, instance data (game servers, NAS shares), scripts, docs and
+# platform.yaml stay publishable as a forkable TEMPLATE rather than leaking real
+# values or having to be stripped. The map lives in params/.public-genericize
+# (gitignored, never synced) — one `ERE_pattern|replacement` per line ('#' =
+# comment) — paired 1:1 with params/.public-deny. Applied to the EXPORT copy only,
+# never to the private source that ArgoCD deploys, so it can never affect prod;
+# ENVSUBST-rendered manifests already carry ${BASE_DOMAIN}-style tokens, so the subs
+# are a no-op there. If the map is absent the subs are skipped and the fail-closed
+# deny-scan below still aborts on any real value — so this only ever makes the export
+# MORE generic, never leak more.
+GENERICIZE_FILE="$SRC/params/.public-genericize"
+if [[ -f "$GENERICIZE_FILE" ]]; then
+  echo "==> genericizing residual real identifiers for the public template"
+  while IFS='|' read -r pat repl; do
+    [[ -z "$pat" || "$pat" == \#* ]] && continue
+    while IFS= read -r -d '' f; do
+      sed -i -E "s|$pat|$repl|g" "$f"
+    done < <(grep -rIlZ -E "$pat" "$WORK/pub" --exclude-dir=.git 2>/dev/null)
+  done < "$GENERICIZE_FILE"
+fi
+
 # Safety net: refuse to publish if any obviously-sensitive path slipped through.
 if find "$WORK/pub" \( -path '*/terraform/*' -o -path '*/ansible/*' -o -path '*/envs/*' \
-      -o -path '*/overlays/prod/*' -o -name '*.tfvars' -o -name '.sops.yaml' \) \
+      -o -path '*/overlays/prod/*' -o -path '*/private-apps/*' -o -name '*.tfvars' -o -name '.sops.yaml' \
+      -o -name 'users.yaml' \) \
       -not -path '*/.git/*' | grep -q .; then
   echo "✖ ABORT: excluded content present in sanitized tree — not pushing." >&2
   find "$WORK/pub" \( -path '*/terraform/*' -o -path '*/overlays/prod/*' \) -not -path '*/.git/*' | head >&2
@@ -78,6 +107,17 @@ if [[ -f "$DENY_FILE" ]]; then
 fi
 if grep -rIlE '^[[:space:]]*-----BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----' "$WORK/pub" --exclude-dir=.git >/dev/null 2>&1; then
   echo "✖ ABORT: private key material present in sanitized tree — not pushing." >&2
+  deny_hit=1
+fi
+# IWSL signer custody net (fail-closed): the interim IW keypair
+# (infraweaver-iwsl-iw-keys) is base64url, NOT PEM-armored, so the guard above
+# can't see it. Its secret halves (ed25519Sk / slhdsaSk) live only in ansible/
+# (stripped above) and in a runtime k8s Secret — never in tracked source. Refuse
+# to publish if a secret-half field is immediately followed by a real b64url key
+# literal (>=40 chars). Public halves (ed25519Pk / slhdsaPk) and the source-code
+# field references (`ed25519Sk: toB64u(...)`) are safe and do NOT match.
+if grep -rIlE '(ed25519|slhdsa)Sk["'\'']?[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9_-]{40,}' "$WORK/pub" --exclude-dir=.git >/dev/null 2>&1; then
+  echo "✖ ABORT: IWSL signer secret-key material present in sanitized tree — not pushing." >&2
   deny_hit=1
 fi
 [[ "$deny_hit" == 1 ]] && exit 1

@@ -1,0 +1,144 @@
+---
+# media-notify — the bridge that lets a Nextcloud upload show up in Jellyfin.
+#
+# Why this exists at all
+# ---------------------
+# Jellyfin and Nextcloud mount the *same* NAS directory over SMB, but as two
+# independent clients (`iw-truenas-ro` and `iw-truenas-rw`, two superblocks).
+# The Linux cifs client raises no inotify event for a change made by a different
+# SMB client, so Jellyfin's own "real time monitoring" can never see a file that
+# Nextcloud wrote. That library therefore has `EnableRealtimeMonitor: false` and
+# is refreshed by `POST /Library/Media/Updated` instead.
+#
+# Only writes made through *this pod's* mount raise inotify events, which is the
+# whole reason the watcher is a sidecar next to Nextcloud rather than next to
+# Jellyfin, and the reason a polling CronJob is not used.
+#
+# Bootstrap requirement: Jellyfin must have scanned the library directory once
+# while it was non-empty. Until then no item exists for that path, and a pushed
+# path resolves to no item and is silently dropped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-media-notify
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: media-notify
+data:
+  watch.sh: |
+    #!/bin/sh
+    # POSIX sh, busybox applets only (inotifyd + wget). No package installs.
+    set -eu
+
+    # $JELLYFIN_API_KEY is referenced unbraced below: this file is rendered by the
+    # envsubst CMP, whose fail-closed guard rejects any surviving ${...KEY} token.
+    WATCH_DIR="${WATCH_DIR:-/mnt/nas-media}"
+    JELLYFIN_URL="${JELLYFIN_URL:?JELLYFIN_URL is required}"
+    JELLYFIN_API_KEY="${JELLYFIN_API_KEY:?JELLYFIN_API_KEY is required}"
+    JELLYFIN_LIBRARY_PATH="${JELLYFIN_LIBRARY_PATH:-/data}"
+    # Seconds of quiet before a burst of writes is reported as one refresh.
+    QUIET_SECONDS="${QUIET_SECONDS:-2}"
+
+    FIFO=/tmp/media-notify.events
+    DIRS_NOW=/tmp/media-notify.dirs
+    DIRS_NEXT=/tmp/media-notify.dirs.next
+
+    log() { echo "[media-notify] $*"; }
+
+    # Report the library root, never the changed file.
+    #
+    # inotifyd prints "<mask> <watched-dir> <filename>" space-separated, so a name
+    # containing a space cannot be recovered unambiguously. Jellyfin resolves a
+    # reported path to its nearest known item and revalidates that subtree, so the
+    # library root covers every file beneath it, including nested ones. It is also
+    # a constant from the environment, which keeps user-chosen filenames out of the
+    # JSON body entirely.
+    notify() {
+      body="{\"Updates\":[{\"Path\":\"${JELLYFIN_LIBRARY_PATH}\",\"UpdateType\":\"Modified\"}]}"
+      if wget -q -O /dev/null --timeout=10 \
+          --header='Content-Type: application/json' \
+          --header="X-Emby-Token: $JELLYFIN_API_KEY" \
+          --post-data="${body}" \
+          "${JELLYFIN_URL}/Library/Media/Updated"; then
+        log "reported ${JELLYFIN_LIBRARY_PATH} to jellyfin"
+      else
+        # Never exit on a failed notification: this sidecar shares a pod with
+        # Nextcloud, and a crashlooping container would drop Nextcloud out of its
+        # Service endpoints.
+        log "WARN jellyfin unreachable; dropped a refresh"
+      fi
+    }
+
+    rm -f "$FIFO"
+    mkfifo "$FIFO"
+    find "$WATCH_DIR" -type d > "$DIRS_NOW" 2>/dev/null || : > "$DIRS_NOW"
+
+    while :; do
+      # inotifyd watches one directory at a time, so arm one watch per subdirectory.
+      #   n = subfile created    w = writable subfile closed
+      #   M = subfile moved in   D = subfile moved out
+      #   d = subfile deleted
+      #
+      # Reading the list from a file (redirect, not a pipe) keeps `set --` in this
+      # shell and survives directory names containing spaces.
+      set --
+      while IFS= read -r d; do
+        set -- "$@" "${d}:nwMDd"
+      done < "$DIRS_NOW"
+      [ "$#" -gt 0 ] || set -- "${WATCH_DIR}:nwMDd"
+      log "watching $# directory(ies) under ${WATCH_DIR}"
+
+      inotifyd - "$@" > "$FIFO" &
+      watcher=$!
+
+      exec 3< "$FIFO"
+      pending=0
+      recheck=0
+      while :; do
+        if read -r -t "$QUIET_SECONDS" mask _rest <&3; then
+          # `w` (closed after write) and `M` (renamed into place) are the only
+          # masks that guarantee a complete file. Nextcloud streams an upload into
+          # a `.part` sibling and renames it, so `M` is its completion event.
+          # Reporting on bare `n` (created) could index a half-written file.
+          # `d`/`D` (removed, moved out) refresh too, so a deletion in Nextcloud
+          # retires the Jellyfin item instead of leaving it pointing at nothing.
+          case "$mask" in
+            *w*|*M*|*D*|*d*) pending=1 ;;
+          esac
+          # A directory may have appeared or vanished; confirm once we go quiet
+          # rather than walking the tree on every single file event.
+          case "$mask" in
+            *n*|*d*) recheck=1 ;;
+          esac
+          continue
+        fi
+
+        # read failed: either QUIET_SECONDS elapsed with no event, or inotifyd died.
+        if [ "$pending" -eq 1 ]; then
+          notify
+          pending=0
+        fi
+
+        if ! kill -0 "$watcher" 2>/dev/null; then
+          log "inotifyd exited"
+          break
+        fi
+
+        if [ "$recheck" -eq 1 ]; then
+          recheck=0
+          find "$WATCH_DIR" -type d > "$DIRS_NEXT" 2>/dev/null || : > "$DIRS_NEXT"
+          if ! cmp -s "$DIRS_NOW" "$DIRS_NEXT"; then
+            mv "$DIRS_NEXT" "$DIRS_NOW"
+            log "directory set changed; re-arming watches"
+            break
+          fi
+        fi
+      done
+      exec 3<&-
+
+      kill "$watcher" 2>/dev/null || true
+      wait "$watcher" 2>/dev/null || true
+      find "$WATCH_DIR" -type d > "$DIRS_NOW" 2>/dev/null || : > "$DIRS_NOW"
+      sleep 1
+    done

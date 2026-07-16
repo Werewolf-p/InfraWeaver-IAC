@@ -85,21 +85,6 @@ spec:
               value: "${GITHUB_REPO}"
             - name: GIT_PROVIDER
               value: github
-            - name: ONEDEV_URL
-              value: "http://onedev.onedev.svc.cluster.local"
-            - name: ONEDEV_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: infraweaver-console-secret
-                  key: onedev-token
-            - name: ONEDEV_PROJECT_ID
-              value: "1"
-            - name: ONEDEV_PROJECT_PATH
-              value: "InfraWeaver-platform"
-            - name: ONEDEV_BRANCH
-              value: main
-            - name: ONEDEV_USERNAME
-              value: infraweaver
             - name: GIT_WORKTREE_ROOT
               value: /git-cache
             - name: CONSOLE_API_SECRET

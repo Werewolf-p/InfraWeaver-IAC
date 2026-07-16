@@ -1,0 +1,41 @@
+# Kyverno PolicyException: the console and API pods legitimately mount their
+# ServiceAccount token — the console calls the in-cluster Kubernetes API for
+# nearly every feature (see deployment.yaml: automountServiceAccountToken MUST
+# stay true; setting it false makes the whole UI show "unknown"), and the API
+# backend is the cluster controller. The warn-automount-service-account-token
+# policy therefore fires a false positive on them. Scope the exemption tightly
+# to these two workloads by label so the policy keeps protecting every other
+# catalog-app pod.
+apiVersion: kyverno.io/v2
+kind: PolicyException
+metadata:
+  name: infraweaver-console-automount-token
+  namespace: infraweaver-console
+spec:
+  exceptions:
+    - policyName: warn-automount-service-account-token
+      # The base rule matches Pods; Kyverno also AUTOGENs a controller-level
+      # variant (autogen-check-...) that validates /spec/template/spec on the
+      # Deployment + ReplicaSet. Exempting only the Pod rule left the autogen
+      # variant firing PolicyViolation events on the Deployments/ReplicaSets, so
+      # list both rule names here.
+      ruleNames:
+        - check-automount-serviceaccount-token
+        - autogen-check-automount-serviceaccount-token
+  match:
+    any:
+      - resources:
+          # Pod for the base rule; Deployment + ReplicaSet for the autogen rule.
+          kinds:
+            - Pod
+            - Deployment
+            - ReplicaSet
+          namespaces:
+            - infraweaver-console
+          selector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - infraweaver-console
+                  - infraweaver-api

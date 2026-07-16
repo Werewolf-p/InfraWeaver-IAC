@@ -4,7 +4,7 @@
 #
 # WHEN TO RUN:
 #   After a full cluster redeploy (new cluster, wiped nodes), BEFORE deploying
-#   apps. This ensures stateful apps (OneDev, Vaultwarden, n8n, wiki, etc.)
+#   apps. This ensures stateful apps (Vaultwarden, n8n, wiki, etc.)
 #   start with their previous data instead of blank volumes.
 #
 # WHAT IT DOES:
@@ -19,7 +19,7 @@
 #   bash scripts/restore-from-truenas.sh
 #
 #   # Restore only specific volumes:
-#   bash scripts/restore-from-truenas.sh --volumes "onedev-data,vaultwarden-data"
+#   bash scripts/restore-from-truenas.sh --volumes "n8n-data,vaultwarden-data"
 #
 #   # Dry run (list available backups, don't restore):
 #   bash scripts/restore-from-truenas.sh --dry-run
@@ -53,7 +53,6 @@ done
 # ── All volumes annotated for truenas-backup ──────────────────────────────────
 # Update this list when adding new persistent apps.
 ALL_VOLUMES=(
-  "onedev-data"
   "vaultwarden-data"
   "n8n-data"
   "minio-velero-data"
@@ -229,5 +228,5 @@ else
 fi
 echo ""
 info "Next step: trigger ArgoCD sync for apps — they will bind to restored PVCs"
-info "  argocd app sync catalog-onedev-manifests catalog-vaultwarden-manifests catalog-n8n-manifests"
+info "  argocd app sync catalog-vaultwarden-manifests catalog-n8n-manifests"
 echo ""

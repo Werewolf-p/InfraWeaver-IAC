@@ -53,6 +53,11 @@ metadata:
   labels:
     app.kubernetes.io/name: node-notready-remediator
     infraweaver.io/automation: self-healing
+  annotations:
+    # Hygiene automation fires on a short cycle; while its Job is active the
+    # CronJob health Lua reports Progressing, flapping the owning app (and
+    # bootstrap) every run. Exclude these from app health aggregation.
+    argocd.argoproj.io/ignore-healthcheck: "true"
 spec:
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
@@ -212,6 +217,11 @@ metadata:
   labels:
     app.kubernetes.io/name: node-memory-rebalancer
     infraweaver.io/automation: self-healing
+  annotations:
+    # Hygiene automation fires on a short cycle; while its Job is active the
+    # CronJob health Lua reports Progressing, flapping the owning app (and
+    # bootstrap) every run. Exclude these from app health aggregation.
+    argocd.argoproj.io/ignore-healthcheck: "true"
 spec:
   schedule: "*/10 * * * *"
   concurrencyPolicy: Forbid

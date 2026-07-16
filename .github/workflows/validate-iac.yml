@@ -9,6 +9,7 @@ on:
     paths:
       - "kubernetes/**"
       - "scripts/validate-iac.sh"
+      - "scripts/validate-netpol-ports.sh"
       - ".github/workflows/validate-iac.yml"
   push:
     branches: [main]
@@ -36,6 +37,12 @@ jobs:
 
       - name: Validate IaC (render + schema + secret-leak gate)
         run: bash scripts/validate-iac.sh
+
+      - name: Install PyYAML (NetworkPolicy gate parses manifests)
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Validate NetworkPolicy ports (pod-port vs Service-port gate)
+        run: bash scripts/validate-netpol-ports.sh
 
       - name: Validate ESO references
         run: bash scripts/validate-eso-refs.sh || true   # informational until hardened

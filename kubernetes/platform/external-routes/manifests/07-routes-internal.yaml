@@ -1,0 +1,25 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: truenas
+  namespace: traefik
+  labels:
+    infraweaver.io/access-tier: internal
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`truenas.int.example.com`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: forward-auth
+          namespace: traefik
+      services:
+        - name: bm-truenas
+          namespace: traefik
+          port: 80
+  tls:
+    secretName: platform-int-wildcard-tls

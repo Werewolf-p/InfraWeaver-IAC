@@ -1,0 +1,76 @@
+---
+# Self-healing library bootstrap. Runs every 30 min and idempotently ensures the
+# "Media" library on /data exists, so a Jellyfin reinstall (which wipes its DB
+# and thus all libraries) recovers on its own instead of showing users
+# "Ask an administrator to create a library". No-op when the library is present.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jellyfin-library-bootstrap
+  namespace: jellyfin
+  labels:
+    app.kubernetes.io/name: jellyfin
+    app.kubernetes.io/component: library-bootstrap
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: jellyfin
+            app.kubernetes.io/component: library-bootstrap
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: ensure-library
+              image: curlimages/curl:8.10.1
+              command: ["/bin/sh", "/scripts/ensure-library.sh"]
+              env:
+                - name: JELLYFIN_URL
+                  value: http://jellyfin.jellyfin.svc.cluster.local:8096
+                - name: LIBRARY_NAME
+                  value: Media
+                - name: LIBRARY_PATH
+                  value: /data
+                - name: LIBRARY_TYPE
+                  value: movies
+                - name: JELLYFIN_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: jellyfin-bootstrap-credentials
+                      key: api-key
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: jellyfin-library-bootstrap

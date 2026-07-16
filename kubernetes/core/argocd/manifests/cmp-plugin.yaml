@@ -6,8 +6,12 @@
 # Renders each app (kustomize build if a kustomization.yaml is present, else the
 # raw YAML), runs envsubst over ONLY the allowlisted config vars ($ALLOWED_VARS,
 # injected from argocd-cmp-substitutions), then fails the sync closed if any
-# secret-class ${TOKEN} survived — so a secret can never be sourced from a plain
-# ConfigMap nor leak as a literal placeholder.
+# secret-class placeholder (a TOKEN / PASSWORD / SECRET / KEY / LOGIN / CREDENTIAL
+# style name) survived — so a secret can never be sourced from a plain ConfigMap
+# nor leak as a literal placeholder.
+# NOTE: the examples above are named without the dollar-brace syntax on purpose —
+# the fail-closed scan greps raw rendered text, so a literal example here would
+# trip the plugin's own guard.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -34,7 +38,11 @@ data:
             if [ -f kustomization.yaml ]; then
               RENDER="$(kustomize build --enable-helm .)"
             else
-              RENDER="$(find . -name '*.yaml' -type f | sort | xargs cat)"
+              # Emit an explicit '---' before every file so multi-doc concatenation
+              # is always valid even when individual files don't start with '---'
+              # (otherwise a file's first doc merges into the previous file's last
+              # doc and gets silently dropped — which can prune live resources).
+              RENDER="$(find . -name '*.yaml' -type f | sort | while IFS= read -r _f; do printf '\n---\n'; cat "$_f"; done)"
             fi
             OUT="$(printf '%s' "$RENDER" | envsubst "$ALLOWED_VARS")"
             if printf '%s' "$OUT" | grep -Eq '\$\{[A-Za-z0-9_]*(PASSWORD|TOKEN|SECRET|KEY|LOGIN|CREDENTIAL)[A-Za-z0-9_]*\}'; then

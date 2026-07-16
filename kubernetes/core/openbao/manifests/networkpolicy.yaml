@@ -40,6 +40,31 @@ spec:
           port: 8200
 
 ---
+# ── Allow self-service apps to reach the OpenBao API for kubernetes auth ──────
+# Any namespace labelled openbao-access=true may reach :8200 to log in with its
+# ServiceAccount and read/write ONLY its own bucket (enforced server-side by the
+# app-self-secrets templated policy). Reusable: label a namespace to opt in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-self-service-apps-ingress
+  namespace: openbao
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              openbao-access: "true"
+      ports:
+        - protocol: TCP
+          port: 8200
+
+---
 # ── Allow Traefik to route to OpenBao UI ─────────────────────────────────────
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

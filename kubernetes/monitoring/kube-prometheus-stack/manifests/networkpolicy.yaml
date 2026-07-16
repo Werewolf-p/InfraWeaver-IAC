@@ -98,3 +98,30 @@ spec:
   ingress:
     - from:
         - podSelector: {}   # all pods within monitoring namespace
+
+---
+# ── Allow the console's firewall UI to query Prometheus ───────────────────────
+# /api/network/blocked-flows reads hubble_drop_total; the egress side is opened
+# in the console namespace (catalog/infraweaver-console/base/networkpolicy.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-console-to-prometheus
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infraweaver-console
+          podSelector:
+            matchLabels:
+              app: infraweaver-console
+      ports:
+        - protocol: TCP
+          port: 9090

@@ -161,18 +161,6 @@ metadata:
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
 ---
-# ── Source control: privileged (CI agent needs Docker socket for image builds) ─
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: onedev
-  labels:
-    pod-security.kubernetes.io/enforce: privileged
-    pod-security.kubernetes.io/audit: privileged
-    pod-security.kubernetes.io/warn: privileged
-    app.kubernetes.io/name: onedev
-    infraweaver.io/type: catalog-app
----
 # ── Image registry (Zot): baseline ───────────────────────────────────────────
 apiVersion: v1
 kind: Namespace

@@ -14,7 +14,15 @@ spec:
     - Ingress
 
 ---
-# ── Allow Traefik to reach Authentik server (HTTP port 80) ───────────────────
+# ── Allow Traefik to reach Authentik server ──────────────────────────────────
+# NetworkPolicy ports match the DESTINATION POD port (after Service translation),
+# NOT the Service port. The authentik-server container listens on 9000 (http) and
+# 9443 (https) — the Service maps 80→9000 and 443→9443. So the front-channel
+# (auth.example.com → Traefik → authentik-server) must allow pod ports 9000/9443,
+# not 80. This was inert under flannel; once Cilium began enforcing it, allowing
+# port 80 (nothing listens there) silently dropped every Traefik→authentik flow and
+# broke all SSO front-channel logins. (Backchannel WP→authentik already correctly
+# allows 9000/9443 in core/network-policies/.../wordpress-oidc-backchannel.yaml.)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -33,9 +41,47 @@ spec:
               kubernetes.io/metadata.name: traefik
       ports:
         - protocol: TCP
-          port: 80
+          port: 9000   # Authentik http (Service 80 → pod 9000)
+        - protocol: TCP
+          port: 9443   # Authentik https (Service 443 → pod 9443)
         - protocol: TCP
           port: 9300   # Authentik metrics port
+
+---
+# ── Allow InfraWeaver console → Authentik server API ─────────────────────────
+# The console's WordPress SSO reconcile (ensureSsoGate) calls the Authentik REST
+# API server-side to create the proxy/OIDC providers, application, and — crucially
+# — bind the proxy provider onto the embedded outpost. AUTHENTIK_URL points the
+# client at http://authentik-server.authentik.svc (Service 80 → pod 9000). Without
+# this allow, authentik's default-deny-ingress silently dropped every console call,
+# so ensureSsoGate timed out ("Authentik request timed out after 10000ms"), the
+# provider was never registered on the outpost, and every protected WordPress host
+# returned 404 on /outpost.goauthentik.io/auth/traefik. Same pod-port convention as
+# allow-traefik-ingress / allow-wordpress-oidc-ingress (9000 http, 9443 https).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-console-sso-ingress
+  namespace: authentik
+  labels:
+    app.kubernetes.io/managed-by: gitops
+    infraweaver.io/purpose: console-sso-reconcile
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infraweaver-console
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9443
 
 ---
 # ── Allow Prometheus to scrape Authentik metrics ─────────────────────────────

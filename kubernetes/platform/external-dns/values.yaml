@@ -32,14 +32,22 @@ env:
         name: cloudflare-api-token
         key: CF_API_TOKEN
 
-# Manage ALL ${BASE_DOMAIN} subdomains (both public and int)
+# Manage ALL example.com subdomains (both public and int).
+# HARDCODED (not ${BASE_DOMAIN}) on purpose: external-dns is a Helm chart app, and
+# Helm valueFiles bypass the ArgoCD envsubst CMP, so a ${PLACEHOLDER} here reaches the
+# container LITERALLY (DomainFilter:[${BASE_DOMAIN}]). A literal filter matches nothing,
+# so external-dns silently dropped every NEW record (games showed NXDOMAIN; old records
+# survived only because policy=upsert-only never deletes). Same class/fix as the openbao
+# ${BASE_DOMAIN} Helm-values gotcha. Revisit if the Helm value pipeline learns envsubst.
 domainFilters:
-  - "${BASE_DOMAIN}"
+  - "example.com"
 
-# Default target for services without explicit target annotation
-# (used for .int services if they opt-in to managed DNS)
+# Default target for services without explicit target annotation.
+# HARDCODED for the same Helm-bypasses-CMP reason as domainFilters above — a literal
+# ${PUBLIC_INGRESS_IP} made external-dns log "ignoring default targets [${PUBLIC_INGRESS_IP}]".
+# 84.82.69.110 is the public ingress IP (matches the live auth/console IngressRoute targets).
 extraArgs:
-  - --default-targets=${PUBLIC_INGRESS_IP}
+  - --default-targets=84.82.69.110
   - --annotation-filter=external-dns.alpha.kubernetes.io/managed in (true)
 
 # upsert-only: create/update records but NEVER delete them

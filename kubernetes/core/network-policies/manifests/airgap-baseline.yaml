@@ -1,0 +1,141 @@
+# THE VOID — default-deny airgap baseline, one block per application namespace.
+# Each makes the namespace deny-all except: intra-namespace, cluster DNS, the
+# Kubernetes API, Traefik ingress, and monitoring scrape. Outbound internet is
+# blocked; specific holes live in allowlists.yaml.
+#
+# Mirrors what is LIVE on the cluster. To airgap a new namespace, copy a block
+# (or ../_TEMPLATE.yaml) and change the two namespace references.
+# anchors keep this DRY and readable.
+---
+# Reusable rule sets (YAML anchors) — defined once, referenced per namespace below.
+# (Comment-only; the blocks below are fully expanded so each is independently auditable.)
+
+# ─────────────────────────────── tradesphere ───────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: tradesphere, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": tradesphere}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": tradesphere}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── private-test ──────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: private-test, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": private-test}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": private-test}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── build ─────────────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: build, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": build}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": build}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── infraweaver-system ────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: infraweaver-system, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-system}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-system}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── infraweaver ───────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: infraweaver, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── n8n-prod ──────────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: n8n-prod, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": n8n-prod}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": n8n-prod}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── game-hub ──────────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: game-hub, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-hub}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-hub}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]
+---
+# ─────────── game-servers ─────────── (NOTE: game servers also need direct
+# UDP/TCP from the internet for players — add those ports to allowlists.yaml
+# when game pods are deployed; this baseline currently only opens Traefik ingress.)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: game-servers, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-servers}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-servers}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEntities: [kube-apiserver]

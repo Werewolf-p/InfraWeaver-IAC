@@ -4,6 +4,7 @@ kind: Kustomization
 # Tunable params (image tag, scaling) live in overlays/prod/kustomization.yaml.
 resources:
   - deployment.yaml
+  - externalsecret-ghcr.yaml
   - rbac.yaml
   - secret-template.yaml
   - serviceaccount.yaml

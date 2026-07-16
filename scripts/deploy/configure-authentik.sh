@@ -67,7 +67,11 @@ echo "==> Setting user group memberships..."
 _GROUPS_PY="aW1wb3J0IHlhbWwKZnJvbSBhdXRoZW50aWsuY29yZS5tb2RlbHMgaW1wb3J0IFVzZXIsIEdyb3VwCgp3aXRoIG9wZW4oJy90bXAvdXNlcnMueWFtbCcsICdyJykgYXMgZjoKICAgIHVzZXJzX2RhdGEgPSB5YW1sLnNhZmVfbG9hZChmKQoKZm9yIHVzZXJuYW1lLCB1c2VyX2NmZyBpbiB1c2Vyc19kYXRhLmdldCgndXNlcnMnLCB7fSkuaXRlbXMoKToKICAgIHRyeToKICAgICAgICB1c2VyID0gVXNlci5vYmplY3RzLmdldCh1c2VybmFtZT11c2VybmFtZSkKICAgIGV4Y2VwdCBVc2VyLkRvZXNOb3RFeGlzdDoKICAgICAgICBwcmludCgnV0FSTjogVXNlciAnICsgdXNlcm5hbWUgKyAnIG5vdCBmb3VuZCwgc2tpcHBpbmcnKQogICAgICAgIGNvbnRpbnVlCgogICAgZ3JvdXBzID0gdXNlcl9jZmcuZ2V0KCdhdXRoZW50aWtfZ3JvdXBzJywgW10pCiAgICBmb3IgZ3JvdXBfbmFtZSBpbiBncm91cHM6CiAgICAgICAgZ3JwLCBfID0gR3JvdXAub2JqZWN0cy5nZXRfb3JfY3JlYXRlKG5hbWU9Z3JvdXBfbmFtZSkKICAgICAgICBncnAudXNlcnMuYWRkKHVzZXIpCiAgICAgICAgcHJpbnQoJ09LOiBBZGRlZCAnICsgdXNlcm5hbWUgKyAnIHRvICcgKyBncm91cF9uYW1lKQoKICAgIGlmICdhdXRoZW50aWsgQWRtaW5zJyBpbiBncm91cHM6CiAgICAgICAgdXNlci5pc19zdXBlcnVzZXIgPSBUcnVlCiAgICAgICAgdXNlci5zYXZlKCkKICAgICAgICBwcmludCgnT0s6IFNldCAnICsgdXNlcm5hbWUgKyAnIGFzIHN1cGVydXNlcicpCg=="
 # Two fast atomic execs using deploy/ target — avoids stale pod name issue.
 # deploy/authentik-worker resolves to the current live pod each time.
-cat users.yaml | $KT exec -i -n authentik deploy/authentik-worker -c worker -- sh -c 'cat > /tmp/users.yaml'
+# users.yaml carries ${ADMIN_USERNAME}/${ADMIN_NAME}/${ADMIN_EMAIL} placeholders for
+# the owner entry. Substitute them first — otherwise the group-sync looks up a user
+# literally named "${ADMIN_USERNAME}", skips the owner, and never adds them to
+# platform-admins (so the console grants no admin role and shows no active cluster).
+envsubst '${ADMIN_USERNAME} ${ADMIN_NAME} ${ADMIN_EMAIL}' < users.yaml | $KT exec -i -n authentik deploy/authentik-worker -c worker -- sh -c 'cat > /tmp/users.yaml'
 echo "$_GROUPS_PY" | base64 -d | \
   $KT exec -i -n authentik deploy/authentik-worker -c worker -- \
   sh -c 'cat > /tmp/ak_groups.py && ak shell < /tmp/ak_groups.py' 2>&1 | tail -10
@@ -92,54 +96,69 @@ $KT port-forward svc/authentik-server -n authentik 8089:80 > /tmp/authentik-pf-s
 SETUP_PF_PID=$!
 sleep 4
 
-if [ -n "$AUTHENTIK_ADMIN_TOKEN" ]; then
-  # Generate recovery links for ADMIN users only — these go in the admin deploy email.
-  # Non-admin users get their own welcome email via the next step.
-  # Base64-encoded Python avoids YAML column-0 parsing issues in block scalars.
-  _ADMIN_USERS_PY="aW1wb3J0IHlhbWwKdXNlcnMgPSB5YW1sLnNhZmVfbG9hZChvcGVuKCJ1c2Vycy55YW1sIikpWyJ1c2VycyJdCmZvciB1LCBkIGluIHVzZXJzLml0ZW1zKCk6CiAgICBpZiBkLmdldCgiYWNjZXNzX2xldmVsIikgPT0gImFkbWluIiBhbmQgZC5nZXQoInNlbmRfcmVjb3ZlcnlfZW1haWwiKToKICAgICAgICBwcmludCh1KQo="
-  for USERNAME in $(echo "$_ADMIN_USERS_PY" | base64 -d | python3); do
-    USER_ID=$(curl -sf \
-      -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      -H "Content-Type: application/json" \
-      "http://localhost:8089/api/v3/core/users/?username=${USERNAME}" \
-      2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-    if [ -n "$USER_ID" ]; then
-      RECOVERY=$(curl -sf -X POST \
-        -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-        -H "Content-Type: application/json" \
-        "http://localhost:8089/api/v3/core/users/$USER_ID/recovery/" \
-        2>/dev/null || echo "")
-      if [ -n "$RECOVERY" ]; then
-        LINK=$(echo "$RECOVERY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('link',''))" 2>/dev/null || echo "")
-        LINK=$(echo "$LINK" | sed "s|http://localhost:8089|https://auth.${BASE_DOMAIN}|g")
-        ENV_VAR="AUTHENTIK_$(echo "$USERNAME" | tr '[:lower:]' '[:upper:]')_RECOVERY_LINK"
-        echo "${ENV_VAR}=${LINK}" >> "${GITHUB_ENV:-/dev/null}"
-        # Also persist to temp file for local deploys
-        if [ -n "${IW_AUTH_ENV_FILE:-}" ]; then
-          printf 'export %s=%q\n' "$ENV_VAR" "$LINK" >> "$IW_AUTH_ENV_FILE"
-        fi
-        # Mark deploy-time recovery tokens as non-expiring so the user can log in
-        # at their own pace. Normal user-initiated recovery tokens keep the default timeout.
-        _FLOW_TOKEN=$(echo "$LINK" | python3 -c \
-          "import sys; u=sys.stdin.read().strip(); print(u.split('flow_token=')[-1] if 'flow_token=' in u else '')" \
-          2>/dev/null || echo "")
-        if [ -n "$_FLOW_TOKEN" ]; then
-          printf 'from authentik.flows.models import FlowToken\nt = FlowToken.objects.filter(key="%s").first()\nif t: t.expiring = False; t.save(); print("non-expiring: " + t.identifier)\n' \
-            "$_FLOW_TOKEN" | \
-            $KT exec -i -n authentik deploy/authentik-worker -c worker -- \
-            sh -c 'cat > /tmp/ak_noexp.py && ak shell < /tmp/ak_noexp.py' 2>/dev/null | grep "non-expiring" || true
-        fi
-        echo "✅ Recovery link generated for ${USERNAME} (non-expiring)"
-      else
-        echo "⚠️ Recovery link request failed for ${USERNAME} (non-critical)"
-      fi
-    else
-      echo "⚠️ Could not find user ${USERNAME} in Authentik (non-critical)"
-    fi
-  done
-else
-  echo "⚠️ Could not get Authentik admin token for recovery links (non-critical)"
-fi
+# Generate NON-EXPIRING recovery / password-set links for ADMIN users. DYNAMIC:
+# covers every users.yaml entry with access_level: admin + send_recovery_email
+# (not hardcoded to any one owner). Non-admin users get their own welcome email.
+#
+# Done entirely via `ak shell` — NO /recovery/ API call and NO dependency on the
+# port-forward/admin API token, all of which were failure points that previously
+# left "⚠ Recovery link unavailable — log in as akadmin" in the deploy email.
+# Each link is backed by a Token(intent=RECOVERY, expiring=False) → it NEVER
+# expires, so the owner can set their password from the welcome email at any time.
+# Base64-encoded Python avoids YAML column-0 parsing issues in block scalars.
+_ADMIN_USERS_PY="aW1wb3J0IHlhbWwKdXNlcnMgPSB5YW1sLnNhZmVfbG9hZChvcGVuKCJ1c2Vycy55YW1sIikpWyJ1c2VycyJdCmZvciB1LCBkIGluIHVzZXJzLml0ZW1zKCk6CiAgICBpZiBkLmdldCgiYWNjZXNzX2xldmVsIikgPT0gImFkbWluIiBhbmQgZC5nZXQoInNlbmRfcmVjb3ZlcnlfZW1haWwiKToKICAgICAgICBwcmludCh1KQo="
+_ADMIN_USERS_B64=$(echo "$_ADMIN_USERS_PY" | base64 -d | python3 -c \
+  "import sys,json,base64; print(base64.b64encode(json.dumps([l.strip() for l in sys.stdin if l.strip()]).encode()).decode())" 2>/dev/null || echo "")
+_RECOVERY_OUT=$(cat <<PYEOF | $KT exec -i -n authentik deploy/authentik-worker -c worker -- sh -c 'cat > /tmp/ak_recovery.py && ak shell < /tmp/ak_recovery.py' 2>/dev/null || echo ""
+import base64, json
+from importlib import import_module
+from django.conf import settings
+from django.test import RequestFactory
+from django.contrib.auth.models import AnonymousUser
+from authentik.core.models import User
+from authentik.brands.models import Brand
+from authentik.flows.models import Flow, FlowDesignation, FlowToken
+from authentik.flows.planner import FlowPlanner, PLAN_CONTEXT_PENDING_USER
+from authentik.stages.email.flow import pickle_flow_token_for_email
+flow, _ = Flow.objects.get_or_create(slug="default-recovery-flow", defaults={"name": "Default Recovery Flow", "title": "Account Recovery", "designation": FlowDesignation.RECOVERY})
+for brand in Brand.objects.all():
+    if not brand.flow_recovery:
+        brand.flow_recovery = flow
+        brand.save()
+for username in (json.loads(base64.b64decode("${_ADMIN_USERS_B64}").decode()) if "${_ADMIN_USERS_B64}" else []):
+    u = User.objects.filter(username=username).first()
+    if not u:
+        continue
+    # Build a real FlowPlan with the pending user baked in (same mechanism as the
+    # /api/v3/core/users/{id}/recovery/ endpoint) and persist it as a NON-EXPIRING
+    # FlowToken. A bare Token(intent=RECOVERY) does NOT inject the pending user, so
+    # the final UserWriteStage fails with "No user found" — hence FlowToken here.
+    req = RequestFactory().get("/")
+    req.session = import_module(settings.SESSION_ENGINE).SessionStore()
+    req.user = AnonymousUser()
+    planner = FlowPlanner(flow)
+    planner.allow_empty_flows = True
+    plan = planner.plan(req, {PLAN_CONTEXT_PENDING_USER: u})
+    ident = "welcome-recovery-" + username
+    FlowToken.objects.filter(identifier=ident).delete()
+    # pickle_flow_token_for_email inserts the anti-scanner consent stage AND keeps
+    # the pending user across the email cold-start; revoke_on_execution=False +
+    # expiring=False = the link never expires. Verified end-to-end (password set OK).
+    t = FlowToken.objects.create(identifier=ident, user=u, flow=flow, _plan=pickle_flow_token_for_email(plan), revoke_on_execution=False, expiring=False)
+    print("RECOVERY\t" + username + "\t" + t.key)
+PYEOF
+)
+while IFS=$'\t' read -r _tag _username _key; do
+  [ "$_tag" = "RECOVERY" ] || continue
+  [ -n "$_key" ] || continue
+  LINK="https://auth.${BASE_DOMAIN}/if/flow/default-recovery-flow/?flow_token=${_key}"
+  ENV_VAR="AUTHENTIK_$(echo "$_username" | tr '[:lower:]' '[:upper:]')_RECOVERY_LINK"
+  echo "${ENV_VAR}=${LINK}" >> "${GITHUB_ENV:-/dev/null}"
+  if [ -n "${IW_AUTH_ENV_FILE:-}" ]; then
+    printf 'export %s=%q\n' "$ENV_VAR" "$LINK" >> "$IW_AUTH_ENV_FILE"
+  fi
+  echo "✅ Recovery link generated for ${_username} (non-expiring)"
+done <<< "$_RECOVERY_OUT"
 kill $SETUP_PF_PID 2>/dev/null || true
 
 

@@ -345,41 +345,6 @@ data:
           provider: !Find [authentik_providers_oauth2.oauth2provider, [name, Portainer Provider]]
           policy_engine_mode: any
 
-      # ── OneDev OAuth2 Provider ─────────────────────────────────────────────
-      - model: authentik_providers_oauth2.oauth2provider
-        state: present
-        identifiers:
-          name: OneDev Provider
-        attrs:
-          name: OneDev Provider
-          client_id: onedev
-          client_type: confidential
-          sub_mode: user_username
-          grant_types:
-            - authorization_code
-            - refresh_token
-          redirect_uris:
-            # OneDev v15 callback URL format: /~sso/callback/{providerName}
-            - matching_mode: strict
-              url: "https://onedev.${BASE_DOMAIN}/~sso/callback/Authentik"
-          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
-          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
-          signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
-          property_mappings:
-            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
-            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
-            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
-
-      - model: authentik_core.application
-        state: present
-        identifiers:
-          slug: onedev
-        attrs:
-          name: OneDev
-          slug: onedev
-          provider: !Find [authentik_providers_oauth2.oauth2provider, [name, OneDev Provider]]
-          policy_engine_mode: any
-
       # ── InfraWeaver Console OAuth2 Provider ─────────────────────────────────
       - model: authentik_providers_oauth2.oauth2provider
         state: present
@@ -676,6 +641,66 @@ data:
           name: InfraWeaver Console (forward-auth)
           slug: infraweaver-console-fwd
           provider: !Find [authentik_providers_proxy.proxyprovider, [name, InfraWeaver Console Forward-Auth Provider]]
+          policy_engine_mode: any
+
+      # ── Nextcloud OIDC (native) ─────────────────────────────────────────────
+      # Nextcloud supports OIDC via the `user_oidc` app. Browser SSO goes
+      # through Authentik; WebDAV/OAuth clients keep working because we did
+      # NOT wire forward-auth on the IngressRoute.
+      #
+      # Group claim: `nc_groups` is a scope mapping that emits the caller's
+      # Authentik groups as-is. Nextcloud consumes it via
+      #   OIDCLoginProviderConfig.groupsClaim = "nc_groups"
+      # and turns each entry into a Nextcloud group of the same name. The
+      # External Storage mounts provisioned by the post-install Job then key
+      # off those groups (`nc-media-ro`, `nc-media-rw`, `nc-truenas`,
+      # `nc-synology`, …) for per-mount authorization.
+      - model: authentik_providers_oauth2.scopemapping
+        state: present
+        identifiers:
+          name: Nextcloud Groups Scope
+        attrs:
+          name: Nextcloud Groups Scope
+          scope_name: nc_groups
+          description: "Emit Authentik groups as Nextcloud groups"
+          expression: |
+            return {"nc_groups": [group.name for group in request.user.ak_groups.all()]}
+
+      - model: authentik_providers_oauth2.oauth2provider
+        state: present
+        identifiers:
+          name: Nextcloud Provider
+        attrs:
+          name: Nextcloud Provider
+          client_id: nextcloud
+          client_type: confidential
+          sub_mode: user_username
+          grant_types:
+            - authorization_code
+            - refresh_token
+          redirect_uris:
+            - matching_mode: strict
+              url: "https://nextcloud.int.${BASE_DOMAIN}/apps/user_oidc/code"
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+          signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+          include_claims_in_id_token: true
+          access_token_validity: hours=1
+          refresh_token_validity: days=30
+          property_mappings:
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+            - !Find [authentik_providers_oauth2.scopemapping, [name, Nextcloud Groups Scope]]
+
+      - model: authentik_core.application
+        state: present
+        identifiers:
+          slug: nextcloud
+        attrs:
+          name: Nextcloud
+          slug: nextcloud
+          provider: !Find [authentik_providers_oauth2.oauth2provider, [name, Nextcloud Provider]]
           policy_engine_mode: any
 
       # NOTE: Embedded Outpost configuration (proxy providers) is handled by

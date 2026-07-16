@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nas-nextcloud-infraweaver-media-rw-fcf44537
+  labels:
+    infraweaver.io/nas-share: 'true'
+    infraweaver.io/provider: truenas
+    infraweaver.io/backend: smb
+    infraweaver.io/access: rw
+    infraweaver.io/share: infraweaver
+    infraweaver.io/subfolder: media
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ''
+  # `soft` (the smb.csi driver default) returns EIO the moment a NAS timeout
+  # budget is exhausted, which aborts a movie upload that streams for minutes on
+  # any transient blip. `hard` blocks and retries until the NAS recovers so long
+  # uploads survive. actimeo=30 trims the aggressive 1s metadata revalidation.
+  mountOptions:
+    - hard
+    - actimeo=30
+  claimRef:
+    namespace: nextcloud
+    name: nas-infraweaver-media-rw
+  csi:
+    driver: smb.csi.k8s.io
+    volumeHandle: 10.1.0.135/infraweaver#media#nas-nextcloud-infraweaver-media-rw-fcf44537
+    volumeAttributes:
+      source: //10.1.0.135/infraweaver
+      subDir: media
+    nodeStageSecretRef:
+      name: nas-truenas-rw
+      namespace: nextcloud
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nas-infraweaver-media-rw
+  namespace: nextcloud
+  labels:
+    infraweaver.io/nas-share: 'true'
+    infraweaver.io/provider: truenas
+    infraweaver.io/backend: smb
+    infraweaver.io/access: rw
+    infraweaver.io/share: infraweaver
+    infraweaver.io/subfolder: media
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ''
+  volumeName: nas-nextcloud-infraweaver-media-rw-fcf44537
+  resources:
+    requests:
+      storage: 500Gi

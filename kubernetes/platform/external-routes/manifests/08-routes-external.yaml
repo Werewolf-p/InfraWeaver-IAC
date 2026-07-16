@@ -1,0 +1,21 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: bitwarden
+  namespace: traefik
+  labels:
+    infraweaver.io/access-tier: public
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`bitwarden.example.com`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+      services:
+        - name: bm-bitwarden
+          namespace: traefik
+          port: 30032

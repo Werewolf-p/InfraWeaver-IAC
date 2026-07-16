@@ -58,7 +58,14 @@ changed_files = []
 with open(platform_file) as fh:
     data = yaml.safe_load(fh)
 
-REPO_URL = os.environ.get("GIT_REPO_URL", "https://github.com/your-org/your-repo") + ".git"
+# The committed bootstrap appsets must carry the ${DEPLOY_REPO_URL} PLACEHOLDER, which
+# the repo-server envsubst CMP substitutes at sync time. A bare run (no GIT_REPO_URL)
+# therefore defaults to that placeholder — NOT a concrete URL — otherwise the generators
+# clone a bogus repo, generate 0 apps, and the appset controller cascade-deletes every
+# core-* Application (resources-finalizer then prunes the live workloads). See the
+# 2026-06-30 self-inflicted outage. Only append .git for an explicit concrete URL.
+_repo = os.environ.get("GIT_REPO_URL", "${DEPLOY_REPO_URL}")
+REPO_URL = _repo if _repo.startswith("${") else _repo.rstrip("/") + ".git"
 
 def appset_yaml(appset_name, appset_label, metadata_name, path_pattern, comment, managed_comment, automated_prune="false", extra_params=""):
     """Generate a full ApplicationSet YAML — single source of truth for all AppSets."""
@@ -138,6 +145,31 @@ def appset_yaml(appset_name, appset_label, metadata_name, path_pattern, comment,
         f"            - /spec/persistentVolumeClaimRetentionPolicy\n"
         f"          managedFieldsManagers:\n"
         f"            - kube-controller-manager\n"
+        # Cilium/Hubble: Helm genCA/genSignedCert mint new random certs on every
+        # render, so these Secrets diff forever though the live certs are stable and
+        # the app is Healthy. ServiceMonitor/hubble gets an operator-defaulted
+        # .spec.endpoints. All name-scoped to kube-system — inert for other apps.
+        f"        - kind: Secret\n"
+        f"          name: cilium-ca\n"
+        f"          namespace: kube-system\n"
+        f"          jsonPointers:\n"
+        f"            - /data\n"
+        f"        - kind: Secret\n"
+        f"          name: hubble-server-certs\n"
+        f"          namespace: kube-system\n"
+        f"          jsonPointers:\n"
+        f"            - /data\n"
+        f"        - kind: Secret\n"
+        f"          name: hubble-relay-client-certs\n"
+        f"          namespace: kube-system\n"
+        f"          jsonPointers:\n"
+        f"            - /data\n"
+        f"        - group: monitoring.coreos.com\n"
+        f"          kind: ServiceMonitor\n"
+        f"          name: hubble\n"
+        f"          namespace: kube-system\n"
+        f"          jsonPointers:\n"
+        f"            - /spec/endpoints\n"
     )
 
 def write_if_changed(filepath, content, label=""):

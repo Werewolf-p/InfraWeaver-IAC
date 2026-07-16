@@ -55,7 +55,7 @@ defaultSettings:
   # uses this target to restore PVCs before apps deploy.
   # TrueNAS prerequisite: create dataset at /mnt/tank/longhorn-backups and enable
   # NFS share with network access for ${NODE_SUBNET_CIDR} (cluster nodes).
-  backupTarget: "nfs://${TRUENAS_HOST}:/mnt/Main/k8s-longhorn-backups"
+  backupTarget: "nfs://${TRUENAS_HOST}:/mnt/pool/k8s-longhorn-backups"
   backupTargetCredentialSecret: ""
 
 longhornUI:

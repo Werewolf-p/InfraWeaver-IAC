@@ -75,11 +75,52 @@ dry()    { echo "[seed-secrets] [dry-run] $*"; }
 [[ -n "${VAULT_TOKEN:-}" ]]   || { warn "VAULT_TOKEN not set"; exit 1; }
 python3 -c "import yaml" 2>/dev/null || { warn "python3 with PyYAML is required"; exit 1; }
 
-# ── Read enabled apps from platform.yaml ─────────────────────────────────────
-ENABLED_APPS="$(python3 - "$PLATFORM_YAML" <<'PYEOF'
-import yaml, sys
-data = yaml.safe_load(open(sys.argv[1]))
-apps = data.get('catalog', {}).get('enabled', [])
+# ── Read the set of catalog apps to seed ─────────────────────────────────────
+# This is the UNION of two sources, because a catalog app can be deployed two ways:
+#   1. platform.yaml catalog.enabled — Helm apps and auto-generated manifest apps.
+#   2. A hand-written bootstrap Application (kubernetes/bootstrap/catalog-*.yaml) —
+#      manifest apps kept OUT of catalog.enabled on purpose so scripts/sync-catalog.sh
+#      does not overwrite their custom source (e.g. nextcloud's envsubst CMP plugin).
+# Apps in group (2) still declare a `secrets:` section that must be seeded on a
+# fresh install, so we discover them from their bootstrap Application's catalog
+# source path (gated on the app actually having a secrets: section, to avoid
+# pulling in section-less apps like jellyfin/nas-shares).
+ENABLED_APPS="$(python3 - "$PLATFORM_YAML" "$REPO_ROOT" <<'PYEOF'
+import yaml, sys, glob, os, re
+platform_yaml, repo_root = sys.argv[1], sys.argv[2]
+data = yaml.safe_load(open(platform_yaml)) or {}
+apps = list(data.get('catalog', {}).get('enabled', []) or [])
+seen = set(apps)
+
+def has_secrets(app):
+    cat = os.path.join(repo_root, 'kubernetes', 'catalog', app, 'catalog.yaml')
+    try:
+        d = yaml.safe_load(open(cat))
+    except Exception:
+        return False
+    return isinstance(d, dict) and bool(d.get('secrets'))
+
+for f in glob.glob(os.path.join(repo_root, 'kubernetes', 'bootstrap', 'catalog-*.yaml')):
+    try:
+        docs = list(yaml.safe_load_all(open(f)))
+    except Exception:
+        continue
+    for d in docs:
+        if not isinstance(d, dict) or d.get('kind') != 'Application':
+            continue
+        spec = d.get('spec', {}) or {}
+        srcs = spec.get('sources') or ([spec['source']] if spec.get('source') else [])
+        for s in srcs:
+            if not isinstance(s, dict):
+                continue
+            m = re.search(r'kubernetes/catalog/([^/]+)/', s.get('path', '') or '')
+            if not m:
+                continue
+            app = m.group(1)
+            if app not in seen and has_secrets(app):
+                seen.add(app)
+                apps.append(app)
+
 for app in apps:
     print(app)
 PYEOF

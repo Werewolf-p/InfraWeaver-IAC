@@ -183,7 +183,7 @@ fi
 # exact secret Authentik expects — otherwise the code→token exchange fails with
 # "invalid_client" and login dies at /auth/signin?error=... ("Server error").
 # Use kv patch (NOT put) to preserve the other keys at this OpenBao path
-# (nextauth-secret, argocd-token, authentik-token, onedev-token, etc.).
+# (nextauth-secret, argocd-token, authentik-token, etc.).
 echo "==> Fetching InfraWeaver Console OAuth2 client_secret from Authentik..."
 wait_for_provider "InfraWeaver Console Provider"
 CONSOLE_SECRET=$(curl -sf \
@@ -480,8 +480,26 @@ fi
 # The blueprint creates the proxy providers + applications but cannot attach them
 # to the auto-created embedded outpost, so we do it here once they exist.
 echo "==> Assigning proxy providers to embedded outpost..."
-PROXY_PKS=$(ak_exec_curl GET "/api/v3/providers/proxy/?page_size=100" \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); print(','.join(str(p['pk']) for p in d.get('results',[])))" 2>/dev/null || echo "")
+# The forward-auth blueprint is imported asynchronously by the Authentik worker,
+# so the proxy providers may not exist yet when this script first runs (common on
+# a fresh/DR deploy). Poll until the provider count is non-zero AND stable across
+# two consecutive reads (blueprint import finished), capped at ~2.5 min, before
+# attaching — otherwise a race leaves the embedded outpost empty and every *.int
+# host returns Authentik's 404.
+PROXY_PKS=""
+prev_count=-1
+for attempt in $(seq 1 30); do
+  PROXY_PKS=$(ak_exec_curl GET "/api/v3/providers/proxy/?page_size=100" \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); print(','.join(str(p['pk']) for p in d.get('results',[])))" 2>/dev/null || echo "")
+  cur_count=$(printf '%s\n' "$PROXY_PKS" | awk -F, '{print ($0==""?0:NF)}')
+  if [ "$cur_count" -gt 0 ] && [ "$cur_count" -eq "$prev_count" ]; then
+    echo "  proxy providers stabilized at ${cur_count} (attempt ${attempt})"
+    break
+  fi
+  prev_count=$cur_count
+  echo "  waiting for forward-auth blueprint import (proxy providers: ${cur_count})..."
+  sleep 5
+done
 EMB_UUID=$(ak_exec_curl GET "/api/v3/outposts/instances/?page_size=100" \
   | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((o['pk'] for o in d.get('results',[]) if o.get('name')=='authentik Embedded Outpost'),''))" 2>/dev/null || echo "")
 if [ -n "$PROXY_PKS" ] && [ -n "$EMB_UUID" ]; then

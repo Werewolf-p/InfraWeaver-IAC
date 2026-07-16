@@ -6,7 +6,7 @@
 #   bash create-init-vm.sh
 #   bash create-init-vm.sh --vmid 9001 --name infraweaver-init \
 #       --storage lvm-proxmox --bridge vmbr0 --vlan 3 \
-#       --ip 10.10.0.50 --cidr 24 \
+#       --ip 10.0.0.50 --cidr 24 \
 #       --no-cluster-nic \
 #       --repo https://github.com/yourorg/InfraWeaver-platform --branch main \
 #       --cpu 2 --mem 2048 --disk 60 \
@@ -275,7 +275,7 @@ for iface in data:
         cidr  = iface.get('cidr', '')     # pvesh returns full 'IP/prefix' in cidr
         ip    = iface.get('address', '')
         vids  = iface.get('bridge_vids', iface.get('vids', ''))
-        # cidr is already '10.25.0.3/24'; use it directly to avoid duplicate IP
+        # cidr is already '10.1.0.3/24'; use it directly to avoid duplicate IP
         addr  = cidr if cidr else ''
         print(f'{name}|{addr}|{vids}')
 ")
@@ -409,7 +409,7 @@ suggest_free_ip() {
 # ── Helper: derive gateway (.1) from an IP + prefix length ────────────────────
 _calc_gw_from_ip() {
   # _calc_gw_from_ip <ip> <prefix>  →  prints network-address.1
-  # Example: 10.10.0.50 24  →  10.10.0.1
+  # Example: 10.0.0.50 24  →  10.0.0.1
   #          192.168.5.100 16  →  192.168.0.1
   local _ip="$1" _prefix="${2:-24}"
   [[ -z "$_ip" ]] && echo "" && return
@@ -569,7 +569,7 @@ if [[ "$CLUSTER_NIC" == "yes" ]]; then
         log "Scanning for a free cluster IP in ${_cbr_subnet%/*}/24..."
         _suggested_cluster_ip=$(suggest_free_ip "$_cbr_subnet")
       fi
-      [[ -z "$_suggested_cluster_ip" ]] && _suggested_cluster_ip="10.10.0.50"
+      [[ -z "$_suggested_cluster_ip" ]] && _suggested_cluster_ip="10.0.0.50"
       ask CLUSTER_IP  "Static IP for cluster NIC" "$_suggested_cluster_ip"
       [[ -z "$CLUSTER_CIDR" ]] && ask CLUSTER_CIDR "Prefix length" "24"
     fi

@@ -5,8 +5,11 @@ metadata:
   name: game-hub-scale-schedule-config
   namespace: game-hub
 data:
-  scaleDownEnabled: "true"
-  scaleUpEnabled: "true"
+  # Shipped dormant: the scale machinery is GitOps-tracked and ready, but does not
+  # fire until an operator flips these to "true". Avoids surprise auto-stop/start of
+  # game servers when this namespace first comes under GitOps management.
+  scaleDownEnabled: "false"
+  scaleUpEnabled: "false"
   scaleDownSchedule: "0 0 * * *"
   scaleUpSchedule: "0 8 * * *"
   scaleDownReplicas: "0"

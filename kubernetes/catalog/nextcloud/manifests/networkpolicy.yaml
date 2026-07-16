@@ -1,0 +1,89 @@
+---
+# CiliumNetworkPolicy — nextcloud egress lockdown.
+#
+# Plan reference: plans/advanced-storage.md §6 Security review.
+# Nextcloud's External Storage app opens SMB (TCP/445) sessions to the NAS
+# directly from the pod. Everything else (git, S3 backups, arbitrary internet)
+# is disallowed by default so a compromised Nextcloud cannot exfiltrate
+# broadly.
+#
+# Allowed egress:
+#   - DNS (kube-dns)
+#   - Postgres inside the namespace
+#   - SMB to the NAS host on TCP/445 (edit the CIDR to match your NAS IP)
+#   - HTTPS (443) for app catalogue / update checks — remove if you don't
+#     want Nextcloud phoning home.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: nextcloud-egress
+  namespace: nextcloud
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  egress:
+    # DNS
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+    # Postgres (same namespace)
+    - toEndpoints:
+        - matchLabels:
+            app: postgresql-nextcloud
+      toPorts:
+        - ports:
+            - { port: "5432", protocol: TCP }
+    # The post-install Job's pod carries `app.kubernetes.io/name: nextcloud`, so
+    # this policy selects it too and its egress is default-denied. Its init
+    # container polls the app's /status.php before running occ, so without this
+    # rule the Job hangs until backoffLimit and external storage is never
+    # configured. Narrow: app pods talking to the app port, nothing else.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: nextcloud
+      toPorts:
+        - ports:
+            - { port: "80", protocol: TCP }
+    # NAS SMB — Synology + TrueNAS. Edit or extend these CIDRs to match
+    # your NAS IPs. Add a stanza per additional NAS if you register more
+    # providers via NAS_PROVIDERS_JSON.
+    - toCIDR:
+        - "10.1.0.21/32"  # Synology (edit per install)
+        - "10.1.0.135/32"  # TrueNAS  (edit per install)
+      toPorts:
+        - ports:
+            - { port: "445", protocol: TCP }
+    # Authentik — the user_oidc app fetches the discovery URL + JWKS from
+    # Authentik on every browser login. Kept as a namespace-selector so
+    # rotating Authentik's IP is a no-op.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": authentik
+      toPorts:
+        - ports:
+            - { port: "80", protocol: TCP }
+            - { port: "443", protocol: TCP }
+    # Jellyfin — the `media-notify` sidecar shares this pod, and therefore this
+    # Cilium identity, so its POST to /Library/Media/Updated is matched by this
+    # policy. The port is Jellyfin's *pod* port: Cilium evaluates egress after
+    # service translation, so the Service port is not what is matched here.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": jellyfin
+            app.kubernetes.io/name: jellyfin
+      toPorts:
+        - ports:
+            - { port: "8096", protocol: TCP }
+    # Outbound HTTPS — for Nextcloud app catalogue. Restrict or remove if
+    # you air-gap the instance.
+    - toEntities:
+        - "world"
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }

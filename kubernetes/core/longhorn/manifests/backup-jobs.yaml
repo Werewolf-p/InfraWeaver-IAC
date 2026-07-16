@@ -4,7 +4,7 @@
 #   recurring-job-group.longhorn.io/truenas-backup: "enabled"
 # will be included in this backup schedule.
 #
-# Prerequisite: Longhorn backupTarget configured to nfs://${TRUENAS_HOST}/mnt/Main/k8s-longhorn-backups
+# Prerequisite: Longhorn backupTarget configured to nfs://${TRUENAS_HOST}/mnt/pool/k8s-longhorn-backups
 # TrueNAS NFS share is already configured with network access for ${NODE_SUBNET_CIDR}.
 apiVersion: longhorn.io/v1beta2
 kind: RecurringJob

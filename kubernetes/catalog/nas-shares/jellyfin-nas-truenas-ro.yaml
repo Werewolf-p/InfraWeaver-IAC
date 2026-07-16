@@ -1,0 +1,28 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nas-truenas-ro
+  namespace: jellyfin
+  labels:
+    infraweaver.io/nas-share: 'true'
+    infraweaver.io/component: nas-credentials
+    infraweaver.io/provider: truenas
+    infraweaver.io/access: ro
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: nas-truenas-ro
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: username
+      remoteRef:
+        key: secret/platform/nas/creds/truenas-ro
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: secret/platform/nas/creds/truenas-ro
+        property: password

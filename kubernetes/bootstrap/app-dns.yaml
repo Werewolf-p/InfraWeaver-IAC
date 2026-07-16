@@ -1,3 +1,4 @@
+---
 # Standalone ArgoCD Application for internal CoreDNS
 # Deploys a custom DNS server accessible at ${METALLB_COREDNS_VIP}:53 (MetalLB)
 # Serves ${BASE_DOMAIN} and prod.local zones; forwards everything else upstream
@@ -14,6 +15,13 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/platform/dns/manifests
+    # Render through the envsubst CMP so ${PLACEHOLDER} tokens (${BASE_DOMAIN},
+    # ${METALLB_TRAEFIK_VIP}, ${METALLB_COREDNS_VIP}, ${PUBLIC_INGRESS_IP}) resolve
+    # at sync time. Without this, the CoreDNS Deployment's zones volume keeps the
+    # literal "${BASE_DOMAIN}.hosts" volume key, which never matches the rendered
+    # ConfigMap key (e.g. example.com.hosts) → FailedMount → CoreDNS stuck.
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: dns-system
@@ -29,4 +37,7 @@ spec:
         maxDuration: 3m
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true
+      # Client-side apply: the CoreDNS coredns-custom-config ConfigMap triggers an
+      # ArgoCD structured-merge-diff schema error (".data: field not declared in
+      # schema") under server-side apply; client-side apply avoids it.
+      - ServerSideApply=false

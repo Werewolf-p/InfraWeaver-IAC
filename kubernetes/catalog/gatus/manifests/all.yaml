@@ -126,16 +126,6 @@ data:
           - type: discord
             description: "Stirling PDF is unreachable"
 
-      - name: OneDev (Git + CI)
-        url: https://onedev.${BASE_DOMAIN}
-        interval: 120s
-        group: catalog
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: discord
-            description: "OneDev is unreachable"
-
       - name: InfraWeaver Console
         url: https://infraweaver.int.${BASE_DOMAIN}/api/ping
         interval: 60s

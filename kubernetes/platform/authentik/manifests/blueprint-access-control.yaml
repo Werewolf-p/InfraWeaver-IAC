@@ -104,7 +104,10 @@ data:
         attrs:
           name: policy-admins-only
           expression: |
-            return ak_is_group_member(request.user, name="platform-admins")
+            # Superusers (the platform owner) always pass — they must never be
+            # locked out of their own console / admin-gated apps even if group
+            # sync hasn't placed them in platform-admins yet.
+            return request.user.is_superuser or ak_is_group_member(request.user, name="platform-admins")
       - model: authentik_policies_expression.expressionpolicy
         state: present
         identifiers:
@@ -373,14 +376,81 @@ data:
           order: 10
           negate: false
           timeout: 30
+      # ── Nextcloud (native OIDC) — access + folder groups ─────────────────────
+      # nc-users:      may sign into Nextcloud at all (baseline)
+      # nc-media-ro:   read-only mount of the media shares (Synology + TrueNAS)
+      # nc-media-rw:   read-write mount of the media shares
+      # nc-truenas:    read-write access to any TrueNAS-only mounts
+      # nc-synology:   read-write access to any Synology-only mounts
+      #
+      # These same group NAMES are matched by:
+      #  - InfraWeaver console NAS folder ACL (`NAS_FOLDER_ACL_JSON`), so the
+      #    same group grants CSI-level PVCs AND Nextcloud-level External Storage.
+      #  - Nextcloud's user_oidc app via the `nc_groups` claim (see blueprint-apps.yaml).
+      #  - The Nextcloud post-install Job (occ files_external:applicable --add-group).
+      - model: authentik_core.group
+        state: present
+        identifiers: { name: nc-users }
+        attrs: { name: nc-users, is_superuser: false }
+      - model: authentik_core.group
+        state: present
+        identifiers: { name: nc-media-ro }
+        attrs: { name: nc-media-ro, is_superuser: false }
+      - model: authentik_core.group
+        state: present
+        identifiers: { name: nc-media-rw }
+        attrs: { name: nc-media-rw, is_superuser: false }
+      - model: authentik_core.group
+        state: present
+        identifiers: { name: nc-truenas }
+        attrs: { name: nc-truenas, is_superuser: false }
+      - model: authentik_core.group
+        state: present
+        identifiers: { name: nc-synology }
+        attrs: { name: nc-synology, is_superuser: false }
+
+      - model: authentik_policies_expression.expressionpolicy
+        state: present
+        identifiers: { name: policy-nc-users }
+        attrs:
+          name: policy-nc-users
+          expression: |
+            # Fail closed on an unauthenticated / anonymous principal: AnonymousUser
+            # has no `ak_groups`, and the ORM lookup below would raise.
+            if not request.user or not request.user.is_authenticated:
+                return False
+
+            # Legacy, statically-provisioned Nextcloud groups.
+            if (
+                ak_is_group_member(request.user, name="platform-admins") or
+                ak_is_group_member(request.user, name="nc-users") or
+                ak_is_group_member(request.user, name="nc-media-ro") or
+                ak_is_group_member(request.user, name="nc-media-rw") or
+                ak_is_group_member(request.user, name="nc-truenas") or
+                ak_is_group_member(request.user, name="nc-synology")
+            ):
+                return True
+
+            # RBAC-derived storage scopes. The console mints one Authentik group per
+            # NAS folder — `storage-<provider>-<share>-<folder>-<hash>-{ro,rw}` — so the
+            # set is dynamic and cannot be enumerated in a static blueprint. Match by
+            # prefix instead.
+            #
+            # Without this, a user whose only grant is a NAS folder is refused at the
+            # Nextcloud application ("Request has been denied") and never reaches the
+            # /Media mount that was scoped to their group. This policy decides only
+            # whether they may SIGN IN; which folders they then see is still decided by
+            # the mount's applicable_groups (see catalog/nextcloud job-postinstall.yaml).
+            return request.user.ak_groups.filter(name__startswith="storage-").exists()
+
       - model: authentik_policies.policybinding
         state: present
         identifiers:
-          target: !Find [authentik_core.application, [slug, openbao]]
+          target: !Find [authentik_core.application, [slug, nextcloud]]
           order: 10
         attrs:
-          target: !Find [authentik_core.application, [slug, openbao]]
-          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          target: !Find [authentik_core.application, [slug, nextcloud]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-nc-users]]
           enabled: true
           order: 10
           negate: false

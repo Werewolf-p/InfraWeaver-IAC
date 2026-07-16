@@ -1,0 +1,26 @@
+# .public-deny.example — template for params/.public-deny
+#
+# Copy to params/.public-deny (that folder is gitignored, so the file — and the
+# identifiers in it — are never committed or synced to the public mirror).
+#
+# scripts/sync-to-public.sh reads params/.public-deny as a FAIL-CLOSED content
+# deny-scan: one ERE regex per line ('#' = comment). If ANY pattern matches ANY
+# file in the sanitized export tree, the sync ABORTS and nothing is published.
+# This is defense-in-depth on top of the structural strips (terraform/, ansible/,
+# envs/, params/, private-apps/, overlays/*/prod, users.yaml, *.tfvars/key/pem).
+#
+# IMPORTANT: CI publishes via .github/workflows/sync-to-public.yml, which
+# materializes this list from the `PUBLIC_DENY_LIST` repo secret — NOT from this
+# file. Keep the secret and this file in sync, or CI's scan will differ from a
+# local `sync-to-public.sh` run.
+#
+# Add every private identifier that could leak through a non-stripped path:
+your-real-domain\.com
+your-github-owner
+# Real usernames / handles (word-boundaried to avoid over-matching):
+# \byourhandle\b
+# Real RFC1918 ranges used in-cluster (also baked into platform.yaml / base manifests):
+# \b10\.10\.[0-9]+\.[0-9]+\b
+# \b10\.25\.[0-9]+\.[0-9]+\b
+# Real storage/export paths:
+# /mnt/YourPool/

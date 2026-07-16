@@ -1,0 +1,21 @@
+---
+# Bootstrap admin email, which depends on ${BASE_DOMAIN}.
+#
+# WHY this lives in manifests/ and not values.yaml:
+#   - values.yaml is consumed by the `platform-authentik` Helm app, whose source
+#     is NOT rendered through the envsubst CMP plugin, so a "${BASE_DOMAIN}" there
+#     reaches the pod literally (that was the email FROM bug).
+#   - This manifests/ path is the `apps-authentik-manifests` plain-directory app,
+#     rendered by the envsubst-v1.0 CMP plugin, so ${BASE_DOMAIN} expands at sync.
+#
+# Referenced from values.yaml chart env: AUTHENTIK_BOOTSTRAP_EMAIL -> key `bootstrap-email`.
+# NOTE: the outbound email FROM address is NOT here — it is sourced from the
+# authentik-smtp-secret `smtp-username` key so it always matches the authenticated
+# mailbox (Office365 rejects a mismatched From).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-email-addresses
+  namespace: authentik
+data:
+  bootstrap-email: "akadmin@${BASE_DOMAIN}"

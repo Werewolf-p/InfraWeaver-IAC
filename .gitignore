@@ -57,3 +57,9 @@ params/
 # Talos configs — generated credentials, should never be committed
 envs/*/talosconfig
 talos/clusterconfig/talosconfig
+
+# TypeScript incremental build artifacts
+*.tsbuildinfo
+
+# Local tooling caches (design hooks); never manifests.
+.impeccable/

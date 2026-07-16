@@ -210,10 +210,10 @@ ssh-keygen -y -f ~/.ssh/deployer_ed25519 > ~/.ssh/deployer_ed25519.pub 2>/dev/nu
 DEPLOYER_PUBKEY=$(cat ~/.ssh/deployer_ed25519.pub 2>/dev/null || true)
 
 # ── Collect all unique Proxmox node SSH IPs ───────────────────────────────────
-# PVE_NODES format: "proxmox:10.25.0.3,microserver:10.25.0.3"
+# PVE_NODES format: "proxmox:10.1.0.3,microserver:10.1.0.3"
 # The bpg/proxmox provider resolves ACTUAL node IPs from the Proxmox cluster API
-# and uses them for SSH (e.g. microserver may be at 10.25.0.4 even if PVE_NODES
-# lists 10.25.0.3).  Query the real IPs here so we can install the SSH key on all.
+# and uses them for SSH (e.g. microserver may be at 10.1.0.4 even if PVE_NODES
+# lists 10.1.0.3).  Query the real IPs here so we can install the SSH key on all.
 PVE_API_HOST="${PROXMOX_HOST:-}"
 PROXMOX_TOKEN_VALUE="${PROXMOX_API_TOKEN:-}"
 
@@ -541,7 +541,7 @@ done
 sleep 10
 
 # ── Step 5a: Fix Flannel public-ip (Talos VIP conflict) ──────────────────────
-# Talos adds a shared VIP (e.g. 10.10.0.200) to eth0 on ALL control-plane nodes.
+# Talos adds a shared VIP (e.g. 10.0.0.200) to eth0 on ALL control-plane nodes.
 # Flannel auto-detects this VIP as the node's public-ip, breaking VXLAN tunnels
 # because all nodes advertise the same IP. Fix: inject --public-ip=$(NODE_IP)
 # using the downward API status.hostIP so each node uses its real IP.
@@ -641,7 +641,7 @@ spec:
 METALLB_EOF
 ok "Step 7a: MetalLB deployed (native L2, FRR disabled)"
 
-# ── Step 7b: Deploy Longhorn directly (breaks ArgoCD→Onedev→Longhorn cycle) ──
+# ── Step 7b: Deploy Longhorn directly (before GitOps apps need storage) ──
 log "Step 7b: Deploying Longhorn directly via Helm..."
 helm repo add longhorn https://charts.longhorn.io 2>/dev/null || true
 helm repo update longhorn 2>/dev/null || true
@@ -705,47 +705,13 @@ PLATFORM_GITHUB_PAT="${GITHUB_PAT:-}" \
 ok "Step 8: OpenBao deployed and bootstrapped"
 
 echo "STAGE:apps"
-# ── Step 9: Deploy Onedev + wire ArgoCD → Onedev ──────────────────────────────
-log "Step 9: Deploying Onedev and wiring ArgoCD to it..."
-# Refresh kubeconfig — Talos may have rotated certs since step 4
-TALOSCONFIG_FILE="envs/$ENV_NAME/generated/talosconfig"
-[[ ! -f "$TALOSCONFIG_FILE" ]] && TALOSCONFIG_FILE="envs/$ENV_NAME/talosconfig"
-if [[ -f "$TALOSCONFIG_FILE" ]]; then
-  log "  Refreshing kubeconfig via talosctl..."
-  talosctl --talosconfig "$TALOSCONFIG_FILE" kubeconfig --force \
-    -o "$KB_FILE" 2>/dev/null && log "  ✅ kubeconfig refreshed" || warn "  kubeconfig refresh failed (continuing)"
-fi
-# Get OpenBao root token
-BAO_POD=$(kubectl --kubeconfig "$KB_FILE" get pod -n openbao \
-  -l app.kubernetes.io/name=openbao --no-headers \
-  -o custom-columns=":metadata.name" 2>/dev/null | head -1 || true)
-BAO_ROOT_TOKEN=""
-if [[ -n "$BAO_POD" ]]; then
-  BAO_ROOT_TOKEN=$(kubectl --kubeconfig "$KB_FILE" get secret openbao-unseal -n openbao \
-    -o jsonpath='{.data.root_token}' 2>/dev/null | base64 -d || echo "")
-fi
-# Run bootstrap.sh: deploys Onedev directly, mirrors repo, switches ArgoCD source
-if [[ -n "$BAO_ROOT_TOKEN" ]]; then
-  KUBECONFIG="$KB_FILE" \
-  ENV_NAME="$ENV_NAME" \
-  VAULT_TOKEN="$BAO_ROOT_TOKEN" \
-    bash scripts/bootstrap.sh \
-    || warn "bootstrap.sh had issues — Onedev/ArgoCD wiring may need manual completion"
-else
-  warn "No OpenBao root token — deploying Onedev manifests directly without service account"
-  kubectl --kubeconfig "$KB_FILE" apply -Rf kubernetes/catalog/onedev/ --server-side 2>/dev/null || true
-fi
-ok "Step 9: Onedev deployed and ArgoCD wired"
+# ── Step 9 removed: OneDev decommissioned 2026-07-03 — GitOps source is GitHub ──
 
 # ── Step 10: Bootstrap ExternalSecrets + TLS Restore ─────────────────────────
 log "Step 10: Bootstrap ExternalSecrets + TLS restore..."
-# Read ESO service token from k8s secret (written by bootstrap-openbao.sh for local deploys)
-ESO_SERVICE_TOKEN=$(kubectl --kubeconfig "$KB_FILE" get secret openbao-eso-token \
-  -n kube-system -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || echo "")
-ENV_NAME="$ENV_NAME" \
-  ESO_SERVICE_TOKEN="$ESO_SERVICE_TOKEN" \
-  OPENBAO_CLUSTER_ADDR="http://openbao.openbao.svc.cluster.local:8200" \
-  bash scripts/deploy/bootstrap-externalsecrets.sh
+# ESO authenticates to OpenBao via kubernetes auth (role external-secrets,
+# provisioned by bootstrap-openbao.sh) — no service token to pass.
+ENV_NAME="$ENV_NAME" bash scripts/deploy/bootstrap-externalsecrets.sh
 ok "Step 10: ExternalSecrets bootstrapped"
 
 # ── Step 11: Ensure DNS records ───────────────────────────────────────────────
@@ -850,9 +816,8 @@ ok "Step 16b: Platform manifests pre-applied"
 
 
 # ── Step 16c: Fix Authentik PostgreSQL storageClass (longhorn→local-path) ────
-# When ArgoCD first deploys from GitHub before bootstrap.sh updates to Onedev,
-# it uses the GitHub values.yaml which has longhorn-retain. We must delete the
-# bad PVC and force a re-sync so Onedev's local-path is used instead.
+# The GitHub values.yaml has longhorn-retain — delete the bad PVC and force a
+# re-sync so local-path is used instead.
 log "Step 16c: Ensuring Authentik PostgreSQL uses local-path storageClass..."
 AK_PVC=$(kubectl --kubeconfig "$KB_FILE" get pvc data-authentik-postgresql-0 -n authentik \
   -o jsonpath='{.spec.storageClassName}' 2>/dev/null || echo "")
@@ -900,7 +865,7 @@ if [[ "$AK_PVC" == "longhorn-retain" ]]; then
     kubectl --kubeconfig "$KB_FILE" delete pv "$OLD_LH_PV" --force --grace-period=0 2>/dev/null || true
   fi
   sleep 3
-  # Force ArgoCD to re-sync platform-authentik (will use Onedev/local-path now)
+  # Force ArgoCD to re-sync platform-authentik (will use local-path now)
   kubectl --kubeconfig "$KB_FILE" annotate application platform-authentik -n argocd \
     argocd.argoproj.io/refresh="normal" --overwrite 2>/dev/null || true
   sleep 5
@@ -970,7 +935,7 @@ for i in $(seq 1 18); do
   sleep 10
 done
 # Verify external access works
-if curl -sk -o /dev/null -w "%{http_code}" --max-time 5 --resolve "auth.${BASE_DOMAIN}:443:${VIP_ADDRESS:-10.10.0.200}" "https://auth.${BASE_DOMAIN}/" | grep -q "^[23]"; then
+if curl -sk -o /dev/null -w "%{http_code}" --max-time 5 --resolve "auth.${BASE_DOMAIN}:443:${VIP_ADDRESS:-10.0.0.200}" "https://auth.${BASE_DOMAIN}/" | grep -q "^[23]"; then
   ok "  External access verified via Traefik VIP"
 else
   warn "  External access check failed — may need time to stabilize"
@@ -1078,7 +1043,6 @@ log "  ArgoCD     : https://argocd.int.${BASE_DOMAIN}"
 log "  Console    : https://console.${BASE_DOMAIN}"
 log "  Authentik  : https://auth.${BASE_DOMAIN}"
 log "  Grafana    : https://grafana.int.${BASE_DOMAIN}"
-log "  Onedev     : https://onedev.${BASE_DOMAIN}"
 echo ""
 log "Deployment log: $(date)"
 echo ""

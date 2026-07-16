@@ -1,0 +1,66 @@
+# Cilium values — MATCHES the live release (helm release `cilium`, kube-system,
+# chart 1.17.4). Tuned for Talos v1.13 / k8s 1.35, control-plane-only,
+# pod CIDR 10.244.0.0/16, svc CIDR 10.96.0.0/12.
+#
+# Enforcement is ON (default mode): a pod is denied only where a policy selects it,
+# which is how the airgap baseline + allowlists in ../network-policies take effect.
+# kube-proxy is retained (kubeProxyReplacement=false) — enabling KPR is a separate
+# later change (also requires disabling Talos kube-proxy in machine config).
+
+ipam:
+  mode: kubernetes
+ipv4NativeRoutingCIDR: "10.244.0.0/16"
+k8s:
+  requireIPv4PodCIDR: true
+
+kubeProxyReplacement: false
+policyEnforcementMode: default
+
+cni:
+  exclusive: true
+
+securityContext:
+  capabilities:
+    ciliumAgent: [CHOWN, KILL, NET_ADMIN, NET_RAW, IPC_LOCK, SYS_ADMIN, SYS_RESOURCE, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    cleanCiliumState: [NET_ADMIN, SYS_ADMIN, SYS_RESOURCE]
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+operator:
+  replicas: 1
+rollOutCiliumPods: true
+
+# Hubble — flow visibility powering the console "recently blocked -> allow" feature.
+# The drop metric carries source/destination namespace+pod and the destination FQDN
+# so the console can group blocked egress per pod and offer a scoped allow.
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: false
+  metrics:
+    # Scrape hubble-metrics:9965 into Prometheus so the console "recently blocked
+    # -> allow" panel has data. Prometheus selects ServiceMonitors cluster-wide
+    # (empty selector), so this is picked up without extra labels.
+    serviceMonitor:
+      enabled: true
+    enableOpenMetrics: true
+    enabled:
+      # `query` label + per-pod context feed the console's firewall Learn mode
+      # (learned-FQDN list). ignoreAAAA halves cardinality (A/AAAA pairs).
+      - "dns:query;ignoreAAAA;labelsContext=source_namespace,source_pod"
+      # Contract with the console firewall UI (src/lib/firewall/drops.ts):
+      # fallback-chain contexts emit ONE `source`/`destination` label (dns-first =
+      # the blocked URL, else raw IP); labelsContext adds the structured
+      # source_/destination_ namespace|pod|ip labels plus traffic_direction
+      # (lowercase ingress/egress) that the console's PromQL filters and groups on.
+      # The old namespace|pod chains produced only flat `source`/`destination`
+      # strings and NO direction label, so every console query matched nothing.
+      - "drop:sourceContext=dns|ip;destinationContext=dns|ip;labelsContext=source_ip,source_namespace,source_pod,destination_ip,destination_namespace,destination_pod,traffic_direction"
+      - tcp
+      - flow
+      - port-distribution
+      - icmp

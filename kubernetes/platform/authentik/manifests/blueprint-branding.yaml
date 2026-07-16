@@ -78,8 +78,8 @@ data:
         identifiers:
           domain: authentik-default
         attrs:
-          branding_title: "${BASE_DOMAIN}"
-          branding_logo: "/static/dist/assets/icons/banner.jpg"
+          branding_title: "InfraWeaver"
+          branding_logo: "/static/dist/assets/icons/banner.png"
           branding_favicon: "/static/dist/assets/icons/favicon.png"
           ui_user_settings_enabled: true
           default: true
@@ -179,10 +179,22 @@ data:
                 0 0 60px rgba(99,102,241,0.08) !important;
               overflow: hidden !important;
             }
+            /* branding_logo (banner.png) is a pre-cropped, alpha-matted PNG — the
+               logo's black backdrop was keyed to transparency so it composites
+               seamlessly onto this gradient instead of showing as a boxed-in
+               JPEG. The <img> itself lives inside the shadow DOM with no part
+               name, so its own size/position can't be selected from here; the
+               container is the only thing we can style — full width, generous
+               padding, and a matching dark-to-glow backdrop for it to sit in. */
             ak-flow-executor::part(branding) {
-              background: rgba(5, 8, 18, 0.5) !important;
-              border-bottom: 1px solid rgba(99, 102, 241, 0.15) !important;
-              padding: 0 !important;
+              background:
+                radial-gradient(ellipse 85% 130% at 50% 0%, rgba(99,102,241,0.28) 0%, transparent 65%),
+                linear-gradient(180deg, rgba(13,17,35,0.92) 0%, rgba(7,11,20,0.78) 100%) !important;
+              border-bottom: 1px solid rgba(99, 102, 241, 0.18) !important;
+              padding: 2rem 0 1.5rem !important;
+              display: flex !important;
+              align-items: center;
+              justify-content: center;
             }
             ak-flow-executor::part(content) {
               background: transparent !important;

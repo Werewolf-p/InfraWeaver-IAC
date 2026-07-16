@@ -1,3 +1,4 @@
+---
 # Bootstrap Application — deploys ExternalDNS raw manifests (ExternalSecret for CF token)
 # The ExternalDNS Helm chart itself is managed by the root ApplicationSet
 # via kubernetes/platform/external-dns/application.yaml.

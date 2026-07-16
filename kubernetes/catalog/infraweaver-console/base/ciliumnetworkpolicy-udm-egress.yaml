@@ -1,0 +1,29 @@
+---
+# ciliumnetworkpolicy-udm-egress.yaml — least-privilege egress for the UDM
+# connector. The console's default-deny-egress (networkpolicy.yaml) blocks all
+# egress, and its "External HTTPS" allow explicitly excepts 10.0.0.0/8 — so the
+# UDM at 10.0.0.1 is unreachable by default. This CNP is additive with the k8s
+# NetworkPolicies (Cilium enforces the union of allows) and opens exactly one
+# destination: the UDM gateway on 443/TCP, nothing else.
+#
+# The pin lives in the app (UDM_CERT_SHA256); this policy is the network-layer
+# half of the same "console talks to the UDM and only the UDM" guarantee.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: infraweaver-console-udm-egress
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: gitops
+    app.kubernetes.io/part-of: infraweaver
+spec:
+  endpointSelector:
+    matchLabels:
+      app: infraweaver-console
+  egress:
+    - toCIDR:
+        - 10.0.0.1/32
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

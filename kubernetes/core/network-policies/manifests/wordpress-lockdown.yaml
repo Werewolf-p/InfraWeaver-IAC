@@ -1,0 +1,61 @@
+# WordPress zero-trust lockdown (P2) — applied + verified.
+# Selector is the platform's real per-site label set (infraweaver.io/component), NOT the
+# placeholder app:wordpress. One policy covers all sites (testsite1, ssoe2e, …).
+#
+# Verified 2026-06-29 with the policy live:
+#   - sites serve via Traefik (testsite1.example.com -> 200)
+#   - updates reachable (api.wordpress.org -> 302)
+#   - arbitrary internet blocked (example.com -> timeout, Hubble DROP)
+#   - DB egress allowed; no Hubble drops from wordpress
+# NOTE: the WP→OIDC backchannel (auth.example.com) is a pre-existing NAT-hairpin issue
+# (the pod cannot reach the homelab's own Cloudflare-fronted public IP) — confirmed broken
+# with AND without this policy, so it is NOT caused by the lockdown. Front-channel SSO via
+# the Authentik Traefik outpost is intact. The policy allows the OIDC path so login works
+# once the hairpin/SSO endpoint is fixed (point the daggerhart plugin at internal authentik,
+# or fix NAT loopback).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: wordpress-zero-trust
+  namespace: wordpress
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}
+spec:
+  endpointSelector: {matchLabels: {"infraweaver.io/component": wordpress}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+    - toEndpoints: [{matchLabels: {"infraweaver.io/component": db}}]
+      toPorts: [{ports: [{port: "3306", protocol: TCP}]}]
+    - toFQDNs: [{matchName: "api.wordpress.org"}, {matchName: "downloads.wordpress.org"}, {matchPattern: "*.wordpress.org"}, {matchName: "auth.example.com"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]}]
+    # All-in-One WP Migration Unlimited Extension (ServMask) "Check for updates" pings
+    # servmask.com and timed out (cURL error 28) — same unlisted-FQDN drop pattern as the
+    # example.com verification above. matchName is a guess at the exact update-check host;
+    # verify via Hubble DNS flow / `kubectl exec <wp-pod> -- getent hosts servmask.com` and
+    # narrow or add subdomains as needed.
+    - toFQDNs: [{matchName: "servmask.com"}, {matchPattern: "*.servmask.com"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]}]
+    # wp-cli phar download at pod init (WORDPRESS_WP_CLI_URL → github release, redirects
+    # to *.githubusercontent.com). Required for any site pod to (re)start — without it the
+    # init container hangs and no WordPress pod can come up under this lockdown.
+    # TRUE-AIRGAP TODO: mirror the phar to an internal artifact store and set
+    # WORDPRESS_WP_CLI_URL to it (see wordpress-manager/lib/manifest.ts), then drop these.
+    - toFQDNs: [{matchName: "github.com"}, {matchPattern: "*.githubusercontent.com"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+    # POD ports, not Service ports (same rule as validate-netpol-ports.sh): Cilium
+    # enforces egress AFTER service translation, so traffic to traefik must be allowed
+    # on web/websecure 8000/8443 (svc 80/443 never appears on the wire). This is the
+    # WP loopback path (site's own https URL via a hostAlias to the Traefik VIP) and
+    # the auth.example.com hostAlias fallback. Authentik pod ports 9000/9443 are
+    # covered by wordpress-oidc-backchannel below.
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}, {matchLabels: {"k8s:io.kubernetes.pod.namespace": authentik}}]
+      toPorts: [{ports: [{port: "8443", protocol: TCP}, {port: "8000", protocol: TCP}, {port: "443", protocol: TCP}, {port: "80", protocol: TCP}]}]
+    # The Traefik MetalLB VIP is NOT socket-LB translated for pod-originated traffic —
+    # it leaves the pod as plain CIDR-identity traffic, so toEndpoints can never match
+    # it and it needs an explicit CIDR allow. Pods reach the VIP for the WP loopback
+    # and OIDC-backchannel hostAliases (stable IP, unlike Service ClusterIPs).
+    - toCIDRSet: [{cidr: "10.0.0.200/32"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]}]

@@ -1,6 +1,13 @@
 global:
   domain: argocd.int.${BASE_DOMAIN}
   priorityClassName: platform-critical
+  # repo-server's cmp-envsubst sidecar is a PRIVATE ghcr image
+  # (ghcr.io/werewolf-p/argocd-cmp-tools). Without a pull secret the SA pulls
+  # anonymously and ghcr returns 401, leaving repo-server stuck 1/2 ImagePullBackOff.
+  # Attach the ghcr-pull dockerconfigjson secret to all ArgoCD SAs so the pull is
+  # authenticated on every (re)deploy. (ghcr-pull is seeded into the argocd ns.)
+  imagePullSecrets:
+    - name: ghcr-pull
 
 controller:
   resources:
@@ -78,10 +85,11 @@ repoServer:
             topologyKey: kubernetes.io/hostname
   resources:
     requests:
-      cpu: 50m
+      cpu: 300m  # raised from 50m — envsubst CMP rendering of large app-of-apps paths
       memory: 64Mi
     limits:
-      cpu: 500m
+      cpu: 1500m  # raised from 500m — repo-server was CPU-throttled at 500m, causing
+                  # DeadlineExceeded on bootstrap manifest generation (envsubst CMP is slow)
       memory: 512Mi
   # Increase liveness probe timeout — default 1s is too tight when repo server is busy
   # with git clone/fetch operations, causing false-positive kills (52 restarts observed)
@@ -102,6 +110,14 @@ repoServer:
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: 1000m  # explicit limit — sidecar previously inherited LimitRange default,
+                      # throttling envsubst rendering under load
+          memory: 256Mi
       envFrom:
         - configMapRef:
             name: argocd-cmp-substitutions
@@ -112,7 +128,7 @@ repoServer:
         # substituted; anything else (incl. secret-class tokens) is left for the
         # plugin's fail-closed grep to catch.
         - name: ALLOWED_VARS
-          value: "${BASE_DOMAIN} ${DEPLOY_REPO_URL} ${ONEDEV_URL} ${METALLB_TRAEFIK_VIP} ${METALLB_COREDNS_VIP} ${METALLB_VLAN3_POOL_RANGE} ${PUBLIC_INGRESS_IP} ${MGMT_SUBNET_CIDR} ${NODE_SUBNET_CIDR} ${GITHUB_REPO} ${ADMIN_EMAIL} ${TRUENAS_HOST} ${TARGET_REPLICAS}"
+          value: "${BASE_DOMAIN} ${DEPLOY_REPO_URL} ${METALLB_TRAEFIK_VIP} ${METALLB_COREDNS_VIP} ${METALLB_VLAN3_POOL_RANGE} ${PUBLIC_INGRESS_IP} ${MGMT_SUBNET_CIDR} ${NODE_SUBNET_CIDR} ${GITHUB_REPO} ${ADMIN_EMAIL} ${TRUENAS_HOST} ${TARGET_REPLICAS}"
       volumeMounts:
         - { name: var-files, mountPath: /var/run/argocd }
         - { name: plugins, mountPath: /home/argocd/cmp-server/plugins }
@@ -191,6 +207,23 @@ configs:
       jsonPointers:
         - /metadata/annotations/notified.notifications.argoproj.io
         - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+    # ExternalSecret / PushSecret: the ESO admission webhook defaults remoteRef sub-fields
+    # (conversionStrategy=Default, decodingStrategy=None, metadataPolicy=None) and
+    # refreshPolicy. Manifests that omit these defaults otherwise diff forever (apps stuck
+    # OutOfSync though SecretSynced). Ignore the defaulted fields cluster-wide.
+    resource.customizations.ignoreDifferences.external-secrets.io_ExternalSecret: |
+      jqPathExpressions:
+        - '.spec.data[]?.remoteRef.conversionStrategy'
+        - '.spec.data[]?.remoteRef.decodingStrategy'
+        - '.spec.data[]?.remoteRef.metadataPolicy'
+        - '.spec.dataFrom[]?.extract.conversionStrategy'
+        - '.spec.dataFrom[]?.extract.decodingStrategy'
+        - '.spec.dataFrom[]?.extract.metadataPolicy'
+        - '.spec.refreshPolicy'
+    resource.customizations.ignoreDifferences.external-secrets.io_PushSecret: |
+      jqPathExpressions:
+        - '.spec.data[]?.match.remoteRef.decodingStrategy'
+        - '.spec.data[]?.conversionStrategy'
     # Namespaces: argocd.argoproj.io/tracking-id can only have one value but multiple apps
     # may legitimately manage different FIELDS of the same Namespace (e.g., app labels vs PSA
     # labels). Ignoring this annotation globally prevents SSA ownership ping-pong between
@@ -270,6 +303,10 @@ configs:
         - LocalSubjectAccessReview
   params:
     server.insecure: "true"
+    # Raised from default 60s: the envsubst CMP renders large app-of-apps paths slowly
+    # (~35s each); under concurrent reconcile load 60s was exceeded, causing
+    # DeadlineExceeded render failures that cached and left apps stuck Unknown.
+    controller.repo.server.timeout.seconds: "180"
   rbac:
     policy.csv: |
       # Individual user mappings (username = sub from OIDC token)

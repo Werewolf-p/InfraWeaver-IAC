@@ -17,9 +17,9 @@ import json
 
 E = "/tmp/etcdctl-healer"
 ETCD_NODES = [
-    os.environ.get("NODE_1_IP", "10.10.0.90"),
-    os.environ.get("NODE_2_IP", "10.10.0.91"),
-    os.environ.get("NODE_3_IP", "10.10.0.92"),
+    os.environ.get("NODE_1_IP", "10.0.0.90"),
+    os.environ.get("NODE_2_IP", "10.0.0.91"),
+    os.environ.get("NODE_3_IP", "10.0.0.92"),
 ]
 ENDPOINTS = ",".join(f"https://{node}:2379" for node in ETCD_NODES if node)
 

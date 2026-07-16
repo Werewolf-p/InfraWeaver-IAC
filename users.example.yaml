@@ -1,0 +1,58 @@
+# users.example.yaml — TEMPLATE / SCHEMA REFERENCE ONLY.
+#
+# The live file is `users.yaml` (repo root). It holds REAL people — names, emails,
+# and RBAC role assignments — so it is stripped from the public mirror by
+# scripts/sync-to-public.sh and must NEVER contain real values in this example.
+#
+# The InfraWeaver console reads and writes users.yaml over the GitHub Contents API
+# from the PRIVATE repo root (GITOPS_REPO). Keep it tracked here; do not move it into
+# params/ (that folder is gitignored and absent from the API tree, which breaks the
+# console with "users.yaml not found"). Copy this file to users.yaml and fill in real
+# users, or let the console manage it via invite/RBAC/offboard.
+
+users:
+  # Key = username (lowercase, stable identifier used as principalId).
+  alice:
+    name: Alice Example
+    email: alice@example.com
+    argocd_role: admin              # optional: ArgoCD RBAC role
+    openbao_policy: default         # optional: OpenBao policy name
+    wiki_role: admin                # optional: viewer | editor | admin
+    send_recovery_email: true       # optional: email a password-recovery link on provision
+    notes: Platform owner — full access to everything
+    access_level: admin             # admin | viewer (coarse console gate)
+    authentik_groups:               # Authentik group memberships (SSO/app access)
+      - platform-admins
+      - platform-users
+      - wiki-admins
+    role_assignments:               # canonical RBAC grants (managed by the console)
+      - id: ra-alice-platform-owner
+        roleId: platform-owner      # see BUILT_IN_ROLES in the console (lib/rbac.ts)
+        scope: /                    # Azure-style scope path; inherits downward
+        principalType: user
+        principalId: alice
+        grantedBy: alice@example.com
+        grantedAt: '2026-01-01T00:00:00.000Z'
+
+  bob:
+    name: Bob Example
+    email: bob@example.com
+    wiki_role: viewer
+    access_level: viewer
+    role_assignments:
+      # A scoped grant: contribute to one NAS share only.
+      - id: 00000000-0000-0000-0000-000000000001
+        roleId: storage-contributor
+        scope: /nas/<provider>/<share>/<path>
+        principalType: user
+        principalId: bob
+        grantedBy: alice@example.com
+        grantedAt: '2026-01-01T00:00:00.000Z'
+      # A resource grant: Jellyfin account.
+      - id: 00000000-0000-0000-0000-000000000002
+        roleId: jellyfin-user
+        scope: /jellyfin
+        principalType: user
+        principalId: bob
+        grantedBy: alice@example.com
+        grantedAt: '2026-01-01T00:00:00.000Z'

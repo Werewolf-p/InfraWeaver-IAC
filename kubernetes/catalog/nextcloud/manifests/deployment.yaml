@@ -1,0 +1,235 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/managed-by: infraweaver
+    infraweaver.io/source: catalog
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nextcloud
+    spec:
+      # Pinned to cp1: config + data live on a node-local local-path-retain
+      # volume (off Longhorn to remove RWO Multi-Attach stalls and lift the
+      # chunk-staging ceiling for very large uploads). The PV has nodeAffinity
+      # to cp1; this selector makes intent explicit and co-locates with Postgres.
+      nodeSelector:
+        kubernetes.io/hostname: talos-prod-cp1
+      securityContext:
+        fsGroup: 33
+      containers:
+        - name: nextcloud
+          image: nextcloud:29-apache
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+              protocol: TCP
+          env:
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-app-credentials
+                  key: db-host
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-app-credentials
+                  key: db-name
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-app-credentials
+                  key: db-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-app-credentials
+                  key: db-password
+            - name: NAS_MEDIA_PATH
+              value: /mnt/nas-media
+            - name: NEXTCLOUD_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-app-credentials
+                  key: admin-user
+            - name: NEXTCLOUD_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-app-credentials
+                  key: admin-password
+            - name: NEXTCLOUD_TRUSTED_DOMAINS
+              value: nextcloud.int.${BASE_DOMAIN} nextcloud.nextcloud.svc.cluster.local
+            - name: OVERWRITEPROTOCOL
+              value: https
+            - name: TRUSTED_PROXIES
+              value: 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+            # Upload/memory ceilings. Unset, the official image falls back to its
+            # 512M default, silently capping large media uploads (post_max_size +
+            # upload_max_filesize). The web UI chunks uploads, but WebDAV/direct
+            # PUTs assemble in a single php worker and need real headroom. This is
+            # PER worker: mpm_prefork runs many, so keep it well under the 3Gi
+            # container limit or concurrent uploads OOMKill the pod.
+            - name: PHP_MEMORY_LIMIT
+              value: 2048M
+            - name: PHP_UPLOAD_LIMIT
+              value: 128G
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-oidc-credentials
+                  key: client-id
+                  optional: true
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-oidc-credentials
+                  key: client-secret
+                  optional: true
+            - name: OIDC_DISCOVERY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-oidc-credentials
+                  key: discovery-url
+                  optional: true
+          volumeMounts:
+            - name: nextcloud-data
+              mountPath: /var/www/html
+            - name: nas-media-rw
+              mountPath: /mnt/nas-media
+          startupProbe:
+            httpGet:
+              path: /status.php
+              port: 80
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          # Readiness gates Service traffic. status.php bootstraps Nextcloud and
+          # queries Postgres, so under a heavy upload it can be slow. Without an
+          # explicit timeoutSeconds the probe used the 1s default and tripped on
+          # any load. Give it a real timeout and a wide failure budget so a busy
+          # pod is briefly pulled from the LB, never thrashed.
+          readinessProbe:
+            httpGet:
+              path: /status.php
+              port: 80
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 6
+          # Liveness must only prove Apache is alive, NOT that Nextcloud is fast.
+          # A very large upload saturates mpm_prefork workers and makes the
+          # heavyweight status.php miss its (default 1s) deadline; an httpGet
+          # liveness then KILLS the pod mid-upload, forcing a reschedule that
+          # hits a Longhorn RWO Multi-Attach stall. A TCP check on :80 stays
+          # green while Apache is up, so large uploads no longer self-crash.
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 3000m
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
+                - NET_BIND_SERVICE
+        # Watches the NAS mount and tells Jellyfin what changed. Must live in
+        # this pod: inotify only fires for writes through this pod's own mount.
+        # See configmap-media-notify.yaml for the full rationale.
+        - name: media-notify
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/scripts/watch.sh"]
+          env:
+            - name: WATCH_DIR
+              value: /mnt/nas-media
+            - name: JELLYFIN_URL
+              value: http://jellyfin.jellyfin.svc.cluster.local:8096
+            # Where the same NAS directory is mounted inside Jellyfin.
+            - name: JELLYFIN_LIBRARY_PATH
+              value: /data
+            - name: JELLYFIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jellyfin-notify-credentials
+                  key: api-key
+          volumeMounts:
+            # Read-only: the watcher observes, it never writes to the NAS.
+            - name: nas-media-rw
+              mountPath: /mnt/nas-media
+              readOnly: true
+            - name: media-notify-scripts
+              mountPath: /scripts
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsUser: 33
+            runAsGroup: 33
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: nextcloud-data
+          persistentVolumeClaim:
+            claimName: nextcloud-data-lp
+        - name: nas-media-rw
+          persistentVolumeClaim:
+            claimName: nas-infraweaver-media-rw
+        - name: media-notify-scripts
+          configMap:
+            name: nextcloud-media-notify
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  selector:
+    app.kubernetes.io/name: nextcloud
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+  type: ClusterIP
