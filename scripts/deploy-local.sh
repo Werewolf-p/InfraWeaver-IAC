@@ -935,7 +935,7 @@ for i in $(seq 1 18); do
   sleep 10
 done
 # Verify external access works
-if curl -sk -o /dev/null -w "%{http_code}" --max-time 5 --resolve "auth.${BASE_DOMAIN}:443:${VIP_ADDRESS:-10.0.0.200}" "https://auth.${BASE_DOMAIN}/" | grep -q "^[23]"; then
+if curl -sk -o /dev/null -w "%{http_code}" --max-time 5 --resolve "auth.${BASE_DOMAIN}:443:${VIP_ADDRESS:-${METALLB_TRAEFIK_VIP:-10.0.0.200}}" "https://auth.${BASE_DOMAIN}/" | grep -q "^[23]"; then
   ok "  External access verified via Traefik VIP"
 else
   warn "  External access check failed — may need time to stabilize"

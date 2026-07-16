@@ -405,6 +405,10 @@ else
     SEARCH_GROUP=$(ak_exec_curl GET "/api/v3/core/groups/?name=infraweaver-admins" | \
       python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
 
+    # Derive the LDAP base DN from the configured domain (e.g. example.com ->
+    # DC=ldap,DC=example,DC=com); LDAP_BASE_DN env overrides. Kept out of the source
+    # as a literal so no real domain is baked into the published template.
+    LDAP_BASE_DN="${LDAP_BASE_DN:-DC=ldap,DC=$(printf '%s' "${BASE_DOMAIN:-example.com}" | sed 's/\./,DC=/g')}"
     if [ -n "$AUTH_FLOW_PK" ]; then
       LDAP_PAYLOAD=$(python3 -c "
 import json
@@ -412,7 +416,7 @@ d = {
   'name': 'LDAP Provider',
   'authorization_flow': '${AUTH_FLOW_PK}',
   'invalidation_flow': '${INVAL_FLOW_PK:-}',
-  'base_dn': '${LDAP_BASE_DN:-DC=ldap,DC=rlservers,DC=com}',
+  'base_dn': '${LDAP_BASE_DN}',
   'uid_start_number': 2000,
   'gid_start_number': 4000,
 }
