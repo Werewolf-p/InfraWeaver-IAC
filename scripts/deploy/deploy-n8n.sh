@@ -400,7 +400,7 @@ fi
 # n8n's /rest/login renamed the identity field from "email" to "emailOrLdapLoginId"
 # (n8n ≥ 1.x). Sending the legacy "email" field alone yields HTTP 400 and a *silent*
 # skip of all workflow creation — which is why the feedback/automation workflows
-# never appeared on rlservers. We send both keys so login works across n8n versions.
+# never appeared on the cluster. We send both keys so login works across n8n versions.
 curl -s --max-time 15 -D /tmp/n8n_deploy_hdrs.txt -o /dev/null "$N8N_URL/rest/login" \
   -H "Content-Type: application/json" -H "browser-id: $N8N_BID" \
   -d "{\"emailOrLdapLoginId\":\"$ADMIN_EMAIL\",\"email\":\"$ADMIN_EMAIL\",\"password\":\"$N8N_OWNER_PASSWORD\"}" 2>/dev/null || true
