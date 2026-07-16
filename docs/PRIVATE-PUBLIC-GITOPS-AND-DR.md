@@ -27,11 +27,11 @@ export KUBECONFIG=/home/runner/.kube/config-platform-productie
 # 1. Give ArgoCD read access to the (soon-private) repo: deploy key or PAT.
 kubectl -n argocd create secret generic repo-infraweaver-infra \
   --from-literal=type=git \
-  --from-literal=url=https://github.com/Werewolf-p/InfraWeaver-infra \
+  --from-literal=url=https://github.com/example-owner/InfraWeaver-infra \
   --from-literal=password=<fine-grained-PAT-contents:read> --from-literal=username=git
 kubectl -n argocd label secret repo-infraweaver-infra argocd.argoproj.io/secret-type=repository
 # 2. Repoint the app-of-apps tier OneDev -> this GitHub repo (replaces broken OneDev; see B2).
-GH=https://github.com/Werewolf-p/InfraWeaver-infra
+GH=https://github.com/example-owner/InfraWeaver-infra
 for a in bootstrap catalog apps core platform crds development monitoring; do
   kubectl patch application -n argocd "$a" --type=merge -p '{"spec":{"source":{"repoURL":"'"$GH"'"}}}'; done
 kubectl patch applicationset -n argocd platform-catalog-apps --type=json \
@@ -39,12 +39,12 @@ kubectl patch applicationset -n argocd platform-catalog-apps --type=json \
 # 3. Validate ALL apps Synced/Healthy from the private repo, no unexpected prunes.
 kubectl get applications -n argocd -w
 # 4. Only now flip visibility:
-gh repo edit Werewolf-p/InfraWeaver-infra --visibility private --accept-visibility-change-consequences
+gh repo edit example-owner/InfraWeaver-infra --visibility private --accept-visibility-change-consequences
 # 5. Create the public template + enable the sync:
-gh repo create Werewolf-p/InfraWeaver-IAC --public
-gh secret set PUBLIC_REPO_PAT -R Werewolf-p/InfraWeaver-infra --body <fine-grained-PAT-contents:write-on-template>
-gh variable set PUBLIC_REPO -R Werewolf-p/InfraWeaver-infra --body Werewolf-p/InfraWeaver-IAC
-gh workflow run sync-to-public.yml -R Werewolf-p/InfraWeaver-infra   # first publish
+gh repo create example-owner/InfraWeaver-IAC --public
+gh secret set PUBLIC_REPO_PAT -R example-owner/InfraWeaver-infra --body <fine-grained-PAT-contents:write-on-template>
+gh variable set PUBLIC_REPO -R example-owner/InfraWeaver-infra --body example-owner/InfraWeaver-IAC
+gh workflow run sync-to-public.yml -R example-owner/InfraWeaver-infra   # first publish
 ```
 
 ## Phase 2 — DR rebuild with all-new secrets (SUPERVISED; catastrophic if unattended)

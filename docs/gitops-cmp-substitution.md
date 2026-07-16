@@ -75,14 +75,14 @@ metadata:
 data:
   # Config only — NEVER secrets. Sourced into envsubst at sync time.
   BASE_DOMAIN: "example.com"
-  DEPLOY_REPO_URL: "https://github.com/Werewolf-p/InfraWeaver-infra.git"
+  DEPLOY_REPO_URL: "https://github.com/example-owner/InfraWeaver-infra.git"
   ONEDEV_URL: "https://onedev.int.example.com"
   METALLB_TRAEFIK_VIP: "10.0.0.80"
   METALLB_COREDNS_VIP: "10.0.0.53"
   PUBLIC_INGRESS_IP: "<set-at-rebuild>"
   MGMT_SUBNET_CIDR: "10.0.0.0/24"
-  NODE_SUBNET_CIDR: "10.20.0.0/24"
-  GITHUB_REPO: "Werewolf-p/InfraWeaver-infra"
+  NODE_SUBNET_CIDR: "10.2.0.0/24"
+  GITHUB_REPO: "example-owner/InfraWeaver-infra"
   ADMIN_EMAIL: "admin@example.com"
   # ... remaining config placeholders
 ```
@@ -139,7 +139,7 @@ repoServer:
   # ... existing config ...
   sidecarContainers:
     - name: cmp-envsubst
-      image: ghcr.io/Werewolf-p/argocd-cmp-tools:latest   # argocd-repo-server base + envsubst + kustomize + helm
+      image: ghcr.io/example-owner/argocd-cmp-tools:latest   # argocd-repo-server base + envsubst + kustomize + helm
       args: ["/var/run/argocd/argocd-cmp-server"]
       securityContext: { runAsNonRoot: true, runAsUser: 999 }
       envFrom:

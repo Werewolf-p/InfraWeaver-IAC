@@ -499,7 +499,7 @@ if [[ -n "$GH_TOKEN" && "${ENABLE_N8N_AUTOMATION:-false}" == "true" ]]; then
 
   # Workflow 3: DNS Manager (CRUD for Cloudflare DNS records via webhook)
   CF_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
-  CF_ZONE="${CLOUDFLARE_ZONE_ID:-5a77d9adc2dfba4eec70049afd93ab54}"
+  CF_ZONE="${CLOUDFLARE_ZONE_ID:-your-cloudflare-zone-id}"
   if [[ -n "$CF_TOKEN" ]]; then
     # Write DNS Manager code to temp file (avoids shell escaping issues)
     cat > /tmp/dns_manager_deploy.js << 'DNS_JS_EOF'

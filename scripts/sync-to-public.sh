@@ -60,7 +60,9 @@ echo "==> stripping IaC + concrete per-cluster config from the export"
 # platform.yaml stay publishable as a forkable TEMPLATE rather than leaking real
 # values or having to be stripped. The map lives in params/.public-genericize
 # (gitignored, never synced) — one `ERE_pattern|replacement` per line ('#' =
-# comment) — paired 1:1 with params/.public-deny. Applied to the EXPORT copy only,
+# comment) — paired 1:1 with params/.public-deny. Matching is case-insensitive so a
+# single pattern also catches UPPERCASE env-var derivations of the same identifier.
+# Applied to the EXPORT copy only,
 # never to the private source that ArgoCD deploys, so it can never affect prod;
 # ENVSUBST-rendered manifests already carry ${BASE_DOMAIN}-style tokens, so the subs
 # are a no-op there. If the map is absent the subs are skipped and the fail-closed
@@ -72,8 +74,8 @@ if [[ -f "$GENERICIZE_FILE" ]]; then
   while IFS='|' read -r pat repl; do
     [[ -z "$pat" || "$pat" == \#* ]] && continue
     while IFS= read -r -d '' f; do
-      sed -i -E "s|$pat|$repl|g" "$f"
-    done < <(grep -rIlZ -E "$pat" "$WORK/pub" --exclude-dir=.git 2>/dev/null)
+      sed -i -E "s|$pat|$repl|gI" "$f"
+    done < <(grep -riIlZ -E "$pat" "$WORK/pub" --exclude-dir=.git 2>/dev/null)
   done < "$GENERICIZE_FILE"
 fi
 
@@ -90,7 +92,8 @@ fi
 # Content deny-scan (fail-closed): refuse to publish if any private identifier
 # (real domain, real usernames, token names) appears in the sanitized tree.
 # Patterns live in params/.public-deny (gitignored, never synced) — one ERE
-# regex per line, '#' comments allowed — so the secrets/identifiers themselves
+# regex per line, '#' comments allowed, matched case-insensitively — so the
+# secrets/identifiers themselves
 # are never baked into this script. If the file is absent, only a built-in
 # generic check runs (private-key blocks).
 DENY_FILE="$SRC/params/.public-deny"
@@ -98,9 +101,9 @@ deny_hit=0
 if [[ -f "$DENY_FILE" ]]; then
   while IFS= read -r pat; do
     [[ -z "$pat" || "$pat" == \#* ]] && continue
-    if grep -rIlE "$pat" "$WORK/pub" --exclude-dir=.git >/dev/null 2>&1; then
+    if grep -riIlE "$pat" "$WORK/pub" --exclude-dir=.git >/dev/null 2>&1; then
       echo "✖ ABORT: deny-pattern matched in sanitized tree (pattern hidden) — not pushing." >&2
-      grep -rIlE "$pat" "$WORK/pub" --exclude-dir=.git | sed "s|$WORK/pub/||" | head >&2
+      grep -riIlE "$pat" "$WORK/pub" --exclude-dir=.git | sed "s|$WORK/pub/||" | head >&2
       deny_hit=1
     fi
   done < "$DENY_FILE"

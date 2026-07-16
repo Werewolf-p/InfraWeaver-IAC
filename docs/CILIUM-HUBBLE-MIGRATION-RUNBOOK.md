@@ -28,7 +28,7 @@ three.
 | kube-proxy | running (Talos-managed) |
 | Pod CIDR | `10.244.0.0/16` |
 | Service CIDR | `10.96.0.0/12` |
-| GitOps | ArgoCD ← `github.com/Werewolf-p/InfraWeaver-infra` @ `main`, auto-sync + selfHeal |
+| GitOps | ArgoCD ← `github.com/example-owner/InfraWeaver-infra` @ `main`, auto-sync + selfHeal |
 
 ## BLOCKER — Talos credentials
 

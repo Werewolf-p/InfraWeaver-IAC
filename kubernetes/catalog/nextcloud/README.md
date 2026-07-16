@@ -38,7 +38,7 @@ are declared via the `NAS_PROVIDERS_JSON` env var on the console deployment:
   {
     "id": "synology-office",
     "name": "Office Synology",
-    "host": "10.30.0.10",
+    "host": "10.3.0.10",
     "port": 5001,
     "protocol": "https",
     "kind": "synology",

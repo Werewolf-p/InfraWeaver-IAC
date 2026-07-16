@@ -18,7 +18,7 @@
 #   GHCR_TOKEN=ghp_xxx GHCR_USER=your-gh-user \
 #     scripts/deploy/seed-ghcr-pull-secret.sh <LOCAL_OPENBAO_URL> <ROOT_TOKEN> [--force]
 # Example:
-#   GHCR_TOKEN=$(cat ~/.ghcr-ro-token) GHCR_USER=werewolf-p \
+#   GHCR_TOKEN=$(cat ~/.ghcr-ro-token) GHCR_USER=example-owner \
 #     scripts/deploy/seed-ghcr-pull-secret.sh http://localhost:8200 hvs.xxxxx --force
 set -euo pipefail
 

@@ -388,7 +388,7 @@ metadata:
   annotations:
     external-dns.alpha.kubernetes.io/hostname: cobalt-grove-45.games.example.com
     external-dns.alpha.kubernetes.io/managed: 'true'
-    external-dns.alpha.kubernetes.io/target: 84.82.69.110
+    external-dns.alpha.kubernetes.io/target: 203.0.113.10
     external-dns.alpha.kubernetes.io/ttl: '60'
   labels:
     app: cobalt-grove-45

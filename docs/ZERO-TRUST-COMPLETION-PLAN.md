@@ -17,7 +17,7 @@ skip verification. Stop and report if a P0/P1 step fails.
   for console→argocd, cert-manager, external-dns, tradesphere→Binance.
 - **GitOps** committed+pushed to `main`: `kubernetes/core/network-policies/`,
   `kubernetes/core/cilium/`, `kubernetes/bootstrap/core-network-policies.yaml`.
-  ArgoCD source = `github.com/Werewolf-p/InfraWeaver-infra`, auto-sync.
+  ArgoCD source = `github.com/example-owner/InfraWeaver-infra`, auto-sync.
 - **Rollback (CNI)**: `talosctl -e <ip> -n <ip> patch mc --patch '{"cluster":{"network":{"cni":{"name":"flannel"}}}}'`
   then `reboot`, then reinstall flannel. Per-policy rollback: `kubectl delete cnp <name> -n <ns>`.
 

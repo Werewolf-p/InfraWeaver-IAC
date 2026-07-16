@@ -282,9 +282,9 @@ fi
 python3 -c "import bcrypt" 2>/dev/null || pip3 install --quiet bcrypt 2>/dev/null || sudo apt-get install -y python3-bcrypt -q 2>/dev/null || true
 ADMIN_PASS=$(openssl rand -base64 20 | tr -d '=+/')
 ADMIN_PASS_FILE=$(mktemp)
-REMON_PATCH_FILE=$(mktemp)
+ADMIN_PATCH_FILE=$(mktemp)
 printf '%s' "$ADMIN_PASS" > "$ADMIN_PASS_FILE"
-python3 - "$ADMIN_PASS_FILE" "$REMON_PATCH_FILE" 2>/dev/null << 'REMON_PYEOF' || true
+python3 - "$ADMIN_PASS_FILE" "$ADMIN_PATCH_FILE" 2>/dev/null << 'ADMIN_PYEOF' || true
 import bcrypt, json, sys
 from datetime import datetime, timezone
 with open(sys.argv[1]) as f:
@@ -292,10 +292,10 @@ with open(sys.argv[1]) as f:
 h = bcrypt.hashpw(p, bcrypt.gensalt(10)).decode()
 mtime = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 json.dump({'stringData': {'accounts.${ADMIN_USERNAME:-admin}.password': h, 'accounts.${ADMIN_USERNAME:-admin}.passwordMtime': mtime}}, open(sys.argv[2], 'w'))
-REMON_PYEOF
-if [ -s "$REMON_PATCH_FILE" ]; then
+ADMIN_PYEOF
+if [ -s "$ADMIN_PATCH_FILE" ]; then
   kubectl --kubeconfig "$KB" patch secret argocd-secret -n argocd \
-    --patch-file "$REMON_PATCH_FILE" 2>/dev/null || true
+    --patch-file "$ADMIN_PATCH_FILE" 2>/dev/null || true
   curl -s -X POST "${LOCAL_OPENBAO}/v1/secret/data/platform/argocd-admin" \
     -H "X-Vault-Token: $ROOT_TOKEN" \
     -H "Content-Type: application/json" \
@@ -304,7 +304,7 @@ if [ -s "$REMON_PATCH_FILE" ]; then
 else
   echo "==> WARNING: bcrypt unavailable — admin password not set"
 fi
-rm -f "$ADMIN_PASS_FILE" "$REMON_PATCH_FILE"
+rm -f "$ADMIN_PASS_FILE" "$ADMIN_PATCH_FILE"
 
 
 # Authentik: seed secret (script handles first-deploy and admin-password patch)

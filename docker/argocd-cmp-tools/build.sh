@@ -13,7 +13,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-IMAGE="${IMAGE:-ghcr.io/werewolf-p/argocd-cmp-envsubst}"
+IMAGE="${IMAGE:-ghcr.io/example-owner/argocd-cmp-envsubst}"
 TAG="${TAG:-latest}"
 CHART_VERSION="${CHART_VERSION:-9.5.*}"
 

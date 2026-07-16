@@ -6,7 +6,7 @@ Sections: Authentik SSO → Homelab Dashboard → OpenBao Vault.
 Reads user list from users.yaml dynamically — no hardcoded usernames.
 
 Recovery link env var convention: AUTHENTIK_{USERNAME.upper()}_RECOVERY_LINK
-  e.g. AUTHENTIK_REMON_RECOVERY_LINK, AUTHENTIK_ARDATY_RECOVERY_LINK
+  e.g. AUTHENTIK_ADMIN_RECOVERY_LINK, AUTHENTIK_USER_RECOVERY_LINK
 
 Environment variables:
   SMTP_USERNAME, SMTP_PASSWORD, SMTP_TO

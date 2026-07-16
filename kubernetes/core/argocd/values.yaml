@@ -2,7 +2,7 @@ global:
   domain: argocd.int.${BASE_DOMAIN}
   priorityClassName: platform-critical
   # repo-server's cmp-envsubst sidecar is a PRIVATE ghcr image
-  # (ghcr.io/werewolf-p/argocd-cmp-tools). Without a pull secret the SA pulls
+  # (ghcr.io/example-owner/argocd-cmp-tools). Without a pull secret the SA pulls
   # anonymously and ghcr returns 401, leaving repo-server stuck 1/2 ImagePullBackOff.
   # Attach the ghcr-pull dockerconfigjson secret to all ArgoCD SAs so the pull is
   # authenticated on every (re)deploy. (ghcr-pull is seeded into the argocd ns.)
@@ -105,7 +105,7 @@ repoServer:
   # allowlisted ${CONFIG} placeholders at sync time; secrets stay in OpenBao + ESO.
   extraContainers:
     - name: cmp-envsubst
-      image: ghcr.io/werewolf-p/argocd-cmp-tools@sha256:05f971df8600134be5ac2a82ca938286d86c33e40e2f07ba70d834d9afd11e90
+      image: ghcr.io/example-owner/argocd-cmp-tools@sha256:05f971df8600134be5ac2a82ca938286d86c33e40e2f07ba70d834d9afd11e90
       command: ["/var/run/argocd/argocd-cmp-server"]
       securityContext:
         runAsNonRoot: true
