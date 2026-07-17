@@ -308,3 +308,28 @@ spec:
   ingress:
     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
       toPorts: [{ports: [{port: "3000", protocol: TCP}]}]
+---
+# WHY: the console's monitoring "Logs" tab queries Loki for historical/aggregated
+# logs (loki.monitoring.svc:3100 — see src/lib/loki.ts + /api/logs/search). The
+# console's own egress netpol already opens monitoring:9090 for Prometheus but NOT
+# 3100, and console pods are egress-enforced, so the Loki fetch would be dropped.
+# Egress side: console -> loki:3100. Pod port, evaluated after service translation.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-loki, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring, "app": loki}}]
+      toPorts: [{ports: [{port: "3100", protocol: TCP}]}]
+---
+# WHY: the matching ingress side — Loki must accept the console's log-search calls.
+# monitoring runs default-deny-ingress; Cilium unions this with that k8s policy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-console-to-loki, namespace: monitoring, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app": loki}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-console}}]
+      toPorts: [{ports: [{port: "3100", protocol: TCP}]}]
