@@ -1,0 +1,64 @@
+---
+# catalog-gatus — plain-manifest catalog app.
+#
+# The `platform-catalog-apps` ApplicationSet only generates Applications for
+# Helm-based apps (those with an `application.yaml`). Manifest-based catalog
+# apps get a hand-written Application here, alongside jellyfin and the console.
+#
+# WHY this file exists: gatus is listed under catalog.enabled in platform.yaml
+# and ships full manifests at kubernetes/catalog/gatus/manifests, but had no
+# Application wiring it in — so it was never deployed. Without gatus running,
+# the console's /api/health and /health page report "degraded" because their
+# fetch of http://gatus.gatus.svc:8080 always fails.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-gatus-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: catalog-app
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/gatus/manifests
+    # Render through the envsubst CMP so ${BASE_DOMAIN} in the ConfigMap
+    # endpoints, hostAliases and the IngressRoute Host rule resolve at sync
+    # time. A plain directory source applies the YAML verbatim, so without this
+    # the router matches the literal host "status.int.${BASE_DOMAIN}" and every
+    # real request 404s — while ArgoCD still reports Synced/Healthy, because the
+    # literal is what git asked for. ${DISCORD_WEBHOOK_URL} is NOT in the CMP's
+    # shell-format allowlist, so it stays literal for gatus to expand at runtime
+    # from the secret-sourced env var.
+    plugin:
+      name: envsubst-v1.0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gatus
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'
