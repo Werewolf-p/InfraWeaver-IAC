@@ -36,10 +36,12 @@ CORE_ENDPOINTS = [
     # Always monitored — these are the mandatory core services.
     {
         "name": "ArgoCD",
-        "url": "https://argocd.int.yourdomain.com",
+        # In-cluster health — argocd-server runs with --insecure, so /healthz is
+        # plain HTTP on the service port. Bypasses Traefik + Authentik forward-auth
+        # (the public argocd.int host 302s to login and never returns 200).
+        "url": "http://argocd-server.argocd.svc.cluster.local/healthz",
         "interval": "60s",
         "group": "core",
-        "client": {"insecure": True},
         "conditions": ["[STATUS] == 200", "[RESPONSE_TIME] < 2000"],
         "alerts": [{"type": "discord", "description": "ArgoCD is unreachable via VPN"}],
     },
@@ -54,10 +56,11 @@ CORE_ENDPOINTS = [
     },
     {
         "name": "OpenBao",
-        "url": "https://openbao.int.yourdomain.com/v1/sys/health",
+        # In-cluster health API (svc port 8200 is plain HTTP). Bypasses forward-auth
+        # on the public .int host, which times out from inside the cluster.
+        "url": "http://openbao.openbao.svc.cluster.local:8200/v1/sys/health",
         "interval": "60s",
         "group": "core",
-        "client": {"insecure": True},
         "conditions": ["[STATUS] == 200", "[BODY].initialized == true", "[BODY].sealed == false"],
         "alerts": [{"type": "discord", "description": "OpenBao is sealed or unreachable — secrets unavailable"}],
     },
@@ -97,10 +100,10 @@ APP_ENDPOINT_MAP = {
     },
     "grafana": {
         "name": "Grafana",
-        "url": "https://grafana.int.yourdomain.com/api/health",
+        # In-cluster health endpoint (bypasses forward-auth on the .int host).
+        "url": "http://grafana.apps-grafana.svc.cluster.local/api/health",
         "interval": "60s",
         "group": "platform",
-        "client": {"insecure": True},
         "conditions": ["[STATUS] == 200"],
         "alerts": [{"type": "discord", "description": "Grafana is unreachable"}],
     },
@@ -150,19 +153,21 @@ APP_ENDPOINT_MAP = {
     },
     "infraweaver-console": {
         "name": "InfraWeaver Console",
-        "url": "https://infraweaver.int.yourdomain.com/api/ping",
+        # In-cluster ping (unauthenticated route on the console svc, port 3000).
+        # The .int host times out from inside the cluster.
+        "url": "http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/ping",
         "interval": "60s",
         "group": "catalog",
-        "client": {"insecure": True},
         "conditions": ["[STATUS] == 200", "[BODY].status == ok"],
         "alerts": [{"type": "discord", "description": "InfraWeaver Console is unreachable"}],
     },
     "registry": {
         "name": "Container Registry",
-        "url": "https://registry.int.yourdomain.com/v2/",
+        # In-cluster registry API (svc port 5000). /v2/ returns 200/401 — both < 500.
+        # The .int host times out from inside the cluster.
+        "url": "http://registry.registry.svc.cluster.local:5000/v2/",
         "interval": "120s",
         "group": "catalog",
-        "client": {"insecure": True},
         "conditions": ["[STATUS] < 500"],
         "alerts": [{"type": "discord", "description": "Container registry is unreachable"}],
     },

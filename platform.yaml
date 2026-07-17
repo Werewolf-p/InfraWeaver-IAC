@@ -180,8 +180,10 @@ catalog:
   #   outline          — Team knowledge base (OIDC)            (outline.int.yourdomain.com)
   enabled:
     - gatus
-    - stirling-pdf
-    - onedev
+    # stirling-pdf / onedev: listed here historically but never wired into the
+    # catalog ApplicationSet (no application.yaml, no ArgoCD app, no running pods).
+    # Leaving them enabled made Gatus monitor two non-existent services, which kept
+    # the console /health page permanently degraded. Re-add once real manifests ship.
     - infraweaver-console
     - infraweaver-api
     - infraweaver-node
@@ -193,10 +195,6 @@ catalog:
   # Only effective for apps whose Helm chart supports replicaCount.
   ha:
     gatus:
-      replicas: 1
-    stirling-pdf:
-      replicas: 1
-    onedev:
       replicas: 1
     registry:
       replicas: 1

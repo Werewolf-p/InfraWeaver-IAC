@@ -35,11 +35,9 @@ data:
 
     endpoints:
       - name: ArgoCD
-        url: https://argocd.int.${BASE_DOMAIN}
+        url: http://argocd-server.argocd.svc.cluster.local/healthz
         interval: 60s
         group: core
-        client:
-          insecure: true
         conditions:
           - "[STATUS] == 200"
           - "[RESPONSE_TIME] < 2000"
@@ -58,11 +56,9 @@ data:
             description: "Traefik ingress is unreachable — all internal services affected"
 
       - name: OpenBao
-        url: https://openbao.int.${BASE_DOMAIN}/v1/sys/health
+        url: http://openbao.openbao.svc.cluster.local:8200/v1/sys/health
         interval: 60s
         group: core
-        client:
-          insecure: true
         conditions:
           - "[STATUS] == 200"
           - "[BODY].initialized == true"
@@ -80,19 +76,6 @@ data:
         alerts:
           - type: discord
             description: "Authentik SSO is down — all platform logins affected"
-
-
-      - name: Grafana
-        url: https://grafana.int.${BASE_DOMAIN}/api/health
-        interval: 60s
-        group: platform
-        client:
-          insecure: true
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: discord
-            description: "Grafana is unreachable"
 
       - name: Prometheus
         url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
@@ -114,24 +97,10 @@ data:
           - type: discord
             description: "Loki is unreachable — log aggregation stopped"
 
-      - name: Stirling PDF
-        url: https://stirling-pdf.int.${BASE_DOMAIN}
-        interval: 120s
-        group: catalog
-        client:
-          insecure: true
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: discord
-            description: "Stirling PDF is unreachable"
-
       - name: InfraWeaver Console
-        url: https://infraweaver.int.${BASE_DOMAIN}/api/ping
+        url: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/ping
         interval: 60s
         group: catalog
-        client:
-          insecure: true
         conditions:
           - "[STATUS] == 200"
           - "[BODY].status == ok"
@@ -140,11 +109,9 @@ data:
             description: "InfraWeaver Console is unreachable"
 
       - name: Container Registry
-        url: https://registry.int.${BASE_DOMAIN}/v2/
+        url: http://registry.registry.svc.cluster.local:5000/v2/
         interval: 120s
         group: catalog
-        client:
-          insecure: true
         conditions:
           - "[STATUS] < 500"
         alerts:
@@ -225,17 +192,6 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
-      # Resolve *.int.${BASE_DOMAIN} to Traefik ClusterIP so health checks work
-      # from inside the cluster (MetalLB VIP ${METALLB_TRAEFIK_VIP} has hairpin NAT limitations).
-      hostAliases:
-        - ip: "10.108.119.231"
-          hostnames:
-            - "infraweaver.int.${BASE_DOMAIN}"
-            - "argocd.int.${BASE_DOMAIN}"
-            - "registry.int.${BASE_DOMAIN}"
-            - "stirling-pdf.int.${BASE_DOMAIN}"
-            - "grafana.int.${BASE_DOMAIN}"
-            - "openbao.int.${BASE_DOMAIN}"
       containers:
         - name: gatus
           image: twinproduction/gatus:v5.12.1
@@ -313,7 +269,7 @@ spec:
         - name: gatus
           port: 8080
   tls:
-    secretName: platform-int-wildcard-tls  # *.int.${BASE_DOMAIN} cert (was the non-existent platform-wildcard-int-tls)
+    secretName: platform-wildcard-int-tls
 ---
 # NetworkPolicy for Gatus
 apiVersion: networking.k8s.io/v1

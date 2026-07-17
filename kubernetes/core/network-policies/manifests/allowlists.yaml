@@ -246,3 +246,65 @@ spec:
   ingress:
     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-console}}]
       toPorts: [{ports: [{port: "8080", protocol: TCP}]}]
+---
+# WHY: Gatus health-probes each core/platform service directly in-cluster so its
+# checks bypass Traefik + Authentik forward-auth (the public *.int hosts 302 to
+# login / time out from inside the cluster and never return 200). Its checks were
+# repointed to in-cluster health URLs in scripts/generate-gatus-config.py, but the
+# target namespaces run default-deny-ingress, so every probe was dropped and the
+# console /health page stayed degraded. These are the matching ingress holes —
+# one per probed target, Cilium unions them with each namespace's k8s NetworkPolicy.
+# Gatus itself has no egress policy (egress stays default-allow), so only the
+# ingress side is needed. Ports are POD ports, evaluated after service translation.
+# Registry is intentionally absent: its namespace has NO ingress policy at all
+# (default-allow), so adding one would flip it to deny-all-except-gatus.
+#
+# argocd-server /healthz (runs --insecure → plain HTTP on 8080).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-ingress-from-gatus, namespace: argocd, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": argocd-server}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
+      toPorts: [{ports: [{port: "8080", protocol: TCP}]}]
+---
+# openbao /v1/sys/health (svc port 8200 is plain HTTP).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-ingress-from-gatus, namespace: openbao, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
+      toPorts: [{ports: [{port: "8200", protocol: TCP}]}]
+---
+# Prometheus /-/healthy (pod port 9090).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-gatus-to-prometheus, namespace: monitoring, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": prometheus}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
+      toPorts: [{ports: [{port: "9090", protocol: TCP}]}]
+---
+# Loki /ready (pod port 3100).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-gatus-to-loki, namespace: monitoring, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app": loki}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
+      toPorts: [{ports: [{port: "3100", protocol: TCP}]}]
+---
+# InfraWeaver Console /api/ping (unauthenticated route, pod port 3000).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-ingress-from-gatus, namespace: infraweaver-console, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app": infraweaver-console}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
+      toPorts: [{ports: [{port: "3000", protocol: TCP}]}]
