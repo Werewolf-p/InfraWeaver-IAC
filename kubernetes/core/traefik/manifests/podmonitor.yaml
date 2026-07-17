@@ -1,0 +1,25 @@
+---
+# PodMonitor — scrapes Traefik's Prometheus metrics endpoint (:9100, entrypoint
+# "metrics", enabled by the chart's --metrics.prometheus=true). The Traefik
+# Service does not expose the metrics port, so we scrape pods directly.
+# Prometheus (kube-prometheus-stack) watches PodMonitors in all namespaces
+# (empty podMonitorSelector). Ingress traffic tiles on the console's Cluster
+# Vitals widget depend on traefik_entrypoint_requests_total from this scrape.
+# NetworkPolicy allow-prometheus-scrape already opens monitoring -> :9100.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: traefik
+  namespace: traefik
+  labels:
+    app.kubernetes.io/name: traefik
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
