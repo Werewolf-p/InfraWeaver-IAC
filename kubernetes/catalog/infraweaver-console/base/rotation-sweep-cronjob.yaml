@@ -1,0 +1,89 @@
+# WordPress Connector key-reroll sweep — daily, server-driven (§8).
+#
+# Once a day this CronJob POSTs to the console's own /api/wordpress/rotation-sweep
+# endpoint, which rerolls the signing key of every managed link whose current key
+# is older than IWSL_ROTATION_MAX_AGE_DAYS (default 30), at most
+# IWSL_ROTATION_MAX_PER_RUN per run (default 2, oldest first). It reuses the exact
+# PREPARE → VERIFY → CONFIRM driver the manual "Reroll key" button uses, so a
+# reroll that can't be verified under the new epoch keeps the OLD key live and is
+# retried on a later run — no window where a site can't be commanded.
+#
+# Auth: reuses the SAME shared token as the health sweep
+# (`infraweaver-console-secret` key `wordpress-health-cron-token`), so no new
+# secret key is introduced. The console middleware (proxy.ts) lets this request
+# past the session gate only when the token matches; the route handler
+# re-validates it (defence in depth).
+#
+# Networking: the sweep pod carries the iwsl component labels, so the existing
+# ciliumnetworkpolicy-wp-health-egress.yaml (egress to CoreDNS + console) and
+# networkpolicy-wp-health.yaml (ingress to the console pod on :3000) already
+# cover it — no extra NetworkPolicy needed.
+#
+# SAFETY: shipped SUSPENDED (`spec.suspend: true`). Rolling live signing keys on a
+# schedule is a deliberate operator decision — flip suspend to false only after
+# confirming the age/per-run thresholds. `kubectl -n infraweaver-console patch
+# cronjob wordpress-connector-rotation-sweep -p '{"spec":{"suspend":false}}'`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-connector-rotation-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  suspend: true # ← activate deliberately; see SAFETY note above
+  schedule: "17 3 * * *" # daily at 03:17, offset from other crons
+  concurrencyPolicy: Forbid # a reroll must never overlap itself
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1 # a failed reroll keeps the old key; retry tomorrow, don't hammer
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rotation-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-rotation-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 600
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/rotation-sweep

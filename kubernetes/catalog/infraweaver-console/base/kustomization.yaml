@@ -11,6 +11,7 @@ resources:
   - ciliumnetworkpolicy-udm-egress.yaml
   - ciliumnetworkpolicy-wp-health-egress.yaml
   - health-sweep-cronjob.yaml
+  - rotation-sweep-cronjob.yaml
   - users-reconcile-cronjob.yaml
   - roster-drift-cronjob.yaml
   - networkpolicy-wp-health.yaml

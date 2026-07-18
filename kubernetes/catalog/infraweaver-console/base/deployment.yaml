@@ -210,6 +210,17 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-health-cron-token
               optional: true
+        # DEDICATED token for the daily key-reroll sweep CronJob's POST to
+        # /api/wordpress/rotation-sweep. Distinct VALUE from the health token
+        # (SECURITY-SCAN-2026-07-18 M2) — fleet key-rotation must not inherit the
+        # read-only health token's blast radius. Optional: absent = rotation cron
+        # token auth disabled, sweep still callable via a wordpress:admin session.
+        - name: WORDPRESS_ROTATION_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-rotation-cron-token
+              optional: true
         # Shared token for the in-cluster users-reconcile CronJob's POST to
         # /api/users/reconcile. Reuses the same ESO-synced secret VALUE as the
         # health-sweep token (same in-cluster cron trust boundary) under a distinct
