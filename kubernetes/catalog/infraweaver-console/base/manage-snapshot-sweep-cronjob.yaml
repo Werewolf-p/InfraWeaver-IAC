@@ -31,7 +31,7 @@ metadata:
     app.kubernetes.io/managed-by: infraweaver-console
     infraweaver.io/component: iwsl
 spec:
-  schedule: "0 * * * *" # top of every hour — change to tune the auto-pull interval
+  schedule: "*/15 * * * *" # every 15 min — change to tune the auto-pull interval
   concurrencyPolicy: Replace # kill a wedged sweep, never let a hung pod block the schedule
   startingDeadlineSeconds: 300
   successfulJobsHistoryLimit: 3
