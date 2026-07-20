@@ -1,0 +1,87 @@
+# WordPress Manage-snapshot sweep — hourly, server-driven auto-pull.
+#
+# Every hour this CronJob POSTs to the console's own /api/wordpress/manage/sweep
+# endpoint, which force-pulls EVERY provisioned site's Manage overview live (three
+# wp-cli execs per site) and persists it to a durable, cross-replica ConfigMap
+# snapshot store (infraweaver-wp-manage-snapshots). The Manage page then paints
+# instantly from that snapshot instead of blocking on a cold pod round-trip, and
+# the /api/wordpress/metrics exporter renders numeric per-site KPI gauges
+# (iwsl_site_*) from the same snapshots so they build history in Prometheus.
+#
+# Interval: change `schedule` below (default hourly). The operator can also force
+# a refresh per-site from the console header ("Force renew", `?refresh=1`).
+#
+# Auth: a DEDICATED token (key `wordpress-metrics-cron-token` in the ESO-managed
+# `infraweaver-console-secret`, synced from OpenBao
+# `secret/platform/infraweaver-console`) — distinct from the health-sweep and
+# rotation-sweep tokens so the three crons stay independently gateable. The
+# console middleware (proxy.ts) lets this request past the session gate only when
+# the token matches; the route handler re-validates it (defence in depth).
+#
+# Networking: the sweep pod carries `infraweaver.io/component: iwsl`, so it is
+# already covered by the existing health-sweep egress CiliumNetworkPolicy (CoreDNS
+# + console Service) and the ingress NetworkPolicy to the console pod on :3000 —
+# no new network policy required.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-manage-snapshot-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "0 * * * *" # top of every hour — change to tune the auto-pull interval
+  concurrencyPolicy: Replace # kill a wedged sweep, never let a hung pod block the schedule
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: manage-snapshot-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-metrics-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 300
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/manage/sweep

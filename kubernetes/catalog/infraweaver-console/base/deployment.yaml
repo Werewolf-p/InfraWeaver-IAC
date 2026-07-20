@@ -221,6 +221,18 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-rotation-cron-token
               optional: true
+        # DEDICATED token for the hourly Manage-snapshot sweep CronJob's POST to
+        # /api/wordpress/manage/sweep (force-pulls every site's overview into the
+        # durable snapshot store + warms the iwsl_site_* KPI gauges). Distinct from
+        # the health/rotation/metrics-scrape tokens so the crons stay independently
+        # gateable. Optional: absent = cron token auth disabled, sweep still
+        # callable via a wordpress:read session.
+        - name: WORDPRESS_METRICS_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-metrics-cron-token
+              optional: true
         # Shared token for the in-cluster users-reconcile CronJob's POST to
         # /api/users/reconcile. Reuses the same ESO-synced secret VALUE as the
         # health-sweep token (same in-cluster cron trust boundary) under a distinct
