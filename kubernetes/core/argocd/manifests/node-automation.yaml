@@ -197,6 +197,36 @@ spec:
                       result="cordoned-drain-blocked"
                     fi
 
+                    # `kubectl drain` evicts, but a pod on a node whose kubelet is gone
+                    # never confirms the eviction, so it sits Terminating forever. For a
+                    # Deployment that is only clutter — the ReplicaSet already made a
+                    # replacement elsewhere. For a StatefulSet it is an outage: the
+                    # at-most-one guarantee means the controller will NOT create the
+                    # replacement while the old pod still exists. That is how one dead
+                    # node took ArgoCD's application-controller with it and froze every
+                    # app mid-sync until the pod was force-deleted by hand.
+                    #
+                    # Safe here specifically because of where it sits: we only reach this
+                    # line after the node has been NotReady for NOT_READY_SECONDS with at
+                    # least two other nodes Ready, which is the evidence that the kubelet
+                    # is gone rather than slow. Force-deleting a pod whose node is merely
+                    # partitioned would risk two writers; force-deleting one whose node is
+                    # dead is the only way its workload comes back.
+                    stuck=$(kubectl get pods -A --field-selector "spec.nodeName=$node" \
+                      -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' \
+                      2>/dev/null || true)
+                    for stuck_pod in $stuck; do
+                      stuck_ns="${stuck_pod%%/*}"
+                      stuck_name="${stuck_pod##*/}"
+                      echo "Force-deleting $stuck_pod — stuck Terminating on dead node $node"
+                      kubectl delete pod -n "$stuck_ns" "$stuck_name" --force --grace-period=0 \
+                        >/dev/null 2>&1 || true
+                      actions=$((actions + 1))
+                    done
+                    if [ -n "$stuck" ]; then
+                      notify "🧹 **Node remediation** force-deleted $(echo "$stuck" | grep -c .) pod(s) stuck Terminating on \`$node\`."
+                    fi
+
                     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                     kubectl annotate node "$node" \
                       infraweaver.io/notready-remediated-at="$timestamp" \
