@@ -20,6 +20,14 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
+  # Needed to hold console-stopped apps at zero replicas (see the power-off
+  # enforcement pass in the job script). Scale only — no create/delete.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -215,6 +223,39 @@ spec:
                     -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.annotations.infraweaver\.io/power}{"\n"}{end}' \
                     2>/dev/null | grep '=off$' | cut -d= -f1 | tr '\n' ' ' || true)
                   is_powered_off() { case " $POWERED_OFF " in *" $1 "*) return 0 ;; esac; return 1; }
+
+                  # ── Enforce power-off (drift correction) ─────────────────
+                  # Stopping an app from the console is three writes — annotate,
+                  # pause auto-sync, scale the namespace to 0 — and only the first
+                  # two live on the Application. The replicas live in the cluster,
+                  # so anything that re-applies the app's git source restores them:
+                  # a manual sync, or the `kubectl apply --server-side` that apps
+                  # without auto-sync are updated with. Nothing clears the flag when
+                  # that happens, so the app runs while every surface reports it
+                  # stopped. Hold it down here — this is the only loop that runs
+                  # after such an apply. Matches the console's own stop, which also
+                  # scales the whole destination namespace (lib/app-power.ts).
+                  POWER_RESCALED=""
+                  for OFF_APP in $POWERED_OFF; do
+                    OFF_NS=$(kubectl get application "$OFF_APP" -n "$NAMESPACE" \
+                      -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)
+                    [ -z "$OFF_NS" ] && continue
+                    SCALED_UP=$(kubectl get deployments,statefulsets -n "$OFF_NS" \
+                      -o jsonpath='{range .items[?(@.spec.replicas>0)]}{.kind}/{.metadata.name}{"\n"}{end}' \
+                      2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+                    for CTRL in $SCALED_UP; do
+                      echo "  POWER $OFF_APP — $CTRL scaled up while powered off; returning to 0"
+                      if kubectl scale -n "$OFF_NS" "$CTRL" --replicas=0 >/dev/null 2>&1; then
+                        POWER_RESCALED="$POWER_RESCALED $OFF_APP/$CTRL"
+                      else
+                        echo "  WARN  $OFF_APP — failed to scale $CTRL in $OFF_NS"
+                      fi
+                    done
+                  done
+                  if [ -n "$POWER_RESCALED" ]; then
+                    notify_discord "Power-off drift corrected" 16753920 \
+                      "These workloads came back while their app was stopped and were returned to 0 replicas:$POWER_RESCALED"
+                  fi
 
                   # ── Collect all apps with annotations ────────────────────
                   APPS=$(kubectl get applications -n "$NAMESPACE" \
