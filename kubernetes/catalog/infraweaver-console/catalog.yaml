@@ -27,6 +27,28 @@ secrets:
     wordpress-health-cron-token:
       type: password
       length: 64
+    # The other three console tokens the ExternalSecret already maps. They were
+    # never declared here, which is a live fresh-install bug rather than a cosmetic
+    # one: the ExternalSecret uses deletionPolicy Retain, and Retain aborts the
+    # ENTIRE secret when any single key is missing from OpenBao — so one unseeded
+    # key takes down every other key with it, including the core-update token
+    # below. Declaring them lets seed-catalog-secrets.sh generate all four.
+    wordpress-rotation-cron-token:
+      type: password
+      length: 64
+    wordpress-metrics-cron-token:
+      type: password
+      length: 64
+    wordpress-metrics-token:
+      type: password
+      length: 64
+    # Dedicated token for the WordPress core-update sweep CronJob. Declared here so
+    # seed-catalog-secrets.sh generates it on a fresh install: without it ESO cannot
+    # sync the key, the console env is absent, and the sweep fails closed forever —
+    # i.e. auto-updates would silently never run while the UI says they are on.
+    wordpress-update-cron-token:
+      type: password
+      length: 64
     # ── Remaining properties the console ExternalSecret pulls from THIS path ───
     # The ExternalSecret uses deletionPolicy: Retain, under which ESO fails the
     # ENTIRE secret sync if ANY referenced property is absent in OpenBao (a

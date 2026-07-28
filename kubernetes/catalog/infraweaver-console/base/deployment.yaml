@@ -233,6 +233,19 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-metrics-cron-token
               optional: true
+        # DEDICATED token for the hourly WordPress core-update sweep CronJob's POST
+        # to /api/wordpress/core-update-sweep — the tick that finalizes elapsed
+        # soaks, reaps parked candidates and, when the operator's policy says so,
+        # starts one blue/green core update. The console re-validates it in
+        # constant time. Optional: absent = cron token auth disabled and the tick is
+        # inert (still callable by a wordpress:admin session), which is the safe
+        # direction for the one cron that can upgrade production unattended.
+        - name: WORDPRESS_UPDATE_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-update-cron-token
+              optional: true
         # Shared token for the in-cluster users-reconcile CronJob's POST to
         # /api/users/reconcile. Reuses the same ESO-synced secret VALUE as the
         # health-sweep token (same in-cluster cron trust boundary) under a distinct
