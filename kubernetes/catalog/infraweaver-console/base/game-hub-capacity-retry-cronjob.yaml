@@ -1,0 +1,89 @@
+# Game Hub capacity retry — re-queues servers the scheduler refused.
+#
+# A refused server is a dead end in the UI: "No node can run this server —
+# 0/3 nodes are available: 1 Insufficient memory, 3 Insufficient cpu", with a
+# "blocked since" timestamp and nothing that ever revisits it. Kubernetes does
+# keep retrying the Pending pod on its own, so this CronJob is NOT what makes a
+# blocked server eventually start. It is here for the two things the scheduler
+# does not do:
+#
+#   - Measure the gap. The sweep computes free capacity per node (allocatable
+#     minus requests) against the server's own requests and reports the shortfall
+#     per resource, which is the difference between "wait for the nightly backup
+#     to finish" and "lower the request or add a node".
+#   - Re-queue immediately. When the room appears, the pod is deleted so the
+#     scheduler places it now rather than at its next unschedulable-queue flush.
+#
+# Every 10 minutes: capacity frees up on the timescale of a job finishing or a
+# rollout completing, and a pass with nothing to do performs reads only. Quota
+# and admission blocks are reported but never retried — freeing CPU does not
+# raise a ResourceQuota, so retrying those would be a loop that cannot succeed.
+#
+# Auth/networking: identical to game-hub-power-sweep — same ESO-managed cron
+# token (both are unattended Game Hub passes over the same namespace, so a second
+# secret would add rotation work without adding containment), and the same
+# `infraweaver.io/component: iwsl` label pair that the existing egress policies
+# already select on. No new NetworkPolicy.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: game-hub-capacity-retry
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid # a pass still running has the namespace covered
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: capacity-retry
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: game-hub-power-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 120
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/game-hub/capacity-retry
