@@ -1,0 +1,138 @@
+# OpenBao token renewal — daily, self-contained.
+#
+# WHY THIS EXISTS: the console authenticates to OpenBao with a PERIODIC token
+# (`infraweaver-console-secret` key `openbao-token`, ESO-synced from
+# secret/platform/infraweaver-console). A periodic token has no absolute expiry,
+# but it only survives while something calls `auth/token/renew-self` inside each
+# period — and until this Job existed, nothing did. The token therefore counted
+# down in silence and died twice: once as an ArgoCD Degraded app (2026-07-14),
+# and once as WordPress site-config reads and Jellyfin account sync returning 403,
+# surfacing to the operator as the nonsense line "Checked 0/7 sites — 7 did not
+# answer". Renewal is the fix for the countdown; the PrometheusRule
+# `openbao-token-alerts` is the fix for renewal itself failing silently.
+#
+# DAILY, not weekly. The live token's period is 768h (32 days) and each successful
+# renew-self resets the remaining TTL to the FULL period, so a daily tick means
+# ~32 consecutive failures would have to pass unnoticed before anything breaks —
+# and the alert fires on the first day of that. The job is a single curl; running
+# it daily costs nothing and buys an enormous margin over a weekly tick.
+#
+# Auth: uses the EXISTING ESO-synced token — this Job deliberately does NOT mint,
+# rotate or revoke any credential. It only extends the lease on the one already
+# in use, which is the least-privilege operation for the purpose (renew-self needs
+# no policy beyond holding the token).
+#
+# Talks to OpenBao DIRECTLY rather than through the console's
+# /api/secrets/lifecycle/renew-token route. That route exists and works, but it is
+# session-gated for operators, and routing renewal through the console would make
+# the token's survival depend on the console being healthy — precisely backwards,
+# since a dead token is one of the things that makes the console unhealthy. A
+# direct call keeps renewal working while the app is crashlooping.
+#
+# Networking: the pod carries `infraweaver.io/component: iwsl`, so the existing
+# health-sweep CiliumNetworkPolicy already grants CoreDNS egress, and the
+# namespace-wide `allow-console-to-openbao` CNP (endpointSelector {}) plus
+# openbao's `allow-ingress-from-console` already permit :8200 both directions.
+# No new network policy is required.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openbao-token-renew
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "41 2 * * *" # daily, offset off the hour to avoid the hygiene sweeps
+  concurrencyPolicy: Forbid # never let two renewals overlap
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: openbao-token-renew
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: OPENBAO_ADDR
+                  value: http://openbao.openbao.svc.cluster.local:8200
+                # The SAME ESO-synced token the console runs with. Renewing it is
+                # what keeps the console's own credential alive.
+                - name: OPENBAO_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: openbao-token
+                # Floor for the post-renewal TTL. A healthy periodic token returns
+                # to its full 768h period; anything under 7 days means the renewal
+                # did not actually take (token made non-periodic, period shrunk,
+                # policy changed), so the Job fails loudly instead of "succeeding".
+                - name: MIN_TTL_SECONDS
+                  value: "604800"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+
+                  # 1. Extend the lease. --fail turns any 4xx/5xx into a non-zero
+                  #    exit, so a revoked/expired token fails the Job rather than
+                  #    logging a 403 nobody reads.
+                  curl --fail --silent --show-error --max-time 30 \
+                    -X POST \
+                    -H "X-Vault-Token: ${OPENBAO_TOKEN}" \
+                    "${OPENBAO_ADDR}/v1/auth/token/renew-self" > /dev/null
+                  echo "renew-self accepted"
+
+                  # 2. Verify what the renewal actually bought. renew-self can
+                  #    return 200 while granting far less than expected, so assert
+                  #    the resulting TTL instead of trusting the status code.
+                  LOOKUP=$(curl --fail --silent --show-error --max-time 30 \
+                    -H "X-Vault-Token: ${OPENBAO_TOKEN}" \
+                    "${OPENBAO_ADDR}/v1/auth/token/lookup-self")
+
+                  # No jq in this image. `"ttl":` cannot collide with
+                  # `creation_ttl`/`explicit_max_ttl` — those have `_` where the
+                  # pattern requires a quote.
+                  TTL=$(printf '%s' "$LOOKUP" | grep -o '"ttl":[0-9]*' | head -1 | cut -d: -f2)
+
+                  if [ -z "${TTL:-}" ]; then
+                    echo "FAILED: could not read ttl from lookup-self response" >&2
+                    exit 1
+                  fi
+
+                  echo "openbao token ttl after renewal: ${TTL}s"
+
+                  if [ "$TTL" -lt "$MIN_TTL_SECONDS" ]; then
+                    echo "FAILED: ttl ${TTL}s is below the ${MIN_TTL_SECONDS}s floor — renewal did not take" >&2
+                    exit 1
+                  fi
+
+                  echo "ok"

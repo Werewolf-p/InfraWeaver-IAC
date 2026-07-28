@@ -1,3 +1,23 @@
-# terraria-server was removed from static management.
-# Deploy via Game Hub UI: Game Hub → New Server → Pelican → Terraria (TShock)
-# The Game Hub API will create the deployment and write back this file automatically.
+# terraria-server was removed from static management. This file declares nothing.
+#
+# It used to promise that "the Game Hub API will create the deployment and write
+# back this file automatically". That was never true: the console's write-back
+# was gated behind GAME_HUB_GIT_MIRROR, which defaults off, so it silently did
+# nothing at all.
+#
+# What the console actually does now: it writes a server's config back to this
+# directory only for servers a manifest here ALREADY declares. Creating a server
+# in the UI does not adopt it into GitOps — `catalog-game-hub-servers` runs with
+# prune + selfHeal, so quietly enrolling a console-created server would mean an
+# operator could no longer delete it from the console without also removing it
+# from git.
+#
+# To put Terraria under GitOps, add a real manifest here by hand (see
+# valheim.yaml for the shape). Until then, deploy it from the console and it
+# stays cluster-only, which is a perfectly good place for it to be:
+#   Game Hub → New Server → Pelican → Terraria (TShock)
+#
+# Note for whoever writes that manifest: leave `spec.replicas` out. This app
+# syncs with RespectIgnoreDifferences=true over /spec/replicas, so a value here
+# never reaches the cluster. Durable start/stop is held by the console in the
+# `game-hub-power-state` ConfigMap instead.

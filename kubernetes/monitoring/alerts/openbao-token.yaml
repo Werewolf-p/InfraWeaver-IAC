@@ -1,0 +1,142 @@
+---
+# OpenBao token lifecycle alerts.
+#
+# WHY: the console authenticates to OpenBao with a PERIODIC token, which survives
+# only while something calls auth/token/renew-self inside each period. Nothing did,
+# so it expired silently — twice. Once as an ArgoCD Degraded app (2026-07-14), and
+# once as WordPress site-config reads and Jellyfin account sync returning 403,
+# which reached the operator as "Checked 0/7 sites — 7 did not answer". Neither
+# incident produced an alert; both were diagnosed by hand, after the fact.
+#
+# The `openbao-token-renew` CronJob now does the renewing. These rules exist
+# because a renewal loop that silently STOPS is the same bug one period later, so
+# the token is watched from two independent angles:
+#
+#   1. OUTCOME  — the remaining TTL, exported by the console at
+#                 /api/platform/metrics as infraweaver_openbao_token_ttl_seconds.
+#                 This is the ground truth: it goes red no matter WHY renewal
+#                 stopped (job deleted, suspended, wrong token, policy revoked).
+#   2. MECHANISM — the CronJob's own success, via kube-state-metrics. This fires
+#                 days-to-weeks earlier than the TTL ever could, because the TTL
+#                 has a 32-day cushion by design.
+#
+# Thresholds mirror the console's own classifier (src/lib/secrets/lifecycle-types.ts:
+# TOKEN_TTL_WARN_SECONDS = 30d, TOKEN_TTL_CRITICAL_SECONDS = 7d) so the UI banner
+# and the pager never disagree about what "critical" means.
+#
+# Routing: severity=critical → Alertmanager receiver "all" (Discord webhook,
+# repeat 1h); severity=warning → receiver "discord" (repeat 6h). See
+# kubernetes/monitoring/kube-prometheus-stack/values.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: openbao-token-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # must match the prometheusRule selector label
+spec:
+  groups:
+    - name: openbao.token
+      rules:
+        # ── 1. Outcome: the countdown itself ────────────────────────────────
+        - alert: OpenBaoConsoleTokenExpiringSoon
+          expr: |
+            infraweaver_openbao_token_ttl_seconds < 2592000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console OpenBao token expires in under 30 days"
+            description: >-
+              The InfraWeaver Console's OpenBao token has less than 30 days of TTL left
+              ({{ $value | humanizeDuration }} remaining). It is a periodic token, so this
+              should never happen while the `openbao-token-renew` CronJob is working —
+              treat this as the renewal being broken, not as a token that needs re-minting.
+              Check: kubectl -n infraweaver-console get cronjob openbao-token-renew and the
+              logs of its most recent job.
+
+        - alert: OpenBaoConsoleTokenExpiryImminent
+          expr: |
+            infraweaver_openbao_token_ttl_seconds < 604800
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Console OpenBao token expires in under 7 days"
+            description: >-
+              The InfraWeaver Console's OpenBao token has less than 7 days of TTL left
+              ({{ $value | humanizeDuration }} remaining). When it expires, every OpenBao
+              read fails 403: WordPress site-config reads and Jellyfin account sync stop,
+              and the WordPress sweep reports every site as unreachable. Renew NOW —
+              kubectl -n infraweaver-console create job --from=cronjob/openbao-token-renew
+              openbao-token-renew-manual — then fix why the CronJob stopped.
+
+        # ── 2. Mechanism: is renewal still actually running? ────────────────
+        # Fires ~2 days after renewal stops, i.e. a month before the TTL alerts
+        # could possibly notice. This is the alert that makes the failure mode
+        # non-repeatable; the TTL alerts above are the backstop.
+        - alert: OpenBaoTokenRenewCronStalled
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="infraweaver-console", cronjob="openbao-token-renew"} > 172800
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OpenBao token renewal CronJob has not succeeded in 48h"
+            description: >-
+              `openbao-token-renew` runs daily but has not completed successfully for over
+              48 hours. The console's OpenBao token is periodic and is now counting down
+              with nothing renewing it. There is roughly a month of cushion before anything
+              breaks — fix it now, while it is cheap.
+              Check: kubectl -n infraweaver-console get jobs -l app.kubernetes.io/managed-by=infraweaver-console
+
+        - alert: OpenBaoTokenRenewCronSuspended
+          expr: |
+            kube_cronjob_spec_suspend{namespace="infraweaver-console", cronjob="openbao-token-renew"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OpenBao token renewal CronJob is suspended"
+            description: >-
+              `openbao-token-renew` is suspended, so the console's periodic OpenBao token is
+              no longer being renewed and will expire. Resume it:
+              kubectl -n infraweaver-console patch cronjob openbao-token-renew -p '{"spec":{"suspend":false}}'
+
+        # ── 3. Can we still see the token at all? ───────────────────────────
+        # A dead exporter must not read as "healthy". `absent()` covers the console
+        # being down, the ServiceMonitor being broken, and the scrape being
+        # unauthorized — all of which otherwise silently remove the TTL series and
+        # with it every alert above.
+        - alert: OpenBaoConsoleTokenUnobservable
+          expr: |
+            absent(infraweaver_openbao_token_ttl_seconds) == 1
+            or infraweaver_openbao_token_lookup_ok == 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console OpenBao token TTL is not observable"
+            description: >-
+              Prometheus cannot read the console's OpenBao token TTL — either the
+              /api/platform/metrics scrape is failing (console down, ServiceMonitor broken,
+              scrape token wrong) or the console cannot reach OpenBao to look the token up.
+              While this persists, the token-expiry alerts above are blind, which is the
+              condition that let the token die unnoticed in the first place.
+
+        # A non-renewable token cannot be kept alive by the CronJob at all; it will
+        # expire at its absolute TTL no matter how often renew-self is called.
+        - alert: OpenBaoConsoleTokenNotRenewable
+          expr: |
+            infraweaver_openbao_token_renewable == 0
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Console OpenBao token is not renewable"
+            description: >-
+              The console's OpenBao token reports renewable=false, so `openbao-token-renew`
+              cannot extend it and it WILL expire at its absolute TTL. It must be replaced
+              with a periodic, renewable token (policies default/platform-k8s/wordpress,
+              period 768h) and the new value written to
+              secret/platform/infraweaver-console key openbao-token.
