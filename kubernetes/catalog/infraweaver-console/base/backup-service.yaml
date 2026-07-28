@@ -1,0 +1,28 @@
+---
+# Internal-only Service in front of the single backup datastore pod.
+#
+# The console proxies every /api/wordpress/backups/** call here (BACKUP_SERVICE_URL
+# = http://infraweaver-backup.infraweaver-console.svc.cluster.local:3000). There is
+# deliberately NO IngressRoute and no Traefik ingress allow for this Service — it
+# is reachable only from console pods, enforced by backup-networkpolicy.yaml.
+#
+# port == targetPort == 3000 on purpose: NetworkPolicy matches the POD port after
+# Service translation, so keeping the two equal removes a whole class of
+# silently-inert policy bugs (see scripts/validate-netpol-ports.sh).
+apiVersion: v1
+kind: Service
+metadata:
+  name: infraweaver-backup
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-backup
+    app.kubernetes.io/managed-by: infraweaver-console
+spec:
+  selector:
+    app: infraweaver-backup
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  type: ClusterIP

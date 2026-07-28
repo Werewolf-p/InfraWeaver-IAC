@@ -244,6 +244,18 @@ spec:
               name: infraweaver-console-secret
               key: game-hub-power-cron-token
               optional: true
+        # DEDICATED token for the hourly replica-floor sweep CronJob's POST to
+        # /api/replicas/sweep, which re-asserts the "Redundancy" floor across app
+        # namespaces. Its own value rather than the Game Hub one because this
+        # sweep reaches every namespace ArgoCD delivers. Optional: absent = cron
+        # token auth disabled and the sweep is reachable only with a cluster:admin
+        # session, which fails closed rather than open.
+        - name: REPLICA_FLOOR_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: replica-floor-cron-token
+              optional: true
         # DEDICATED token for the hourly WordPress core-update sweep CronJob's POST
         # to /api/wordpress/core-update-sweep — the tick that finalizes elapsed
         # soaks, reaps parked candidates and, when the operator's policy says so,
@@ -372,6 +384,37 @@ spec:
             secretKeyRef:
               name: infraweaver-console-secret
               key: nextcloud-admin-password
+              optional: true
+        # ── WordPress backups: the console is the PROXY half of the split ──────
+        # IW_BACKUP_ROLE is deliberately UNSET here. Unset = "console role": the
+        # /api/wordpress/backups/** routes do the RBAC/rate-limit work and then
+        # forward to the datastore pod, which runs the SAME image with
+        # IW_BACKUP_ROLE=datastore and owns the RWO /datastore volume. One image,
+        # one build, two behaviours — see backup-deployment.yaml.
+        - name: BACKUP_SERVICE_URL
+          value: http://infraweaver-backup.infraweaver-console.svc.cluster.local:3000
+        # Shared service token presented on every proxied call and compared in
+        # constant time by the datastore pod. Same ESO-managed key on both sides
+        # so the two halves can never drift. NOT optional: without it the console
+        # cannot reach the datastore and every backup route fails closed, which
+        # is the correct direction but should be loud at rollout, not silent.
+        - name: BACKUP_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: backup-service-token
+        # DEDICATED token for the hourly backup-sweep CronJob's POST to
+        # /api/wordpress/backups/sweep — the tick that starts due backups, reaps
+        # expired leases and applies retention. DISTINCT VALUE from every other
+        # cron token: this one can start fleet-wide backups and expire snapshots,
+        # so it must be revocable without disturbing health/rotation/metrics.
+        # Optional: absent = cron token auth disabled and the tick is reachable
+        # only with a wordpress:admin session, which fails closed.
+        - name: WORDPRESS_BACKUP_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-backup-cron-token
               optional: true
         resources:
           requests:

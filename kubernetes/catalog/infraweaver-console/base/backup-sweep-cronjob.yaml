@@ -1,0 +1,106 @@
+---
+# WordPress fleet BACKUP sweep — hourly, server-driven.
+#
+# One tick: start the backups whose per-site schedule has come due, finalize or
+# reap jobs whose lease has expired, and apply retention where the policy says
+# so. The console owns the decision; this pod only pulls the trigger, so the
+# whole fleet keeps its backup schedule with nobody's browser open.
+#
+# It POSTs to the CONSOLE Service, not to the backup datastore Service: the
+# console does RBAC/rate-limit, then proxies the work to infraweaver-backup with
+# the service token. The datastore has exactly one door and the cron is not it.
+#
+# Auth: the shared token comes from the SAME ESO-managed secret the console
+# reads (`infraweaver-console-secret` key `wordpress-backup-cron-token`, synced
+# from OpenBao `secret/platform/infraweaver-console`), so the CronJob and the
+# server can never drift out of sync. It is a DISTINCT VALUE from every other
+# cron token — this one can start a fleet-wide backup and expire snapshots, so
+# it must be independently revocable. The console middleware (proxy.ts) lets the
+# request past the session gate only when the token matches; the route handler
+# re-validates it in constant time (defence in depth).
+#
+# Networking: the sweep pod carries `infraweaver.io/component: iwsl`, so the
+# EXISTING ciliumnetworkpolicy-wp-health-egress.yaml (egress to CoreDNS + the
+# console pod) and networkpolicy-wp-health.yaml (ingress to the console pod on
+# :3000) already cover it. No new policy — reusing the label is the point.
+#
+# Schedule :20 — the ledger is :00 hourly (health), :17 hourly (roster-drift),
+# */15 (manage-snapshot, game-hub-power, placement-rebalance), */10 (game-hub
+# capacity retry), */5 (users-reconcile), 02:41 and 03:17 daily. :20 sits off
+# the top-of-hour pile-up and off every */15 boundary; it shares its minute only
+# with the two cheap short-lived ticks.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-backup-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "20 * * * *"
+  # Forbid, NOT Replace: a running sweep may be streaming a multi-GB site into
+  # the chunk store. Killing it to start a fresh one would abandon a half-written
+  # snapshot every hour, forever. Skipping this tick is always the cheaper loss —
+  # the next one picks up the same due list.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # backoffLimit 0 + restartPolicy Never = the sweep LATCHES. A failed tick
+      # is reported and left alone; it must never retry-storm against a fleet
+      # that is already unhappy. The next hour is the retry.
+      backoffLimit: 0
+      # 59 minutes: the job must be gone before the next schedule fires, or
+      # `Forbid` would starve the schedule indefinitely on one wedged pod.
+      activeDeadlineSeconds: 3540
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-backup-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # --max-time 3300 (55 min) stays inside activeDeadlineSeconds so
+              # curl gives up with a diagnosable error before the Job is killed
+              # from the outside. The Origin header matches the request host so
+              # the console's CSRF same-origin guard passes even independently of
+              # the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 3300
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/backups/sweep

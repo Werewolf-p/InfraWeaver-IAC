@@ -1,0 +1,109 @@
+# Replica floor sweep — re-assert the "Redundancy" floor across app namespaces.
+#
+# The floor is one operator-facing number ("how many copies of each workload
+# should run, so one failing does not take the service down") stored in the
+# console-owned `infraweaver-replica-floor` ConfigMap. Saving it applies it
+# immediately; this CronJob is what keeps it true afterwards, because the things
+# that undo it are ordinary and unattended: a new workload is delivered, ArgoCD
+# syncs `spec.replicas` back from git, a Deployment is destroyed and recreated.
+#
+# Why this is safe to run unattended — the reconciler only ever patches
+# `spec.replicas` UPWARD. There is no code path that writes a number lower than
+# the one it observed, so the worst a runaway pass can do is add a pod. It also
+# refuses to fight any other authority: Game Hub servers (their own durable
+# power model, and two copies of one server would share a world file), apps
+# powered off via `infraweaver.io/power=off` (at zero by intent), workloads at
+# zero, HPA-managed workloads, and workloads mounting a shared PVC or belonging
+# to protected platform apps unless an operator named them individually. A
+# workload git keeps reverting is reported, not re-fought forever.
+#
+# Why through the console and not kubectl: the whole skip matrix above lives in
+# one place (src/lib/replicas/replica-floor-reconcile.ts) and is what the UI
+# reports against. A shell reimplementation would be a second copy of those
+# rules, free to drift from the one the operator can read.
+#
+# Hourly, at :25. Checked against the schedule ledger — health :00, backup :20,
+# core-update :40, manage :15/:45, roster-drift :17, game-hub power */15,
+# users-reconcile */5 — so minute 25 collides with nothing. Hourly rather than
+# quarter-hourly because the floor corrects a capacity POSTURE, not an outage in
+# progress: an hour of drift costs one replica of headroom, and the save-time
+# pass already covers the interactive case.
+#
+# Auth: a DEDICATED token from the same ESO-managed secret the console reads
+# (`infraweaver-console-secret` key `replica-floor-cron-token`, synced from
+# OpenBao `secret/platform/infraweaver-console`), so the CronJob and the server
+# can never drift apart. Distinct from the Game Hub token: that one is shared
+# between passes over a single namespace, which this is not — this sweep reaches
+# every namespace ArgoCD delivers, so it must be revocable on its own. proxy.ts
+# lets the request past the session gate only when the token matches; the route
+# handler re-validates it (defence in depth).
+#
+# Networking: the pod carries `infraweaver.io/component: iwsl`, so the existing
+# allow-wp-health-sweep-egress (CiliumNetworkPolicy) and
+# allow-wp-health-sweep-to-console (NetworkPolicy) already cover it — both select
+# on that label pair rather than on a job name. No new policy.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: replica-floor-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "25 * * * *"
+  concurrencyPolicy: Forbid # a pass still running has the fleet covered; a second adds nothing
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # 0, not 2: the pass is hourly and idempotent, so a missed tick costs an
+      # hour of drift while a retry storm would re-list the whole cluster.
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: replica-floor-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: replica-floor-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 240
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/replicas/sweep

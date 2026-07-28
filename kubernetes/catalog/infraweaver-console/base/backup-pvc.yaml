@@ -1,0 +1,41 @@
+---
+# Backup datastore volume — the content-addressed chunk store for the WordPress
+# fleet backup feature (PBS-shaped: .chunks/<2-hex>/<digest> + sites/<site>/<ts>/).
+#
+# storageClassName: longhorn-retain
+#   Longhorn was the explicit ask, and Retain is the only sane reclaim policy for
+#   a backup store — a deleted PVC must never take the backups with it. It is
+#   also `allowVolumeExpansion: true`, so growing later is a one-line change
+#   here rather than a migration.
+#
+# accessModes: ReadWriteOnce — deliberate, not a limitation we tolerate.
+#   Exactly one writer owns this datastore (backup-deployment.yaml is replicas: 1
+#   with strategy: Recreate). That single-writer property IS the consistency
+#   model of the store: no cross-node write races, no distributed lock, and a
+#   content-addressed chunk write is idempotent. RWX would mean a Longhorn
+#   NFS-Ganesha share-manager pod, and no Longhorn RWX volume exists in this
+#   cluster today — a chunk store is thousands of small fsync'd files, i.e. the
+#   worst possible NFS workload. Do not "upgrade" this to RWX.
+#
+# 30Gi, read off the live cluster on 2026-07-28:
+#   Longhorn free space — cp1 195.6Gi/295.8, cp2 201.0/295.8, cp3 32.0/95.9.
+#   longhorn-retain is 2 replicas with best-effort locality, so a replica can
+#   land on cp3. 30Gi is the largest request that still fits ANYWHERE; a 50Gi
+#   request would be schedulable only on cp1/cp2 and would fail outright if the
+#   scheduler picked cp3. The whole WP fleet is well under 1GB of files today
+#   BEFORE dedup and per-chunk compression, so 30Gi is many years of snapshots.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: infraweaver-backup-datastore
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-backup
+    app.kubernetes.io/managed-by: infraweaver-console
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      storage: 30Gi

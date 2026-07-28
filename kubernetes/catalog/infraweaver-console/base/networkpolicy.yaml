@@ -131,3 +131,18 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    # Backup datastore pod (app: infraweaver-backup) on its CONTAINER port 3000.
+    # Egress here is default-deny, so without this rule the console's proxy hop
+    # into the datastore is dead on arrival and every backup route times out.
+    # 3000 is the pod port, not a Service front port — the Service maps 3000→3000
+    # precisely so the two can never be confused (validate-netpol-ports.sh).
+    # ⚠ APPEND-ONLY BELOW THIS LINE: overlays/prod/kustomization.yaml JSON-patches
+    # this list BY INDEX (`/spec/egress/4/to/0/ipBlock/cidr`). Inserting a rule
+    # anywhere above index 4 silently rewrites the wrong rule's CIDR.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: infraweaver-backup
+      ports:
+        - port: 3000
+          protocol: TCP

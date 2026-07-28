@@ -1,0 +1,227 @@
+---
+# infraweaver-backup — the WordPress backup DATASTORE node.
+#
+# Same image, same route files, one env var apart from the console:
+# IW_BACKUP_ROLE=datastore makes every /api/wordpress/backups/** route execute
+# locally against /datastore instead of proxying. The console (role unset) does
+# the RBAC check and forwards to this Service with BACKUP_SERVICE_TOKEN. One
+# build, two roles — there is no second image to keep in step.
+#
+# WHY THIS IS NOT JUST A VOLUME ON THE CONSOLE POD:
+#   The console runs behind an HPA (1-8 replicas, observed at 96% CPU against a
+#   70% target). A backup or restore started inside a console pod can be scaled
+#   away mid-flight. Backups must outlive an autoscaling decision.
+#
+# replicas: 1 + strategy: Recreate are load-bearing, not stylistic:
+#   the datastore PVC is RWO and has exactly ONE writer, ever. RollingUpdate
+#   would try to start a second pod while the first still holds the volume —
+#   at best the new pod hangs on Multi-Attach, at worst two processes write the
+#   same chunk directory. Single-writer is why this design needs no distributed
+#   lock anywhere. DO NOT add an HPA, raise replicas, or switch to RWX.
+#
+# No topologySpreadConstraints and no podAntiAffinity (the console has both):
+#   with one pod they are meaningless, and Longhorn attaches the volume to
+#   whichever node the pod lands on.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraweaver-backup
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-backup
+    app.kubernetes.io/managed-by: infraweaver-console
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: infraweaver-backup
+  template:
+    metadata:
+      labels:
+        app: infraweaver-backup
+        app.kubernetes.io/managed-by: infraweaver-console
+    spec:
+      # platform-standard (500000), NOT the console's platform-high (750000):
+      # this is a shared platform service that should outrank general workloads
+      # but must never preempt the console or SSO. cp3 was at 99% memory when
+      # this was written, so the priority actually matters for placement.
+      priorityClassName: platform-standard
+      # A backup in flight should get a chance to abort cleanly rather than be
+      # SIGKILLed mid-chunk. Crash-safety does not depend on it (a snapshot with
+      # no manifest.json is simply incomplete and GC's grace window owns the
+      # corpse), but a clean stop keeps the job ledger honest.
+      terminationGracePeriodSeconds: 120
+      # Same ServiceAccount as the console — deliberately NOT a new one. It
+      # already carries exactly the rights this pod needs and no more: the
+      # namespace-scoped Role `infraweaver-console-wordpress` (rbac.yaml) grants
+      # pods/exec in the `wordpress` namespace (the dump/tar/restore channel) and
+      # configmaps in this namespace (the job ledger). Minting a second identity
+      # would duplicate that grant without narrowing it.
+      serviceAccountName: infraweaver-console
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        # The Longhorn volume is formatted root-owned; the container runs as
+        # uid/gid 1000 under readOnlyRootFilesystem, so without fsGroup it cannot
+        # create /datastore/.chunks at all.
+        fsGroup: 1000
+        # OnRootMismatch, NOT the default Always: `Always` makes the kubelet
+        # recursively chown EVERY file on the volume at every pod start. On a
+        # content-addressed store that is tens of thousands of small files, i.e.
+        # a startup that gets slower with every backup taken. OnRootMismatch
+        # checks the volume root only and skips the walk once ownership is right.
+        fsGroupChangePolicy: OnRootMismatch
+      # MUST remain true — this pod's entire job is to drive the in-cluster
+      # Kubernetes API: `kubectl exec`-style streams into the WordPress and
+      # MariaDB pods, and ConfigMap reads/writes for the job ledger. Setting it
+      # false does not degrade the feature, it deletes it.
+      automountServiceAccountToken: true
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+        # Zot pull secret — prod images are released to registry.int.${BASE_DOMAIN}.
+        - name: registry-pull-secret
+      containers:
+        - name: backup
+          # Tag intentionally omitted — overlays/prod/kustomization.yaml is the
+          # single source of truth for the image tag. NOTE FOR THE DEPLOYER: this
+          # Deployment made the pin count FOUR (console container, console init
+          # container, connector-git-sync sidecar, and this one).
+          image: registry.int.${BASE_DOMAIN}/infraweaver-console
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "HOSTNAME=0.0.0.0 node server.js"]
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            # ── What makes this pod the datastore ──────────────────────────────
+            # Read by lib/backup/service.ts isDatastoreNode(). Unset on the
+            # console, which therefore proxies instead of executing.
+            - name: IW_BACKUP_ROLE
+              value: datastore
+            - name: BACKUP_DATASTORE_DIR
+              value: /datastore
+            # Shared token the console presents on every proxied backup request
+            # and this pod compares in constant time. Same ESO-managed secret on
+            # both sides so they can never drift.
+            - name: BACKUP_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: backup-service-token
+            # ── Minimum env for the shared image to boot and serve ─────────────
+            # DELIBERATELY NOT the console's full env block. This pod serves the
+            # backup routes only; handing it the ArgoCD, GitHub, Cloudflare,
+            # dispatch, SMTP, Nextcloud, TrueNAS/Synology and UDM credentials
+            # would widen the blast radius of a pod whose whole purpose is to
+            # hold every site's data. Everything the WordPress engine needs at
+            # runtime (namespace, ConfigMap names, image names) has a correct
+            # in-code default; the only hard requirement is that Auth.js can
+            # construct itself, because src/proxy.ts calls auth() on any request
+            # that is not the service-token bypass or /api/ping.
+            - name: NODE_ENV
+              value: production
+            - name: BASE_DOMAIN
+              value: ${BASE_DOMAIN}
+            - name: NEXT_PUBLIC_BASE_DOMAIN
+              value: ${BASE_DOMAIN}
+            # AUTH_URL must include /api/auth so Auth.js v5 derives basePath
+            # correctly (same reasoning as the console — see deployment.yaml).
+            - name: AUTH_URL
+              value: https://infraweaver.int.${BASE_DOMAIN}/api/auth
+            - name: NEXTAUTH_URL
+              value: https://infraweaver.int.${BASE_DOMAIN}
+            - name: AUTH_TRUST_HOST
+              value: "true"
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: nextauth-secret
+            - name: AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: nextauth-secret
+            - name: AUTHENTIK_ISSUER
+              value: https://auth.${BASE_DOMAIN}/application/o/infraweaver-console/
+            - name: AUTHENTIK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: oidc-client-id
+            - name: AUTHENTIK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: oidc-client-secret
+          resources:
+            requests:
+              # Modest on purpose: cp3 was at 99% memory when this was sized, and
+              # this pod must be schedulable anywhere the Longhorn replica is.
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # A real limit, not a formality. The streaming path is flat-memory
+              # by construction (pod stdout -> chunker -> chunk writer, with
+              # normal Node backpressure and no whole-archive buffering), so 768Mi
+              # is generous headroom over the Node heap; if it is ever exceeded
+              # that is a buffering regression and an OOM kill is the correct,
+              # loud outcome rather than swallowing the node's last free memory.
+              cpu: "1"
+              memory: 768Mi
+          startupProbe:
+            httpGet:
+              path: /api/ping
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/ping
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/ping
+              port: 3000
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            # 6x30s of sustained unresponsiveness before a kill. A backup pinning
+            # the CPU limit must not restart the pod it is running inside.
+            failureThreshold: 6
+            timeoutSeconds: 5
+          volumeMounts:
+            # THE datastore. The only writable path that survives a restart.
+            - name: datastore
+              mountPath: /datastore
+            # Next.js needs a writable cache dir under readOnlyRootFilesystem.
+            - name: nextjs-cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: datastore
+          persistentVolumeClaim:
+            claimName: infraweaver-backup-datastore
+        - name: nextjs-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

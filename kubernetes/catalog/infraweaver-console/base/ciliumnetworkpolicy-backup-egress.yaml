@@ -1,0 +1,63 @@
+---
+# Zero-trust egress allow for the backup datastore pod.
+#
+# The datastore pod needs exactly two things off-pod and nothing else:
+#
+#   1. Cluster DNS — to resolve anything at all.
+#   2. The kube-apiserver — every byte of every backup rides the apiserver's
+#      pod/exec channel. `mariadb-dump` runs inside <site>-db, `tar` runs inside
+#      the WordPress pod, and their stdout streams back through the exec
+#      connection into the chunker. The job ledger is ConfigMaps on the same
+#      API. The pod therefore NEVER opens a socket to a WordPress pod, a
+#      MariaDB pod, a Service in the `wordpress` namespace, or the internet —
+#      granting any of that would be dead policy that only widens the blast
+#      radius of the one pod that holds every site's data.
+#
+# `toEntities: [kube-apiserver]` rather than an ipBlock CIDR: under Cilium the
+# apiserver ClusterIP is DNATed to a node:6443 endpoint and carries the reserved
+# `kube-apiserver` identity, so CIDR rules never match it unless
+# policy-cidr-match-mode=nodes is set (it is not). That mismatch is precisely
+# what broke ArgoCD/ESO/Kyverno when Cilium started enforcing — see
+# kubernetes/core/network-policies/manifests/apiserver-egress.yaml.
+#
+# The namespace-wide `allow-egress-apiserver` CNP in that file already grants
+# apiserver egress to every endpoint here. The rule is repeated deliberately:
+# that policy is owned by a DIFFERENT ArgoCD app (core-network-policies), and
+# this feature must not silently depend on a file outside its own bundle.
+#
+# NOTE — declaring egress at all makes this endpoint default-deny for egress
+# under Cilium. That is the intent: everything not listed below is dropped.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-backup-egress
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-backup
+    app.kubernetes.io/managed-by: infraweaver-console
+spec:
+  endpointSelector:
+    matchLabels:
+      app: infraweaver-backup
+  egress:
+    # The cluster resolver is backed by CoreDNS. Allow both kube-system and
+    # dns-system so DNS works regardless of which CoreDNS instance answers.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: dns-system
+            app: coredns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # The exec channel and the ConfigMap job ledger.
+    - toEntities:
+        - kube-apiserver

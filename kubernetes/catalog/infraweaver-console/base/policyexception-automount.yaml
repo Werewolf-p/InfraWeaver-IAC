@@ -39,3 +39,7 @@ spec:
                 values:
                   - infraweaver-console
                   - infraweaver-api
+                  # The backup datastore pod runs the same image and needs the
+                  # same ServiceAccount token — it execs mariadb-dump and tar
+                  # inside WordPress pods through the apiserver.
+                  - infraweaver-backup

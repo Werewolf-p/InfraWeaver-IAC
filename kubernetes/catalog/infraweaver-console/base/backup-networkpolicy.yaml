@@ -1,0 +1,46 @@
+---
+# Ingress to the backup datastore pod: console pods only, port 3000 only.
+#
+# The namespace already runs `default-deny-ingress` (networkpolicy.yaml,
+# podSelector: {}), so the backup pod starts fully closed and this policy is the
+# ONLY thing that opens it. k8s NetworkPolicy ingress is a union across policies,
+# so adding this does not widen anything else.
+#
+# Nothing external can reach this Service: it has no IngressRoute, and the
+# Traefik-namespace allow in `infraweaver-console` (networkpolicy.yaml) selects
+# `app: infraweaver-console`, not `app: infraweaver-backup`. The only door into
+# the datastore is a console pod presenting BACKUP_SERVICE_TOKEN.
+#
+# Port 3000 is the CONTAINER port (backup-deployment.yaml containerPort: 3000),
+# which is what NetworkPolicy matches after Service translation — not a Service
+# front port. See scripts/validate-netpol-ports.sh for why that distinction
+# silently broke SSO once.
+#
+# EGRESS for this pod is intentionally NOT expressed here. Under Cilium, a
+# CIDR-based rule never matches kube-apiserver traffic (the ClusterIP is DNATed
+# to node:6443 and carries the reserved `kube-apiserver` identity), which is
+# exactly how every controller in this cluster lost apiserver egress once —
+# see kubernetes/core/network-policies/manifests/apiserver-egress.yaml. Egress
+# is therefore owned by ciliumnetworkpolicy-backup-egress.yaml, using entities.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-console-to-backup
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-backup
+    app.kubernetes.io/managed-by: infraweaver-console
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-backup
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: infraweaver-console
+      ports:
+        - port: 3000
+          protocol: TCP

@@ -4,12 +4,16 @@ kind: Kustomization
 # Tunable params (image tag, replicas) live in overlays/prod/kustomization.yaml.
 resources:
   - deployment.yaml
+  - backup-pvc.yaml
+  - backup-deployment.yaml
+  - backup-service.yaml
   - externalsecret-ghcr.yaml
   - externalsecret-registry.yaml
   - externalsecret.yaml
   - externalsecret-iwsl-iw-keys.yaml
   - ciliumnetworkpolicy-udm-egress.yaml
   - ciliumnetworkpolicy-wp-health-egress.yaml
+  - ciliumnetworkpolicy-backup-egress.yaml
   - health-sweep-cronjob.yaml
   - rotation-sweep-cronjob.yaml
   - manage-snapshot-sweep-cronjob.yaml
@@ -19,7 +23,10 @@ resources:
   - game-hub-power-sweep-cronjob.yaml
   - game-hub-capacity-retry-cronjob.yaml
   - placement-rebalance-cronjob.yaml
+  - replica-floor-sweep-cronjob.yaml
+  - backup-sweep-cronjob.yaml
   - networkpolicy-wp-health.yaml
+  - backup-networkpolicy.yaml
   - game-servers-namespace.yaml
   - game-servers-pool.yaml
   - hpa.yaml

@@ -49,6 +49,33 @@ secrets:
     wordpress-update-cron-token:
       type: password
       length: 64
+    # Shared token for the Game Hub power sweep, the capacity-retry job and the
+    # placement rebalancer — the one deliberate sharing, since all three are the
+    # same operator concern. It was reachable by three CronJobs and the Retain
+    # ExternalSecret without ever being declared here, so a fresh install would
+    # have aborted the ENTIRE console secret on first sync.
+    game-hub-power-cron-token:
+      type: password
+      length: 64
+    # Dedicated token for the hourly replica-floor ("Redundancy") sweep CronJob.
+    # Same reasoning as above: without it ESO cannot sync the key and the sweep
+    # fails closed forever while the setting page reports a floor is in force.
+    replica-floor-cron-token:
+      type: password
+      length: 64
+    # Shared service token binding the console (proxy half) to the
+    # infraweaver-backup datastore pod (execute half). Both read the SAME value
+    # from infraweaver-console-secret, so declaring it here is what makes a fresh
+    # install able to materialise it at all.
+    backup-service-token:
+      type: password
+      length: 64
+    # Dedicated token for the hourly WordPress backup sweep CronJob. Without it
+    # ESO cannot sync the key, the console env is absent, and scheduled backups
+    # fail closed forever while the UI reports the schedule as on.
+    wordpress-backup-cron-token:
+      type: password
+      length: 64
     # ── Remaining properties the console ExternalSecret pulls from THIS path ───
     # The ExternalSecret uses deletionPolicy: Retain, under which ESO fails the
     # ENTIRE secret sync if ANY referenced property is absent in OpenBao (a
