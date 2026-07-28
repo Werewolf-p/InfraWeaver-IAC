@@ -233,6 +233,17 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-metrics-cron-token
               optional: true
+        # Shared with the Game Hub power sweep CronJob, which POSTs to
+        # /api/game-hub/power-sweep to re-apply every recorded stop. Its own
+        # value so it is revocable without touching the WordPress sweeps.
+        # Optional: absent = cron token auth disabled and the sweep is reachable
+        # only with a game-hub:admin session, which fails closed rather than open.
+        - name: GAME_HUB_POWER_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: game-hub-power-cron-token
+              optional: true
         # DEDICATED token for the hourly WordPress core-update sweep CronJob's POST
         # to /api/wordpress/core-update-sweep — the tick that finalizes elapsed
         # soaks, reaps parked candidates and, when the operator's policy says so,

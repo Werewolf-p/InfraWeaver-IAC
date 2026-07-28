@@ -1,0 +1,104 @@
+# Game Hub power sweep — re-applies every recorded stop, unattended.
+#
+# A console "Stop" is durable: the intent is written to the console-owned
+# `game-hub-power-state` ConfigMap in the game-hub namespace, so it survives the
+# Deployment object being destroyed and recreated. Enforcement was NOT durable
+# in the same way — it only ran on the two status read paths (the server list
+# and the server detail page), so a stopped server whose Deployment came back at
+# 03:00 kept running, holding quota and reachable on its NodePort, until an
+# operator next opened the Game Hub. That gap is what this CronJob closes.
+#
+# Why a sweep and not a controller: the condition is rare (it needs a Deployment
+# to be recreated) and its cost is a server running longer than intended, not
+# data loss or corruption. A periodic pass is proportionate; a watch would mean
+# holding an apiserver connection open for the lifetime of an otherwise
+# stateless pod, and a full controller would be a second thing that can scale
+# game servers.
+#
+# Why through the console and not kubectl: the rule the sweep applies
+# (`decidePowerEnforcement` — never force a server UP, skip maintenance windows,
+# treat a missing replica count as 1) is the same rule the two read paths apply.
+# A shell reimplementation would be a second copy of that rule, free to drift
+# from the one the UI reports against. The trade is that a sweep cannot run
+# while the console is down; acceptable here, because a server that is running
+# when it should not be is not an emergency, and the next pass corrects it.
+#
+# Every 15 minutes. The sweep is idempotent — a pass with nothing to correct
+# patches nothing — so the schedule costs one API call and bounds how long a
+# self-started server can run, rather than trading one against the other.
+#
+# Auth: a DEDICATED token from the same ESO-managed secret the console reads
+# (`infraweaver-console-secret` key `game-hub-power-cron-token`, synced from
+# OpenBao `secret/platform/infraweaver-console`), so the CronJob and the server
+# can never drift apart. Distinct from every WordPress cron token: this one can
+# scale game servers down and must be revocable on its own. proxy.ts lets the
+# request past the session gate only when the token matches; the route handler
+# re-validates it (defence in depth).
+#
+# Networking: the pod carries `infraweaver.io/component: iwsl`, so the existing
+# allow-wp-health-sweep-egress (CiliumNetworkPolicy) and
+# allow-wp-health-sweep-to-console (NetworkPolicy) already cover it — both select
+# on that label pair rather than on a job name. No new policy.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: game-hub-power-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid # a sweep still running has the namespace covered; a second adds nothing
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: power-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: game-hub-power-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 120
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/game-hub/power-sweep
