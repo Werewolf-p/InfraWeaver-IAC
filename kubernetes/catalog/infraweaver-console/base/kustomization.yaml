@@ -18,6 +18,7 @@ resources:
   - openbao-token-renew-cronjob.yaml
   - game-hub-power-sweep-cronjob.yaml
   - game-hub-capacity-retry-cronjob.yaml
+  - placement-rebalance-cronjob.yaml
   - networkpolicy-wp-health.yaml
   - game-servers-namespace.yaml
   - game-servers-pool.yaml
