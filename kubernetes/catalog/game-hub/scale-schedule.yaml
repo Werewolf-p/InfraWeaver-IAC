@@ -14,7 +14,10 @@ data:
   scaleUpSchedule: "0 8 * * *"
   scaleDownReplicas: "0"
   scaleUpReplicas: "1"
-  targetDeployments: "minecraft-server terraria-server valheim-server"
+  # Empty: none of the servers this list once named still exist. valheim-server
+  # was the last of them and has been deleted along with its manifest. The
+  # machinery stays (dormant) so a future server can be added by name.
+  targetDeployments: ""
   targetStatefulSets: ""
 ---
 apiVersion: v1
