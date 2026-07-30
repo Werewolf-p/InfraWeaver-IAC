@@ -102,8 +102,45 @@ spec:
             # console, which therefore proxies instead of executing.
             - name: IW_BACKUP_ROLE
               value: datastore
+            # THE datastore path. Changing where the backups live means changing
+            # which VOLUME is mounted here (see `volumes:` at the bottom), never
+            # this string — every other value in the console describes this mount,
+            # it does not create it.
             - name: BACKUP_DATASTORE_DIR
               value: /datastore
+            # ── Retargeting the datastore (Storage → Backups in the console) ──
+            #
+            # How a snapshot directory is SPELLED on disk.
+            #   posix     (default) — 2026-07-28T02:14:07Z, the id verbatim.
+            #   portable            — 2026-07-28T02-14-07Z, no colons.
+            #
+            # Colon is ILLEGAL in a file name on SMB/CIFS, NTFS and exFAT. A
+            # server that accepts one stores a MANGLED name, the mangled name
+            # fails the console's snapshot-id check, the snapshot disappears from
+            # every listing, and the next garbage collection frees its chunks
+            # because nothing references them any more. No error is raised at any
+            # point. Set this to `portable` ONLY as part of a migration onto a
+            # target whose compatibility probe demanded it — flipping it under a
+            # live datastore is safe to READ (both spellings are always decoded)
+            # but means new snapshots are written the other way.
+            - name: BACKUP_DATASTORE_NAME_PROFILE
+              value: posix
+            # Where a CANDIDATE datastore is staged while it is being migrated to.
+            # Empty means "no migration in progress", which is the steady state.
+            #
+            # A migration copies /datastore -> here, so both filesystems must be
+            # visible in this one pod at the same time. To start one:
+            #   1. add the candidate volume to `volumes:` below,
+            #   2. mount it at /datastore-next in `volumeMounts:`,
+            #   3. set this to /datastore-next,
+            #   4. commit; the pod restarts (strategy: Recreate) and the console's
+            #      Backups → storage card can then probe and copy.
+            # To CUT OVER once the copy has verified: point the `datastore` volume
+            # (bottom of this file) at the candidate's claim, remove the staging
+            # mount, clear this value, and commit. The old PVC keeps its Retain
+            # policy and is deleted by hand later, never by the console.
+            - name: BACKUP_MIGRATION_TARGET_DIR
+              value: ""
             # Shared token the console presents on every proxied backup request
             # and this pod compares in constant time. Same ESO-managed secret on
             # both sides so they can never drift.
@@ -201,6 +238,14 @@ spec:
             # THE datastore. The only writable path that survives a restart.
             - name: datastore
               mountPath: /datastore
+            # ── Migration staging mount (normally absent) ─────────────────────
+            # Uncomment together with the `datastore-next` volume below and with
+            # BACKUP_MIGRATION_TARGET_DIR above. Present ONLY for the duration of
+            # a migration: a second writable mount on this pod is a second thing
+            # that can fill up, and the single-writer property this datastore
+            # depends on is per-VOLUME, not per-pod.
+            # - name: datastore-next
+            #   mountPath: /datastore-next
             # Next.js needs a writable cache dir under readOnlyRootFilesystem.
             - name: nextjs-cache
               mountPath: /app/.next/cache
@@ -218,9 +263,26 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       volumes:
+        # THE cutover point. Retargeting the backup datastore is this one field
+        # changing to a different claim — not a code change, not a config flag,
+        # and emphatically not a storage abstraction inside the console. The
+        # writers below this mount use open(O_EXCL), fsync, rename-over-existing
+        # and fsync-on-a-DIRECTORY as their crash-safety model, so the only safe
+        # swap is one POSIX filesystem for another POSIX filesystem that the
+        # console's compatibility probe has actually measured.
         - name: datastore
           persistentVolumeClaim:
             claimName: infraweaver-backup-datastore
+        # ── Migration staging volume (normally absent) ────────────────────────
+        # The candidate datastore, mounted alongside the live one for the
+        # duration of a migration. For a NAS target this claim is the one
+        # /api/nas/mount-workload generates under kubernetes/catalog/nas-shares/;
+        # for another cluster volume it is a second PVC declared beside
+        # backup-pvc.yaml. It must be READ-WRITE — the migration writes it — so
+        # the NAS mount must be requested with access: readwrite.
+        # - name: datastore-next
+        #   persistentVolumeClaim:
+        #     claimName: nas-backups-infraweaver-rw
         - name: nextjs-cache
           emptyDir: {}
         - name: tmp
