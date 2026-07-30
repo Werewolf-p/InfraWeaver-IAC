@@ -19,10 +19,19 @@
 # networkpolicy-wp-health.yaml (ingress to the console pod on :3000) already
 # cover it — no extra NetworkPolicy needed.
 #
-# SAFETY: shipped SUSPENDED (`spec.suspend: true`). Rolling live signing keys on a
-# schedule is a deliberate operator decision — flip suspend to false only after
-# confirming the age/per-run thresholds. `kubectl -n infraweaver-console patch
-# cronjob wordpress-connector-rotation-sweep -p '{"spec":{"suspend":false}}'`.
+# SAFETY: ACTIVATED 2026-07-30, after the thresholds were confirmed and the whole
+# fleet was rolled by hand once to prove the cycle end to end. Defaults stand:
+# IWSL_ROTATION_MAX_AGE_DAYS 30, IWSL_ROTATION_MAX_PER_RUN 2 — so a bad rotation
+# can touch at most two links per night and every roll resets that link's age.
+#
+# It stayed suspended for good reason. The first fleet-wide roll quarantined four
+# of six links: the rotation cycle ran in memory, nothing persisted said the key
+# was moving, and the tamper interlock read the unavoidable mid-swap signature
+# mismatch as the site misbehaving. Every one was healthy the moment it was
+# released. That is fixed by the persisted `rotationGuard`, without which enabling
+# this schedule would quarantine links on a timer. To suspend again:
+# `kubectl -n infraweaver-console patch cronjob wordpress-connector-rotation-sweep
+# -p '{"spec":{"suspend":true}}'`.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -32,7 +41,7 @@ metadata:
     app.kubernetes.io/managed-by: infraweaver-console
     infraweaver.io/component: iwsl
 spec:
-  suspend: true # ← activate deliberately; see SAFETY note above
+  suspend: false # activated 2026-07-30; see SAFETY note above
   schedule: "17 3 * * *" # daily at 03:17, offset from other crons
   concurrencyPolicy: Forbid # a reroll must never overlap itself
   startingDeadlineSeconds: 300
