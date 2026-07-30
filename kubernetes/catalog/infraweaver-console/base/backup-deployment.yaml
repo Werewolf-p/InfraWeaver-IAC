@@ -140,14 +140,20 @@ spec:
             # mount, clear this value, and commit. The old PVC keeps its Retain
             # policy and is deleted by hand later, never by the console.
             #
-            # STAGED 2026-07-30 for the compatibility probe of the dedicated
-            # TrueNAS export (//10.1.0.135/iw-backup-datastore, subDir
-            # `datastore`, account iw-backup-dst — see
-            # kubernetes/catalog/nas-shares/nas-backup-datastore-rw.yaml). This is
-            # a MEASUREMENT, not a migration: no bytes are copied until the probe
-            # passes and an operator starts one.
+            # MEASURED 2026-07-30 and unstaged again: a dedicated TrueNAS SCALE
+            # 25.10.1 export (dataset Main/iw-backup-datastore, chmod 700 to the
+            # single-purpose account iw-backup-dst) was mounted here by
+            # smb.csi.k8s.io and probed. The first run returned `ok`, 12 of 12 —
+            # because the kernel's CIFS `mapposix` stores the colons as Unicode
+            # Private Use codepoints and maps them back, so the probe validated
+            # its own translation. The ZFS dataset held
+            # `2026-07-30T021407Z`. The probe now identifies the
+            # filesystem first and SMB is refused by policy, so there is nothing
+            # left to stage. An SMB datastore is not coming back; the open path
+            # for a NAS-hosted datastore is NFS from that same dedicated dataset,
+            # which needs an NFS CSI driver this cluster does not yet run.
             - name: BACKUP_MIGRATION_TARGET_DIR
-              value: "/datastore-next"
+              value: ""
             # Shared token the console presents on every proxied backup request
             # and this pod compares in constant time. Same ESO-managed secret on
             # both sides so they can never drift.
@@ -261,15 +267,15 @@ spec:
             # THE datastore. The only writable path that survives a restart.
             - name: datastore
               mountPath: /datastore
-            # ── Migration staging mount ───────────────────────────────────────
-            # Paired with the `datastore-next` volume below and with
-            # BACKUP_MIGRATION_TARGET_DIR above. Present ONLY while a candidate is
-            # being probed or migrated to: a second writable mount on this pod is
-            # a second thing that can fill up, and the single-writer property this
+            # ── Migration staging mount (normally absent) ─────────────────────
+            # Uncomment together with the `datastore-next` volume below and with
+            # BACKUP_MIGRATION_TARGET_DIR above. Present ONLY for the duration of
+            # a probe or a migration: a second writable mount on this pod is a
+            # second thing that can fill up, and the single-writer property this
             # datastore depends on is per-VOLUME, not per-pod. Remove all three
             # once the candidate is measured or the cutover is confirmed.
-            - name: datastore-next
-              mountPath: /datastore-next
+            # - name: datastore-next
+            #   mountPath: /datastore-next
             # Next.js needs a writable cache dir under readOnlyRootFilesystem.
             - name: nextjs-cache
               mountPath: /app/.next/cache
@@ -297,20 +303,22 @@ spec:
         - name: datastore
           persistentVolumeClaim:
             claimName: infraweaver-backup-datastore
-        # ── Migration staging volume ──────────────────────────────────────────
+        # ── Migration staging volume (normally absent) ────────────────────────
         # The candidate datastore, mounted alongside the live one so the probe
         # (and later a migration) can see both filesystems in one pod. It must be
-        # READ-WRITE — the probe writes and fsyncs, the migration copies — so the
+        # READ-WRITE — the probe writes and fsyncs, the migration copies — so a
         # NAS mount is requested with access: readwrite.
         #
-        # This claim is the DEDICATED export declared in
-        # kubernetes/catalog/nas-shares/nas-backup-datastore-rw.yaml, not one of
-        # the shared per-provider NAS mounts: every snapshot's database dump holds
+        # Whatever claim goes here must be a DEDICATED export, never one of the
+        # shared per-provider NAS mounts: every snapshot's database dump holds
         # that site's private signing key, so read access to this volume is key
-        # disclosure and write access is forged-snapshot injection.
-        - name: datastore-next
-          persistentVolumeClaim:
-            claimName: nas-backup-datastore-rw
+        # disclosure and write access is forged-snapshot injection. The 2026-07-30
+        # measurement used a purpose-built TrueNAS dataset with its own account,
+        # verified by the shared iw-truenas-rw account getting
+        # NT_STATUS_ACCESS_DENIED at that share's root.
+        # - name: datastore-next
+        #   persistentVolumeClaim:
+        #     claimName: nas-backups-infraweaver-rw
         - name: nextjs-cache
           emptyDir: {}
         - name: tmp
