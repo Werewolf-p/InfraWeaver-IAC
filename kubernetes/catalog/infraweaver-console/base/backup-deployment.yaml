@@ -149,6 +149,22 @@ spec:
                 secretKeyRef:
                   name: infraweaver-console-secret
                   key: backup-service-token
+            # Signs every manifest this pod commits and verifies every manifest
+            # it is asked to restore or hand back. This pod is the ONLY one that
+            # needs it: the console proxies backup work here rather than doing it,
+            # so the signing key stays out of the four HPA-scaled console pods.
+            - name: BACKUP_MANIFEST_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-console-secret
+                  key: backup-manifest-key
+            # `warn` — an UNSIGNED snapshot still restores (every snapshot taken
+            # before 2026-07-30 is unsigned and refusing them would brick restore
+            # for the whole existing datastore), while an INVALID signature is
+            # refused in every mode. Flip to `strict` once no unsigned snapshot
+            # survives retention.
+            - name: BACKUP_MANIFEST_ENFORCE
+              value: "warn"
             # ── Minimum env for the shared image to boot and serve ─────────────
             # DELIBERATELY NOT the console's full env block. This pod serves the
             # backup routes only; handing it the ArgoCD, GitHub, Cloudflare,

@@ -70,6 +70,13 @@ secrets:
     backup-service-token:
       type: password
       length: 64
+    # HMAC key for snapshot manifest signatures. Declared here for the same
+    # reason as the token above: under deletionPolicy Retain a fresh install
+    # whose OpenBao lacks this property gets NO console secret at all, not a
+    # secret missing one key. validate-iac.sh step 4/4 enforces the pairing.
+    backup-manifest-key:
+      type: password
+      length: 64
     # Dedicated token for the hourly WordPress backup sweep CronJob. Without it
     # ESO cannot sync the key, the console env is absent, and scheduled backups
     # fail closed forever while the UI reports the schedule as on.

@@ -97,9 +97,32 @@ spec:
               # from the outside. The Origin header matches the request host so
               # the console's CSRF same-origin guard passes even independently of
               # the token bypass.
+              #
+              # --retry 3 --retry-delay 30 exists because of a real incident:
+              # 2026-07-29 19:20, 20:20 and 21:20 UTC each failed with
+              # `curl: (22) ... error: 503`, and 503 on this path means one
+              # specific thing — `proxyToDatastore` could not reach
+              # infraweaver-backup. That pod is `replicas: 1` + `strategy:
+              # Recreate` on an RWO Longhorn volume BY DESIGN (one writer IS the
+              # consistency model), so every restart, reschedule or volume
+              # reattach is a window where this endpoint is legitimately 503 for
+              # a minute or two. Three whole hourly ticks were lost to a blip
+              # that 90 seconds of patience would have ridden out.
+              #
+              # Safe to retry precisely because 503 is returned by the PROXY, in
+              # front of the handler: nothing was claimed, nothing was written.
+              # And even a retry that double-runs a tick is harmless — a
+              # completed site is no longer due, a running one 409s into
+              # `skippedBusy`, and prune/GC/verify are idempotent.
+              #
+              # NOT --retry-all-errors: a connection reset mid-response is the one
+              # case where the server may have done the whole pass and only the
+              # answer was lost, and that is the case worth surfacing rather than
+              # papering over. 90 s of retry also stays far inside --max-time.
               args:
                 - >-
                   curl --fail --silent --show-error --max-time 3300
+                  --retry 3 --retry-delay 30
                   -X POST
                   -H "x-internal-cron-token: ${CRON_TOKEN}"
                   -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
