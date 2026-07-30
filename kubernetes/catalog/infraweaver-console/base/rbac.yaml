@@ -33,6 +33,13 @@ rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs", "jobs"]
     verbs: ["get", "list", "watch"]
+  # Read-only, and specifically for the replica-floor sweep: it refuses to touch
+  # a workload an HPA already owns, so it has to be able to see which those are.
+  # Without this the whole hourly pass 403s and raises nothing at all — the floor
+  # silently stops being enforced while the CronJob reports a plain 500.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
     verbs: ["get", "list", "watch"]
