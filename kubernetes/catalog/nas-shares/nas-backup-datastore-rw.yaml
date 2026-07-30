@@ -1,0 +1,79 @@
+---
+# The CANDIDATE backup datastore, staged for the compatibility probe.
+#
+# This is not the live datastore and must not become it without a PASSING probe:
+# the backup format's crash-safety rests on O_EXCL, rename-over-existing, fsync on
+# a DIRECTORY handle, and colon-bearing snapshot names, and SMB/CIFS does not
+# supply all four. It is mounted at a SECOND path (`/datastore-next`) so the
+# console's 12-check probe can measure this filesystem in its own terms instead of
+# an operator assuming. See backup-deployment.yaml and the console's
+# lib/backup/capability-probe.ts.
+#
+# ReadWriteOnce, not the ReadWriteMany the other NAS mounts use: the datastore has
+# exactly one writer, ever, and that property is enforced by the access mode plus
+# `replicas: 1` + `strategy: Recreate` — there is no lock anywhere in the backup
+# code because there has never needed to be one.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nas-backup-datastore-rw
+  labels:
+    infraweaver.io/nas-share: 'true'
+    infraweaver.io/provider: truenas
+    infraweaver.io/backend: smb
+    infraweaver.io/access: rw
+    infraweaver.io/share: iw-backup-datastore
+    infraweaver.io/subfolder: datastore
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ''
+  # `hard` so a NAS blip blocks and retries instead of returning EIO mid-copy — a
+  # migration streams for minutes. uid/gid/*_mode are required because the backup
+  # container runs as 1000:1000 under readOnlyRootFilesystem and CIFS has no
+  # fsGroup chown to fall back on; 0700 keeps the dedicated-export property intact
+  # on the client side too.
+  mountOptions:
+    - hard
+    - actimeo=30
+    - uid=1000
+    - gid=1000
+    - file_mode=0700
+    - dir_mode=0700
+  claimRef:
+    namespace: infraweaver-console
+    name: nas-backup-datastore-rw
+  csi:
+    driver: smb.csi.k8s.io
+    volumeHandle: 10.1.0.135/iw-backup-datastore#datastore#nas-backup-datastore-rw
+    volumeAttributes:
+      source: //10.1.0.135/iw-backup-datastore
+      # NEVER leave this empty. smb.csi substitutes the PV name for an empty
+      # subDir, so the pod would silently mount a directory nobody named.
+      subDir: datastore
+    nodeStageSecretRef:
+      name: nas-backup-datastore
+      namespace: infraweaver-console
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nas-backup-datastore-rw
+  namespace: infraweaver-console
+  labels:
+    infraweaver.io/nas-share: 'true'
+    infraweaver.io/provider: truenas
+    infraweaver.io/backend: smb
+    infraweaver.io/access: rw
+    infraweaver.io/share: iw-backup-datastore
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ''
+  volumeName: nas-backup-datastore-rw
+  resources:
+    requests:
+      storage: 200Gi

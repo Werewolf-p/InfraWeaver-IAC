@@ -139,8 +139,15 @@ spec:
             # (bottom of this file) at the candidate's claim, remove the staging
             # mount, clear this value, and commit. The old PVC keeps its Retain
             # policy and is deleted by hand later, never by the console.
+            #
+            # STAGED 2026-07-30 for the compatibility probe of the dedicated
+            # TrueNAS export (//10.1.0.135/iw-backup-datastore, subDir
+            # `datastore`, account iw-backup-dst — see
+            # kubernetes/catalog/nas-shares/nas-backup-datastore-rw.yaml). This is
+            # a MEASUREMENT, not a migration: no bytes are copied until the probe
+            # passes and an operator starts one.
             - name: BACKUP_MIGRATION_TARGET_DIR
-              value: ""
+              value: "/datastore-next"
             # Shared token the console presents on every proxied backup request
             # and this pod compares in constant time. Same ESO-managed secret on
             # both sides so they can never drift.
@@ -254,14 +261,15 @@ spec:
             # THE datastore. The only writable path that survives a restart.
             - name: datastore
               mountPath: /datastore
-            # ── Migration staging mount (normally absent) ─────────────────────
-            # Uncomment together with the `datastore-next` volume below and with
-            # BACKUP_MIGRATION_TARGET_DIR above. Present ONLY for the duration of
-            # a migration: a second writable mount on this pod is a second thing
-            # that can fill up, and the single-writer property this datastore
-            # depends on is per-VOLUME, not per-pod.
-            # - name: datastore-next
-            #   mountPath: /datastore-next
+            # ── Migration staging mount ───────────────────────────────────────
+            # Paired with the `datastore-next` volume below and with
+            # BACKUP_MIGRATION_TARGET_DIR above. Present ONLY while a candidate is
+            # being probed or migrated to: a second writable mount on this pod is
+            # a second thing that can fill up, and the single-writer property this
+            # datastore depends on is per-VOLUME, not per-pod. Remove all three
+            # once the candidate is measured or the cutover is confirmed.
+            - name: datastore-next
+              mountPath: /datastore-next
             # Next.js needs a writable cache dir under readOnlyRootFilesystem.
             - name: nextjs-cache
               mountPath: /app/.next/cache
@@ -289,16 +297,20 @@ spec:
         - name: datastore
           persistentVolumeClaim:
             claimName: infraweaver-backup-datastore
-        # ── Migration staging volume (normally absent) ────────────────────────
-        # The candidate datastore, mounted alongside the live one for the
-        # duration of a migration. For a NAS target this claim is the one
-        # /api/nas/mount-workload generates under kubernetes/catalog/nas-shares/;
-        # for another cluster volume it is a second PVC declared beside
-        # backup-pvc.yaml. It must be READ-WRITE — the migration writes it — so
-        # the NAS mount must be requested with access: readwrite.
-        # - name: datastore-next
-        #   persistentVolumeClaim:
-        #     claimName: nas-backups-infraweaver-rw
+        # ── Migration staging volume ──────────────────────────────────────────
+        # The candidate datastore, mounted alongside the live one so the probe
+        # (and later a migration) can see both filesystems in one pod. It must be
+        # READ-WRITE — the probe writes and fsyncs, the migration copies — so the
+        # NAS mount is requested with access: readwrite.
+        #
+        # This claim is the DEDICATED export declared in
+        # kubernetes/catalog/nas-shares/nas-backup-datastore-rw.yaml, not one of
+        # the shared per-provider NAS mounts: every snapshot's database dump holds
+        # that site's private signing key, so read access to this volume is key
+        # disclosure and write access is forged-snapshot injection.
+        - name: datastore-next
+          persistentVolumeClaim:
+            claimName: nas-backup-datastore-rw
         - name: nextjs-cache
           emptyDir: {}
         - name: tmp
