@@ -264,12 +264,24 @@ spec:
 
                   REFRESHED=0 SYNCED=0 SKIPPED=0
                   SYNCED_APPS="" DEGRADED_ALERT_CANDIDATES="" DEGRADED_REFRESH_LIST=""
+                  # Plain name list, kept alongside the Discord markdown above. The
+                  # CSV used for notification dedup used to be recovered from that
+                  # markdown with `grep -oP '`\K[^`]+'`, which treats EVERY backtick
+                  # as an opener — so it also returned the text after each closing
+                  # backtick and stored a literal "\n" as an app name (that is where
+                  # `last-sync-apps: "\n,core-cert-manager"` came from; "\" sorts
+                  # before "c" in the C locale). Carry the names directly instead.
+                  SYNCED_APP_NAMES=""
 
                   # ── Pass 1: categorize + hard-refresh ────────────────────
                   while IFS=$'\t' read -r APP HEALTH SYNC OP_PHASE TRANSIENT HEALTH_MESSAGE; do
                     [ -z "$APP" ] && continue
 
                     # Skip apps the console has powered off — never resurrect them.
+                    # These now report Synced (the console adds an ignoreDifferences
+                    # rule for /spec/replicas when it stops an app), so this branch
+                    # is rarely the thing keeping them alone — but it stays as the
+                    # backstop for any other drift a stopped app might show.
                     if is_powered_off "$APP"; then
                       echo "  SKIP  $APP — infraweaver.io/power=off (console-paused)"
                       SKIPPED=$((SKIPPED+1)); continue
@@ -393,6 +405,7 @@ spec:
                     # Quiet sync apps are still synced but excluded from Discord notification
                     if ! is_quiet_sync "$APP"; then
                       SYNCED_APPS="${SYNCED_APPS}• \`${APP}\`\n"
+                      SYNCED_APP_NAMES="${SYNCED_APP_NAMES} ${APP}"
                       SYNCED=$((SYNCED+1))
                     else
                       echo "  QUIET  $APP — synced silently (expected-drift app)"
@@ -436,13 +449,29 @@ spec:
                       fi
                     fi
                   done < <(echo "$APPS")
-                  
+
+                  # ── Sweep tracking keys for Applications that are gone ────
+                  # The loop above only visits apps present in THIS run's listing, so
+                  # a deleted Application's degraded-<app> key is never reached and
+                  # sits in the ConfigMap forever (that is how
+                  # degraded-catalog-onedev-manifests outlived its Application).
+                  # Compare the stored keys against the live app list instead.
+                  CURRENT_APP_NAMES=$(echo "$APPS" | cut -f1 | grep -v '^$' || true)
+                  for KEY in $(echo "$STATE_DATA" | grep '^degraded-' | cut -d= -f1 || true); do
+                    KEY_APP="${KEY#degraded-}"
+                    [ -z "$KEY_APP" ] && continue
+                    if ! printf '%s\n' "$CURRENT_APP_NAMES" | grep -qxF "$KEY_APP"; then
+                      echo "  PRUNE  $KEY_APP — no such Application, dropping stale tracking key"
+                      remove_state_key "$KEY"
+                    fi
+                  done
+
                   echo "[self-healer] Done. refreshed=$REFRESHED synced=$SYNCED skipped=$SKIPPED"
                   
                   # ── Notifications ─────────────────────────────────────────
                   if [ "$SYNCED" -gt 0 ]; then
                     # Build sorted CSV of synced app names for deduplication
-                    SYNCED_APP_CSV=$(echo "$SYNCED_APPS" | grep -oP '`\K[^`]+' | sort | tr '\n' ',' | sed 's/,$//')
+                    SYNCED_APP_CSV=$(printf '%s\n' $SYNCED_APP_NAMES | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
                   
                     # Calculate seconds since last sync notification
                     LAST_SYNC_EPOCH=""
@@ -486,7 +515,7 @@ spec:
                             UNION_APPS="${UNION_APPS},${_APP}"
                           fi
                         done
-                        UNION_APPS=$(echo "$UNION_APPS" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+                        UNION_APPS=$(echo "$UNION_APPS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
                       fi
                       update_state_key "last-sync-apps" "$UNION_APPS"
                       update_state_key "last-sync-time" "$CURRENT_SYNC_TIME"
