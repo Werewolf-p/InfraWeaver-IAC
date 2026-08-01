@@ -89,6 +89,44 @@ spec:
         # each game Service's external-dns target annotation.
         - name: PUBLIC_INGRESS_IP
           value: ${PUBLIC_INGRESS_IP}
+        # ── Game Hub platform switches (2026-08-01 wave) ─────────────────────
+        # Each feature reads its own switch and, when it is absent, answers with
+        # an operator sentence rather than an error — so these are what make the
+        # surfaces real rather than self-describing as off.
+        #
+        # Sleep Fleet REQUIRES the Service /spec/selector ignoreDifferences entry
+        # on catalog-game-hub-servers (shipped in this repo): hibernation parks
+        # the selector on the doorman pod, and without that entry selfHeal
+        # reverts the cutover on the next sync. Enabling the platform switch does
+        # NOT hibernate anything — every server still opts in per server, and a
+        # server an operator STOPPED is never woken by a packet from the internet.
+        - name: GAME_HUB_SLEEP_ENABLED
+          value: "1"
+        - name: GAME_HUB_DOCTOR_ENABLED
+          value: "1"
+        - name: GAME_HUB_LOCKFILE_ENABLED
+          value: "1"
+        # Network Fabric writes per-network manifests into
+        # kubernetes/catalog/game-hub/networks (catalog-game-hub-networks) and
+        # reads the Velocity forwarding secret from OpenBao at
+        # secret/platform/game-hub/networks/<name> — both shipped here.
+        - name: GAME_HUB_NETWORKS_ENABLED
+          value: "1"
+        # Import + review only. PUBLISH is a separate switch and stays off: it
+        # makes this console hold a signing key and needs registry push rights.
+        - name: GAME_HUB_EXCHANGE_ENABLED
+          value: "1"
+        # Player Passport COLLECTS: handles, presence samples, and a moderation
+        # ledger. Retention is stated on the roster page; turning this off stops
+        # collection and stops new moderation records but does not delete what is
+        # already stored.
+        - name: GAME_HUB_PASSPORT_ENABLED
+          value: "1"
+        # Community Hosting opens tenant self-service. A workspace can only
+        # create within a budget an operator set at the ROOT scope — with no
+        # budgets defined, this grants nobody anything.
+        - name: GAME_HUB_COMMUNITY_ENABLED
+          value: "1"
         # AUTH_URL must include /api/auth so Auth.js v5 derives basePath="/api/auth"
         # and correctly parses actions from /api/auth/signin/authentik etc.
         # Without the path, basePath="/" and the regex extracts "api" as the action → UnknownAction.

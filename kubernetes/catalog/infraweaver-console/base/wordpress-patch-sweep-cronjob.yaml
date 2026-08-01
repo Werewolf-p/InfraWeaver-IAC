@@ -1,0 +1,106 @@
+# WordPress Patch Gate fleet sweep — daily.
+#
+# Re-evaluates every managed site's exposure against the imported vulnerability
+# feed and, where a site's policy says so, runs the CVE → sandbox → proof →
+# promote → attest loop.
+#
+# READ THIS BEFORE CHANGING THE SCHEDULE. Auto-remediation is off by default at
+# BOTH levels and this CronJob does not change that: `autoRemediationAllowed`
+# requires the patch-gate flag AND an explicitly truthy
+# WORDPRESS_PATCH_AUTO_REMEDIATION_ENABLED, and every site's stored policy
+# defaults to `mode: "off"` (an unreadable or unrecognised policy also reads
+# "off"). With defaults in place this sweep only refreshes exposure — it takes
+# no action on any site. Turning it into something that acts is a per-site
+# decision plus a console-wide flag, in that order.
+#
+# WHY THIS EXISTS: like the sandbox reaper, the handler was written with
+# `allowCronToken: true`, a dedicated token and a constant-time compare — and
+# then had no CronJob and no proxy bypass, so a token-only POST (no Origin, no
+# Referer) was 403'd by the same-origin guard before the handler ran. The guard
+# was correct and unreachable. `tests/unit/proxy-credential-census.test.ts` now
+# fails the build on a route in that state.
+#
+# Lower stakes than the sandbox reaper — this one fails toward LESS action, since
+# the shipped default takes none — which is why it is daily rather than hourly.
+#
+# Feed behaviour worth knowing: an unreachable or never-imported feed resolves to
+# a stated `unknown`, never to an empty advisory list. So a sweep that runs
+# against no feed reports "we do not know", not "nothing is vulnerable". Feeds
+# are imported as snapshots and never fetched at runtime, so this pod needs no
+# egress beyond the console.
+#
+# Auth: dedicated `wordpress-patch-cron-token`, not shared with the other
+# sweeps. The console middleware admits it on an exact path + method + token
+# match; the route re-validates (defence in depth).
+#
+# Networking: carries the iwsl component labels, so the existing
+# ciliumnetworkpolicy-wp-health-egress.yaml and networkpolicy-wp-health.yaml
+# already cover it.
+#
+# To suspend: `kubectl -n infraweaver-console patch cronjob wordpress-patch-sweep
+# -p '{"spec":{"suspend":true}}'`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-patch-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  suspend: false
+  schedule: "31 4 * * *" # daily at 04:31, offset from the rotation sweep at 03:17
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # Longer than the other sweeps: with auto mode enabled for a site, one run
+      # can spawn a sandbox, apply a patch and drive a proof run before it parks
+      # at promote. Still bounded — maxPerRun is clamped to 5.
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: patch-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-patch-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 3500
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/patch/sweep

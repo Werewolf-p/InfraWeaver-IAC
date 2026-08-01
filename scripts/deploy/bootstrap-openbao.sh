@@ -646,6 +646,25 @@ path "secret/metadata/platform/nas/creds/*" { capabilities = ["read","delete"] }
 # and the console must be able to re-read them to hand them to their owner.
 path "secret/data/platform/app-accounts/*" { capabilities = ["create","read","update","delete"] }
 path "secret/metadata/platform/app-accounts/*" { capabilities = ["read","delete","list"] }
+# Fleet Command member-cluster credentials (kubeconfig + ArgoCD token per cluster).
+# These are the reason the fleet registry ConfigMap holds inventory metadata ONLY:
+# lib/fleet/credentials.ts is the single module allowed to touch them, and routes
+# are handed a three-boolean credentialStatus, never a value.
+path "secret/data/platform/fleet/*" { capabilities = ["create","read","update","delete"] }
+path "secret/metadata/platform/fleet/*" { capabilities = ["read","delete","list"] }
+# Velocity forwarding secret, one per Game Hub network. Written here rather than
+# into a manifest because an inline env value returned from a read-tier GET is
+# exactly the RCON_PASSWORD incident; the ExternalSecret in git carries the remote
+# key path only, and the proxy mounts the materialised Secret as a 0400 file.
+path "secret/data/platform/game-hub/networks/*" { capabilities = ["create","read","update","delete"] }
+path "secret/metadata/platform/game-hub/networks/*" { capabilities = ["read","delete","list"] }
+# Signing keyrings for lib/trust. One signing substrate, several purposes —
+# compliance-evidence, game-hub-exchange, game-hub-delegate-session,
+# game-world-timeline, wordpress-room-share, game-hub-moderation-record.
+# Read+create only: a keyring that the console can DELETE would make every
+# signature it ever produced unverifiable, which is the opposite of the point.
+path "secret/data/platform/trust/*" { capabilities = ["create","read","update"] }
+path "secret/metadata/platform/trust/*" { capabilities = ["read","list"] }
 EOF'
 echo "==> Console runtime policy wordpress written"
 

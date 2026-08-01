@@ -25,6 +25,8 @@ resources:
   - placement-rebalance-cronjob.yaml
   - replica-floor-sweep-cronjob.yaml
   - backup-sweep-cronjob.yaml
+  - wordpress-sandbox-sweep-cronjob.yaml
+  - wordpress-patch-sweep-cronjob.yaml
   - networkpolicy-wp-health.yaml
   - backup-networkpolicy.yaml
   - game-servers-namespace.yaml

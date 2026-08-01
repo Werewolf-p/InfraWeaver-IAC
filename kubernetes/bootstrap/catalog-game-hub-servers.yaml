@@ -52,3 +52,21 @@ spec:
         - '.metadata.annotations["infraweaver/notes"]'
         - '.metadata.annotations["infraweaver/player-history"]'
         - '.spec.template.metadata.annotations["infraweaver.io/last-started"]'
+    # Sleep Fleet (GameHub wake-on-connect / idle hibernation) parks a hibernated
+    # server's Service selector on the doorman pod, so a joining player reaches a
+    # tiny protocol responder that wakes the real server instead of a refused
+    # connection. That flips a field git also owns.
+    #
+    # Without this entry, selfHeal reverts the cutover on the next sync and the
+    # Service oscillates between doorman and game pod — the same permanent
+    # OutOfSync shape /spec/replicas above was added to fix. Paired with
+    # RespectIgnoreDifferences=true, the selector becomes cluster-owned, which is
+    # correct: which pod answers is runtime state, not desired state.
+    #
+    # The console refuses to enable hibernation for a server whose Service is
+    # ArgoCD-tracked without this entry (see lib/sleep/cutover.ts).
+    - kind: Service
+      jsonPointers:
+        - /spec/selector
+      jqPathExpressions:
+        - '.metadata.annotations["infraweaver.io/sleep-phase"]'

@@ -1,0 +1,44 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-game-hub-networks
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/game-hub/networks
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: game-hub
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The namespace is owned by catalog-game-hub-namespace, not by this app.
+      - CreateNamespace=false
+      # Without this, ArgoCD re-applies the ignoreDifferences fields from git on
+      # every sync, so an ignored field is only ignored for drift *detection* and
+      # not for ownership. Same reasoning as catalog-game-hub-servers.
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    # A Velocity proxy Deployment's replica count is moved by ordinary power
+    # paths and by nothing in git. Without this, selfHeal fights every scale —
+    # the permanent-OutOfSync shape /spec/replicas was added to fix on
+    # catalog-game-hub-servers.
+    - group: apps
+      kind: Deployment
+      name: gamenet-*
+      jsonPointers:
+        - /spec/replicas
+    # ESO owns the materialised Secret's data, and the ExternalSecret's status
+    # is written by the controller on every refresh. ArgoCD must not try to
+    # reconcile a value it cannot see.
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status

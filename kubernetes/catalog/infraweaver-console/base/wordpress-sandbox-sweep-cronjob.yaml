@@ -1,0 +1,103 @@
+# WordPress Sandbox Fleet reaper — hourly.
+#
+# Collects expired and abandoned sandboxes: a sandbox has a hard TTL (72h
+# default, 14d ceiling on total lifetime) and is abandoned after 30 minutes with
+# no heartbeat. This CronJob is the ONLY thing that acts on either.
+#
+# WHY THIS EXISTS AT ALL, stated plainly: the reaper handler was written with a
+# dedicated token and a constant-time compare, and then had no CronJob and no
+# proxy bypass — so `runSandboxSweep` had exactly one caller, which nothing could
+# reach. A token-only POST carries no Origin and no Referer, so the console's
+# same-origin guard 403'd it before the handler ran. Every sandbox an operator
+# spawned was permanent until deleted by hand. The honest answer to "how long is
+# a production clone retained" was: indefinitely.
+#
+# That matters more here than for most sweeps. A sandbox is a full clone of a
+# production site — `wp_users`, subscriber rows, WooCommerce customer and order
+# rows — plus `wp-content`, served on its own hostname. A TTL that only fires
+# when someone clicks is not a TTL.
+#
+# Auth: dedicated `wordpress-sandbox-cron-token`, NOT shared with the health or
+# rotation sweeps. Teardown is destructive and the blast radius differs, so it
+# gets its own credential rather than inheriting one whose rotation is driven by
+# an unrelated schedule. The console middleware (src/proxy.ts) admits this
+# request past the session gate only on an exact path + method + token match,
+# and the handler re-validates the token itself (defence in depth).
+#
+# Failure behaviour is deliberately conservative on the handler side: a failed
+# teardown KEEPS its record and is re-reported next run rather than being
+# dropped, and an unreadable record is named rather than pruned. So a persistent
+# failure surfaces instead of silently orphaning storage.
+#
+# Networking: carries the iwsl component labels, so the existing
+# ciliumnetworkpolicy-wp-health-egress.yaml (egress to CoreDNS + console) and
+# networkpolicy-wp-health.yaml (ingress to the console pod on :3000) already
+# cover it — no extra NetworkPolicy needed.
+#
+# To suspend: `kubectl -n infraweaver-console patch cronjob
+# wordpress-sandbox-sweep -p '{"spec":{"suspend":true}}'` — note that suspending
+# it stops expiry entirely; it does not merely delay it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-sandbox-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  suspend: false
+  schedule: "43 * * * *" # hourly at :43, offset from the other console crons
+  concurrencyPolicy: Forbid # teardown must never overlap itself
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1 # a failed teardown keeps its record and is retried next hour
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sandbox-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-sandbox-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 600
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/sandboxes/sweep
