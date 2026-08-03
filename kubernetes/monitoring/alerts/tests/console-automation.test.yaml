@@ -1,0 +1,201 @@
+# promtool unit tests for the console.automation.health alerting rules.
+#
+# Run by: scripts/validate-iac.sh (gate 5/5). Do not run promtool against this
+# file directly from the repo — `rules.yaml` below does not exist here. The
+# rules live inside a PrometheusRule custom resource, which promtool cannot
+# read, so the gate extracts `.spec` from every PrometheusRule into a temp
+# directory as `rules.yaml`, copies this file next to it, and runs there.
+#
+# promtool's clock starts at 0, so a constant last_successful_time of 0 means
+# "succeeded at t=0 and never again" and `time() - 0` is simply the eval time.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── A dead hourly sweep must fire ──────────────────────────────────────────
+  - interval: 1m
+    name: hourly sweep dead for 4h fires
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="roster-drift"}'
+        values: '0+0x300'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: ConsoleAutomationCronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: ConsoleAutomationCronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: infraweaver-console
+              cronjob: roster-drift
+            exp_annotations:
+              summary: 'Console CronJob infraweaver-console/roster-drift has not succeeded recently'
+              description: 'Console automation CronJob roster-drift has not reported a successful run in over 3 hours. Its schedule is hourly or faster, so this is at least two consecutive missed runs.'
+
+  # ── REGRESSION: a SUSPENDED CronJob must never fire missed-success ─────────
+  # last_successful_time freezes while suspended, so time()-lst grows without
+  # bound. Without the `unless` this alert fires forever on a job an operator
+  # deliberately paused — and suspending is the documented runbook action in
+  # wordpress-sandbox-sweep-cronjob.yaml.
+  - interval: 1m
+    name: suspended sweep does not fire missed-success
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="wordpress-sandbox-sweep"}'
+        values: '0+0x900'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-sandbox-sweep"}'
+        values: '1+0x900'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: ConsoleAutomationCronJobMissedSuccess
+        exp_alerts: []
+
+  # ── Same for a suspended DAILY sweep ──────────────────────────────────────
+  - interval: 1m
+    name: suspended daily sweep does not fire missed-success
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"}'
+        values: '1+0x3000'
+    alert_rule_test:
+      - eval_time: 40h
+        alertname: ConsoleAutomationDailyCronJobMissedSuccess
+        exp_alerts: []
+
+  # ── A healthy daily sweep 10h after success stays silent ──────────────────
+  # This is the false positive a literal selector widening would have created.
+  - interval: 1m
+    name: daily sweep 10h since success stays silent
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"}'
+        values: '0+0x800'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"}'
+        values: '0+0x800'
+    alert_rule_test:
+      - eval_time: 10h
+        alertname: ConsoleAutomationCronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 10h
+        alertname: ConsoleAutomationDailyCronJobMissedSuccess
+        exp_alerts: []
+
+  # ── ...but a daily sweep that has missed a run DOES fire past 28h ─────────
+  - interval: 1m
+    name: daily sweep past 28h fires
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"}'
+        values: '0+0x2200'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"}'
+        values: '0+0x2200'
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: ConsoleAutomationDailyCronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: infraweaver-console
+              cronjob: wordpress-patch-sweep
+            exp_annotations:
+              summary: 'Console daily CronJob infraweaver-console/wordpress-patch-sweep has missed a run'
+              description: 'Daily console CronJob wordpress-patch-sweep has not succeeded in over 28 hours, so it has missed at least one scheduled run. Rotation and patch sweeps failing silently means credentials and WordPress cores stop moving.'
+
+  # ── openbao-token-renew must be invisible to EVERY rule in this group ──────
+  # It is fully covered by alerts/openbao-token.yaml. A second alert on the same
+  # condition reaches the same Discord receiver twice and cannot be inhibited,
+  # because inhibition keys on alertname and the alertnames differ.
+  - interval: 1m
+    name: openbao-token-renew is excluded from every console rule
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="openbao-token-renew"}'
+        values: '0+0x4000'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="openbao-token-renew"}'
+        values: '1+0x4000'
+    alert_rule_test:
+      - eval_time: 60h
+        alertname: ConsoleAutomationCronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 60h
+        alertname: ConsoleAutomationDailyCronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 60h
+        alertname: ConsoleAutomationCronJobSuspended
+        exp_alerts: []
+
+  # ── A suspended CronJob other than openbao DOES fire the suspend alert ─────
+  - interval: 1m
+    name: suspended console cronjob fires the suspend alert
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-backup-sweep"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ConsoleAutomationCronJobSuspended
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: infraweaver-console
+              cronjob: wordpress-backup-sweep
+            exp_annotations:
+              summary: 'Console CronJob infraweaver-console/wordpress-backup-sweep is suspended'
+              description: 'Console automation CronJob wordpress-backup-sweep is suspended and will not run until resumed.'
+
+  # ── Never-succeeded, now gated on kube_cronjob_created ────────────────────
+  # placement-rebalance was created at t=0 and has no success series.
+  # users-reconcile is healthy. brand-new-sweep was created only ~2h before the
+  # 30h evaluation and must stay silent — that is the new-CronJob grace window,
+  # now data-driven so it survives a Prometheus restart instead of relying on a
+  # 26h `for:` that any gap over the 1h outage tolerance would reset.
+  - interval: 1m
+    name: never-succeeded fires only past the created-at grace window
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="placement-rebalance"}'
+        values: '0+0x2200'
+      - series: 'kube_cronjob_created{namespace="infraweaver-console",cronjob="placement-rebalance"}'
+        values: '0+0x2200'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="users-reconcile"}'
+        values: '0+0x2200'
+      - series: 'kube_cronjob_created{namespace="infraweaver-console",cronjob="users-reconcile"}'
+        values: '0+0x2200'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="users-reconcile"}'
+        values: '0+60x2200'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="brand-new-sweep"}'
+        values: '0+0x2200'
+      - series: 'kube_cronjob_created{namespace="infraweaver-console",cronjob="brand-new-sweep"}'
+        values: '100000+0x2200'
+    alert_rule_test:
+      - eval_time: 20h
+        alertname: ConsoleAutomationCronJobNeverSucceeded
+        exp_alerts: []
+      - eval_time: 30h
+        alertname: ConsoleAutomationCronJobNeverSucceeded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: infraweaver-console
+              cronjob: placement-rebalance
+            exp_annotations:
+              summary: 'Console CronJob infraweaver-console/placement-rebalance has NEVER succeeded'
+              description: 'CronJob placement-rebalance was created over 26 hours ago, is not suspended, and has no recorded successful run at all. The missed-success alerts cannot fire for it because the metric they subtract from does not exist yet. Check the job template, image tag, and RBAC.'
+
+  # ── Regression: the pre-existing cluster rule must be UNCHANGED ────────────
+  - interval: 1m
+    name: cluster rule untouched by the console change
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="roster-drift"}'
+        values: '0+0x300'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="argocd",cronjob="argocd-self-healer"}'
+        values: '0+0x300'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: ClusterAutomationCronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: argocd
+              cronjob: argocd-self-healer
+            exp_annotations:
+              summary: 'Automation CronJob argocd/argocd-self-healer has not succeeded recently'
+              description: 'Cluster automation CronJob argocd-self-healer has not reported a successful run within the last 2 hours.'

@@ -48,7 +48,7 @@ FAILED=0
 # only "change-me" values, which the gate ignores as non-real.
 SECRET_BASELINE=()
 
-echo "── 1/4 kustomize build (overlays) ───────────────────────────────────────"
+echo "── 1/5 kustomize build (overlays) ───────────────────────────────────────"
 mapfile -t OVERLAYS < <(find kubernetes -type f -path '*/overlays/*/kustomization.yaml' -printf '%h\n' | sort -u)
 if [[ ${#OVERLAYS[@]} -eq 0 ]]; then
   echo "  (no overlays yet — skipping)"
@@ -66,7 +66,7 @@ for d in "${OVERLAYS[@]}"; do
   fi
 done
 
-echo "── 2/4 kubeconform (flat manifest dirs without overlays) ─────────────────"
+echo "── 2/5 kubeconform (flat manifest dirs without overlays) ─────────────────"
 if command -v kubeconform >/dev/null 2>&1; then
   mapfile -t FLAT < <(find kubernetes -type d -name manifests | sort)
   for d in "${FLAT[@]}"; do
@@ -78,7 +78,7 @@ else
   echo "  kubeconform not installed — skipping (CI installs it)"
 fi
 
-echo "── 3/4 secret-leak gate ──────────────────────────────────────────────────"
+echo "── 3/5 secret-leak gate ──────────────────────────────────────────────────"
 LEAKS="$(BASELINE="${SECRET_BASELINE[*]}" python3 - << 'PY'
 import glob, yaml, os
 baseline = set(os.environ.get("BASELINE","").split())
@@ -109,7 +109,7 @@ else
   echo "  ✓ no new committed secrets (baseline: ${#SECRET_BASELINE[@]} pending migration)"
 fi
 
-echo "── 4/4 cron-secret seed gate ─────────────────────────────────────────────"
+echo "── 4/5 cron-secret seed gate ─────────────────────────────────────────────"
 CRON_GAPS="$(python3 - << 'PY'
 import glob, yaml
 
@@ -213,6 +213,115 @@ if [[ -n "$CRON_GAPS" ]]; then
   FAILED=1
 else
   echo "  ✓ every CronJob secret key sourced from a catalog path is declared (bootstrap will seed it)"
+fi
+
+echo "── 5/5 alerting rules (promtool + duplicate scan) ────────────────────────"
+# Alerting rules used to have no gate at all. Two real defects shipped through
+# that gap: a >85% node-memory alert existed twice under different alertnames in
+# two files (one condition, two Discord pages, un-inhibitable because
+# Alertmanager keys inhibition on alertname), and a console CronJob alert was
+# added that duplicated one already in alerts/openbao-token.yaml.
+#
+# promtool cannot read a PrometheusRule custom resource, so `.spec` is extracted
+# from every one of them into a temp dir first. Group names are prefixed with
+# their source file because group names must be unique within a rules file.
+RULES_TMP="$(mktemp -d)"
+trap 'rm -rf "$RULES_TMP"' EXIT
+
+RULE_EXTRACT="$(python3 - "$RULES_TMP" <<'PY'
+import sys, glob, yaml, os
+out_dir = sys.argv[1]
+groups, files = [], 0
+for f in sorted(glob.glob('kubernetes/**/*.yaml', recursive=True)):
+    try:
+        docs = [d for d in yaml.safe_load_all(open(f)) if isinstance(d, dict)]
+    except Exception:
+        continue                      # not our file; other gates cover parse errors
+    for d in docs:
+        if d.get('kind') != 'PrometheusRule':
+            continue
+        files += 1
+        stem = os.path.basename(f).rsplit('.', 1)[0]
+        for g in d.get('spec', {}).get('groups', []):
+            g = dict(g)
+            g['name'] = f"{stem}::{g['name']}"
+            groups.append(g)
+if not groups:
+    # A scan that finds nothing must not read as success.
+    print("ERROR: no PrometheusRule groups found — the extractor is broken or the rules moved")
+    sys.exit(1)
+with open(os.path.join(out_dir, 'rules.yaml'), 'w') as fh:
+    yaml.safe_dump({'groups': groups}, fh, sort_keys=False, width=10**6)
+print(f"{files} PrometheusRule doc(s), {len(groups)} group(s), "
+      f"{sum(len(g.get('rules', [])) for g in groups)} rule(s)")
+PY
+)" || { echo "  ✗ rule extraction failed:"; echo "$RULE_EXTRACT" | sed 's/^/      /'; FAILED=1; }
+[[ -n "$RULE_EXTRACT" ]] && echo "  · extracted $RULE_EXTRACT"
+
+# Duplicate scan. Pure Python, so it runs everywhere — including where promtool
+# is absent. This is the check that would have caught both defects above.
+DUPES="$(python3 - <<'PY'
+import glob, yaml, collections
+names, exprs = collections.defaultdict(list), collections.defaultdict(list)
+for f in sorted(glob.glob('kubernetes/**/*.yaml', recursive=True)):
+    try:
+        docs = [d for d in yaml.safe_load_all(open(f)) if isinstance(d, dict)]
+    except Exception:
+        continue
+    for d in docs:
+        if d.get('kind') != 'PrometheusRule':
+            continue
+        for g in d.get('spec', {}).get('groups', []):
+            for r in g.get('rules', []):
+                if 'alert' not in r:
+                    continue
+                names[r['alert']].append(f)
+                exprs[' '.join(r['expr'].split())].append(f"{r['alert']} ({f})")
+for n, fs in sorted(names.items()):
+    if len(fs) > 1:
+        print(f"duplicate alertname '{n}' in: {', '.join(sorted(set(fs)))}")
+for e, rs in sorted(exprs.items()):
+    if len(rs) > 1:
+        print(f"identical expression shared by: {', '.join(sorted(set(rs)))}")
+        print(f"    expr: {e[:110]}")
+PY
+)"
+if [[ -n "$DUPES" ]]; then
+  echo "  ✗ duplicate alerts — one condition would page twice and Alertmanager cannot inhibit across alertnames:"
+  echo "$DUPES" | sed 's/^/      /'
+  FAILED=1
+else
+  echo "  ✓ no duplicate alertnames or identical expressions across PrometheusRules"
+fi
+
+if command -v promtool >/dev/null 2>&1; then
+  if [[ -f "$RULES_TMP/rules.yaml" ]]; then
+    promtool check rules "$RULES_TMP/rules.yaml" >/tmp/pt.txt 2>&1 \
+      && echo "  ✓ promtool check rules" \
+      || { echo "  ✗ promtool check rules:"; sed 's/^/      /' /tmp/pt.txt; FAILED=1; }
+
+    # Unit tests live beside the rules they cover. Each is copied next to the
+    # extracted rules.yaml because promtool resolves rule_files relative to the
+    # test file.
+    shopt -s nullglob
+    TESTS=(kubernetes/monitoring/alerts/tests/*.test.yaml)
+    shopt -u nullglob
+    if (( ${#TESTS[@]} == 0 )); then
+      echo "  ✗ no *.test.yaml found under kubernetes/monitoring/alerts/tests/ — alert unit tests are expected to exist"
+      FAILED=1
+    else
+      for t in "${TESTS[@]}"; do
+        cp "$t" "$RULES_TMP/$(basename "$t")"
+        if (cd "$RULES_TMP" && promtool test rules "$(basename "$t")") >/tmp/pt.txt 2>&1; then
+          echo "  ✓ promtool test rules — $(basename "$t")"
+        else
+          echo "  ✗ promtool test rules — $(basename "$t"):"; sed 's/^/      /' /tmp/pt.txt; FAILED=1
+        fi
+      done
+    fi
+  fi
+else
+  echo "  promtool not installed — skipping check/test (CI installs it; see .github/workflows/validate-iac.yml)"
 fi
 
 echo "──────────────────────────────────────────────────────────────────────────"

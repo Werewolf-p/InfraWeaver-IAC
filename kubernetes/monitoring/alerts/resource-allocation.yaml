@@ -1,0 +1,214 @@
+---
+# =============================================================================
+# Allocation (scheduler-side) alerts — as opposed to utilisation alerts.
+# =============================================================================
+# The existing alerts in this directory all fire on USAGE:
+#   memory-pressure.yaml  -> node_memory_MemAvailable_bytes / MemTotal > 85%
+#   oom-kills.yaml        -> container working set vs its own limit
+#   manifests/prometheus-rules.yaml -> node.health, node.oom, storage
+# and kube-prometheus-stack ships KubeCPUOvercommit / KubeMemoryOvercommit,
+# which are CLUSTER-wide only.
+#
+# None of them can see the failure mode that actually occurred here: a node
+# whose REQUESTS have consumed its allocatable while its USAGE stays low.
+# talos-prod-cp1 sits at 96.4% of allocatable memory requests while using 78%,
+# and every usage-based alert is silent. The scheduler is out of room; nothing
+# is on fire yet. That is precisely the window in which you want to be told.
+#
+# All expressions below were executed against the live Prometheus at
+# 2026-08-02 before being committed, and their current values are recorded in
+# the comment above each rule.
+#
+# `kube_pod_status_phase{phase="Running"} == 1` join is load-bearing: without
+# it kube-state-metrics also reports requests for Succeeded/Failed pods (the
+# kyverno cleanup Jobs), which inflated talos-prod-cp2 from 50 to 99 counted
+# containers and cp3's memory ratio from 0.804 to 0.940.
+#
+# Label `release: kube-prometheus-stack` is REQUIRED — it is the operator's
+# prometheusRule selector. Without it this file is silently ignored.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: resource-allocation-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: allocation.node
+      rules:
+        # Measured 2026-08-02: cp1 0.964, cp3 0.804, cp2 0.342
+        # cp1 fires this immediately — that is correct, it IS the problem.
+        - alert: NodeMemoryRequestsNearAllocatable
+          expr: |
+            sum by (node) (
+              kube_pod_container_resource_requests{resource="memory"}
+              * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)
+            )
+            / on (node) group_left
+            sum by (node) (kube_node_status_allocatable{resource="memory"})
+            > 0.85
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.node }} has committed {{ $value | humanizePercentage }} of allocatable memory to pod requests"
+            description: >-
+              The scheduler has reserved more than 85% of {{ $labels.node }}'s
+              allocatable memory. Actual usage may be far lower — this is about
+              schedulability, not pressure. Nothing new of meaningful size can
+              be placed here, and any pod evicted from this node may not fit
+              back. Check the Placement view in the console, and
+              /api/cluster/rightsizing for workloads requesting far more than
+              they use.
+
+        # Measured 2026-08-02: cp1 0.964 -> this is at critical today.
+        - alert: NodeMemoryRequestsExhausted
+          expr: |
+            sum by (node) (
+              kube_pod_container_resource_requests{resource="memory"}
+              * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)
+            )
+            / on (node) group_left
+            sum by (node) (kube_node_status_allocatable{resource="memory"})
+            > 0.95
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} is effectively unschedulable for memory ({{ $value | humanizePercentage }} committed)"
+            description: >-
+              {{ $labels.node }} has under 5% of allocatable memory left for
+              new pod requests. A DaemonSet rollout, a rescheduled pod, or an
+              HPA scale-out targeting this node will go Pending. Reduce
+              requests on over-provisioned workloads or add node memory.
+
+        # Measured 2026-08-02: cp1 0.903, cp2 0.591, cp3 0.494
+        - alert: NodeCPURequestsNearAllocatable
+          expr: |
+            sum by (node) (
+              kube_pod_container_resource_requests{resource="cpu"}
+              * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)
+            )
+            / on (node) group_left
+            sum by (node) (kube_node_status_allocatable{resource="cpu"})
+            > 0.90
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.node }} has committed {{ $value | humanizePercentage }} of allocatable CPU to pod requests"
+            description: >-
+              CPU requests on {{ $labels.node }} are above 90% of allocatable
+              while measured CPU usage across the cluster runs near 14%. This
+              is over-requesting, not genuine CPU exhaustion. Rightsize rather
+              than adding capacity.
+
+    - name: allocation.overcommit
+      rules:
+        # Memory limits are enforced by the kernel OOM killer, so unlike CPU
+        # limits this over-commit is a real outage mode: if enough pods on one
+        # node grow toward their limits simultaneously, the node OOMs.
+        # Measured 2026-08-02: cp3 2.677, cp1 2.395, cp2 1.019
+        - alert: NodeMemoryLimitsOvercommitted
+          expr: |
+            sum by (node) (
+              kube_pod_container_resource_limits{resource="memory"}
+              * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)
+            )
+            / on (node) group_left
+            sum by (node) (kube_node_status_allocatable{resource="memory"})
+            > 2
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.node }} memory limits are {{ $value | humanizePercentage }} of allocatable"
+            description: >-
+              Sum of memory limits on {{ $labels.node }} exceeds 2x allocatable.
+              Memory is incompressible — if enough of these pods grow at once
+              the node OOMs and the kernel, not Kubernetes, chooses the victim.
+              Cap the ratio via maxLimitRequestRatio in
+              kubernetes/core/limitranges/governed-namespaces.yaml.
+
+        # THE ONE THAT MATTERS MOST.
+        # Can the cluster still hold its own workload after losing one node?
+        # Measured 2026-08-02: 1.185 — it CANNOT. Losing the largest node
+        # leaves memory requests at 118.5% of the remaining allocatable, so a
+        # single node failure strands pods in Pending. This is a 3-node
+        # control-plane cluster with no worker pool: N+1 is the whole point.
+        - alert: ClusterCannotSurviveNodeLoss
+          expr: |
+            sum(
+              kube_pod_container_resource_requests{resource="memory"}
+              * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)
+            )
+            /
+            (
+              sum(kube_node_status_allocatable{resource="memory"})
+              - max(kube_node_status_allocatable{resource="memory"})
+            )
+            > 1
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cluster has no N+1 memory headroom ({{ $value | humanizePercentage }} of surviving allocatable)"
+            description: >-
+              If the largest node is lost, total pod memory requests exceed the
+              allocatable memory of the remaining nodes, so some pods will stay
+              Pending until a node returns. Either reduce cluster-wide memory
+              requests or add node memory. Note the nodes are asymmetric:
+              cp1/cp2 have 20.2Gi allocatable each, cp3 only 6.4Gi.
+
+    - name: allocation.hygiene
+      rules:
+        # BestEffort pods are invisible to the scheduler and are the FIRST
+        # thing the kubelet evicts and the kernel OOM-kills.
+        # Measured 2026-08-02: 23 BestEffort pods, including openbao (the
+        # platform secret store) at 232Mi.
+        - alert: BestEffortPodsPresent
+          expr: |
+            count(
+              kube_pod_status_qos_class{qos_class="BestEffort"} == 1
+            ) > 12
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: "{{ $value }} pods are running with no resource requests (BestEffort)"
+            description: >-
+              BestEffort pods are scheduled as if they were free and are killed
+              first under pressure. The LimitRanges in
+              kubernetes/core/limitranges/baseline-namespaces.yaml add a default
+              request on next rollout. A residual count is expected: the
+              kube-system Talos/CNI pods are deliberately excluded, so this
+              threshold is set above that floor rather than at zero.
+
+        # A workload that requests far more memory than it will ever use is
+        # what consumed cp1's allocatable without using it. This catches the
+        # pattern continuously instead of waiting for the next investigation.
+        - alert: WorkloadMemoryGrosslyOverRequested
+          expr: |
+            (
+              sum by (namespace, pod) (
+                kube_pod_container_resource_requests{resource="memory"}
+                * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)
+              )
+              -
+              sum by (namespace, pod) (
+                container_memory_working_set_bytes{container!="", container!="POD", image!=""}
+              )
+            ) > 1073741824
+          for: 6h
+          labels:
+            severity: info
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }} reserves over 1GiB of memory it is not using"
+            description: >-
+              This pod has held more than 1GiB of memory request above its
+              working set for 6 hours. That memory is unavailable to the
+              scheduler for anything else. Confirm against
+              /api/cluster/rightsizing before lowering — a JVM or database
+              may need the headroom for a workload peak this alert cannot see.

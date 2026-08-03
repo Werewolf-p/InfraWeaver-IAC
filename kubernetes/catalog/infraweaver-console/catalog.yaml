@@ -57,6 +57,13 @@ secrets:
     game-hub-power-cron-token:
       type: password
       length: 64
+    # HMAC key for Game Hub Sleep Fleet wake tickets. GAME_HUB_SLEEP_ENABLED has
+    # been "1" for weeks while this key did not exist, so hibernation refused
+    # every request rather than park a server it could never wake — the feature
+    # was switched on and unavailable. The gate requires >= 32 characters.
+    game-hub-wake-secret:
+      type: password
+      length: 64
     # Dedicated token for the hourly replica-floor ("Redundancy") sweep CronJob.
     # Same reasoning as above: without it ESO cannot sync the key and the sweep
     # fails closed forever while the setting page reports a floor is in force.
@@ -73,7 +80,7 @@ secrets:
     # HMAC key for snapshot manifest signatures. Declared here for the same
     # reason as the token above: under deletionPolicy Retain a fresh install
     # whose OpenBao lacks this property gets NO console secret at all, not a
-    # secret missing one key. validate-iac.sh step 4/4 enforces the pairing.
+    # secret missing one key. validate-iac.sh step 4/5 enforces the pairing.
     backup-manifest-key:
       type: password
       length: 64
@@ -83,13 +90,29 @@ secrets:
     wordpress-backup-cron-token:
       type: password
       length: 64
+    # Dedicated token for the daily WordPress core-patch sweep CronJob
+    # (wordpress-patch-sweep, 04:31). It was reachable by the CronJob and by the
+    # Retain ExternalSecret without ever being declared here, so validate-iac.sh
+    # step 4/5 was RED at HEAD: on a fresh install ESO would abort the ENTIRE
+    # console secret over this one property, taking every other key with it —
+    # the failure that reads as a Degraded ArgoCD app while each individual
+    # resource reports healthy.
+    wordpress-patch-cron-token:
+      type: password
+      length: 64
+    # Dedicated token for the hourly WordPress sandbox sweep CronJob
+    # (wordpress-sandbox-sweep, :43). Same reasoning and the same fresh-install
+    # abort as the patch token above.
+    wordpress-sandbox-cron-token:
+      type: password
+      length: 64
     # ── Remaining properties the console ExternalSecret pulls from THIS path ───
     # The ExternalSecret uses deletionPolicy: Retain, under which ESO fails the
     # ENTIRE secret sync if ANY referenced property is absent in OpenBao (a
     # missing key is only skipped when deletionPolicy != Retain). So every
     # property the ExternalSecret reads from secret/platform/infraweaver-console
     # MUST exist here on a fresh install, or the console pod + all three hygiene
-    # CronJobs never receive their Secret. validate-iac.sh step 4/4 enforces this.
+    # CronJobs never receive their Secret. validate-iac.sh step 4/5 enforces this.
     #
     # Shared HMAC the console signs dispatch mutation POSTs with; the dispatch
     # systemd unit on the runner reads the SAME value from this OpenBao path, so

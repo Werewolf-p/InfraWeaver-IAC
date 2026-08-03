@@ -4,6 +4,8 @@ kind: LimitRange
 metadata:
   name: workload-defaults
   namespace: infraweaver-console
+  labels:
+    infraweaver.io/governance: governed
 spec:
   limits:
     - type: Container
@@ -13,3 +15,25 @@ spec:
       default:
         memory: 512Mi
         cpu: 500m
+      # ---------------------------------------------------------------------
+      # ADDED: this LimitRange previously declared only defaults. Defaults
+      # fill in blanks; they never reject. Every container in this namespace
+      # already sets explicit requests and limits, so the object above was a
+      # complete no-op — which is why it was Synced and Healthy while the
+      # cluster drifted to 494% of allocatable in CPU limits.
+      #
+      # `max` and `maxLimitRequestRatio` are what actually constrain.
+      # Measured worst in this namespace today: memory ratio 8.0x
+      # (connector-git-sync, 64Mi request / 512Mi limit) and a largest memory
+      # limit of 1024Mi. Both caps below sit above that, so nothing running or
+      # currently deployable is rejected.
+      #
+      # No ResourceQuota in this namespace on purpose: the HPA scales
+      # infraweaver-console to 8 replicas and infraweaver-api to 5 under load,
+      # and a quota could block that scale-out during an incident.
+      # ---------------------------------------------------------------------
+      max:
+        cpu: "2"
+        memory: 2Gi
+      maxLimitRequestRatio:
+        memory: "10"

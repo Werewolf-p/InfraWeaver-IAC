@@ -82,8 +82,27 @@ spec:
           # Next.js 16 production builds are memory-hungry; the webpack build
           # worker SIGSEGVs (OOM) under a 6Gi cap. cp1/cp2 have ~18Gi.
           resources:
+            # Memory limit lowered 12Gi -> 3Gi (2026-08-02, resource governance).
+            #
+            # Measured: this pod requests 1Gi and uses 6Mi at idle, against a
+            # 12Gi limit — a 12x burst ratio and the single largest block of
+            # uncovered OOM exposure on the cluster. A 12Gi limit is also
+            # larger than the ENTIRE allocatable memory of talos-prod-cp3
+            # (6.4Gi), so it could never have been honoured on that node.
+            #
+            # Memory limits are what the kernel OOM killer enforces, so
+            # over-committing them is not free the way CPU limits are:
+            # talos-prod-cp1 carried 49452Mi of memory limits against 23.4Gi
+            # of physical RAM, and this pod alone was 12Gi of that.
+            #
+            # 3Gi keeps a real 3x burst headroom over the 1Gi request for
+            # actual image builds while capping the blast radius. If a genuine
+            # build is ever OOMKilled at 3Gi, raise BOTH this and the
+            # build-quota limits.memory in
+            # kubernetes/core/limitranges/governed-namespaces.yaml, and keep
+            # the limit:request ratio at or below the 4x cap declared there.
             requests: { cpu: 250m, memory: 1Gi }
-            limits: { cpu: "4", memory: 12Gi }
+            limits: { cpu: "4", memory: 3Gi }
           volumeMounts:
             - name: buildkitd
               mountPath: /var/lib/buildkit

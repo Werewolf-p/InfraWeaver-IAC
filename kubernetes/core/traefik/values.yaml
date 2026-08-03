@@ -140,7 +140,18 @@ ports:
 resources:
   requests:
     cpu: 100m
-    memory: 128Mi
+    # Raised 128Mi -> 256Mi (2026-08-03) based on measurement, not the OOMKill itself:
+    # `kubectl top pods -n traefik` showed live replicas at 83Mi/118Mi/216Mi -- one
+    # already over the old 128Mi request. A Burstable pod whose usage exceeds its
+    # request is a preferred target for kubelet's node-pressure eviction/OOM scoring,
+    # which matters because talos-prod-cp3 was measured at 106% of its allocatable
+    # memory (6979Mi used / 6563Mi allocatable) at the time of this investigation --
+    # the same node that hosts one Traefik replica and that OOMKilled it on 2026-08-02.
+    # The container's OWN 512Mi limit was never evidenced as too tight (usage stayed
+    # well under it), so the limit is intentionally left unchanged rather than raised
+    # further, to stay defensible against the incoming cluster-wide LimitRange
+    # max/ratio caps.
+    memory: 256Mi
   limits:
     cpu: "1"
     memory: 512Mi

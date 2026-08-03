@@ -39,8 +39,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "High memory on {{ $labels.instance }}"
-            description: "Memory usage > 85% for 5 minutes on {{ $labels.instance }}."
+            summary: "Node {{ $labels.instance }} memory usage > 85%"
+            description: >-
+              Node {{ $labels.instance }} has sustained memory usage above 85% for 5 minutes.
+              Check eviction thresholds, kubelet reservations, and the memory heatmap in InfraWeaver.
+              Escalates to NodeCriticalMemory at 92%.
 
         - alert: NodeDiskPressure
           expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
@@ -292,3 +295,108 @@ spec:
           annotations:
             summary: "Automation CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} is suspended"
             description: "Automation CronJob {{ $labels.cronjob }} is suspended and will not run until resumed."
+
+    # ── Console automation health ────────────────────────────────────────────────
+    #
+    # 12 of the 13 CronJobs in the infraweaver-console namespace had NO failure
+    # alerting. The 13th, `openbao-token-renew`, is already covered in full by
+    # alerts/openbao-token.yaml (TTL, stalled, suspended, and unobservable), so
+    # NOTHING here may select it — a second alert on the same condition reaches
+    # the same Discord receiver twice and the inhibit rule cannot suppress it,
+    # because inhibition keys on `equal: [alertname, namespace]` and the
+    # alertnames differ.
+    #
+    # kube-state-metrics has been exporting kube_cronjob_status_last_successful_time
+    # for the other 12 the whole time; the automation.health group above simply
+    # never selected the namespace.
+    #
+    # Why this is a separate group rather than a wider selector on
+    # ClusterAutomationCronJobMissedSuccess: that rule uses a single 2h threshold.
+    # Three console CronJobs run DAILY (openbao-token-renew 02:41, rotation-sweep
+    # 03:17, patch-sweep 04:31), so 2h after each successful run they would go
+    # firing and stay firing for the remaining ~22 hours of every single day.
+    # Widening that one selector would have produced three alerts that are always
+    # on, which is worse than no alert — it trains the on-call to ignore the group.
+    # Cadence therefore gets its own threshold.
+    #
+    # The frequent-job rule is a NEGATIVE match on the daily names, not an
+    # allowlist. A CronJob added to this namespace tomorrow is covered by default;
+    # forgetting to update this file makes a new DAILY job noisy, never silent.
+    # That direction is deliberate — the failure being fixed here is a guard that
+    # said nothing.
+    #
+    # Every missed-success rule below excludes SUSPENDED CronJobs. This is not
+    # tidiness: `kube_cronjob_status_last_successful_time` freezes while a job is
+    # suspended, so `time() - lst` grows without bound and the alert would fire
+    # forever. Suspending is the documented operator action in
+    # wordpress-patch-sweep-cronjob.yaml and wordpress-sandbox-sweep-cronjob.yaml,
+    # so that is a routine state, not an incident.
+    - name: console.automation.health
+      rules:
+        # Everything except the three daily sweeps: schedules run from */5 to
+        # hourly, so 3h without a success is at minimum two consecutive misses.
+        - alert: ConsoleAutomationCronJobMissedSuccess
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob!~"openbao-token-renew|wordpress-connector-rotation-sweep|wordpress-patch-sweep"} > 10800
+              unless on(namespace, cronjob)
+            kube_cronjob_spec_suspend{namespace="infraweaver-console"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not succeeded recently"
+            description: "Console automation CronJob {{ $labels.cronjob }} has not reported a successful run in over 3 hours. Its schedule is hourly or faster, so this is at least two consecutive missed runs."
+
+        # The daily pair (openbao-token-renew is deliberately NOT here — see the
+        # group comment). 28h = one full missed run plus 4h of margin, rather than
+        # the 48h that would have let two consecutive days pass unreported.
+        - alert: ConsoleAutomationDailyCronJobMissedSuccess
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob=~"wordpress-connector-rotation-sweep|wordpress-patch-sweep"} > 100800
+              unless on(namespace, cronjob)
+            kube_cronjob_spec_suspend{namespace="infraweaver-console"} == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console daily CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has missed a run"
+            description: "Daily console CronJob {{ $labels.cronjob }} has not succeeded in over 28 hours, so it has missed at least one scheduled run. Rotation and patch sweeps failing silently means credentials and WordPress cores stop moving."
+
+        # Scoped away from openbao-token-renew, which OpenBaoTokenRenewCronSuspended
+        # in alerts/openbao-token.yaml already covers with a better runbook.
+        - alert: ConsoleAutomationCronJobSuspended
+          expr: |
+            kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob!="openbao-token-renew"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} is suspended"
+            description: "Console automation CronJob {{ $labels.cronjob }} is suspended and will not run until resumed."
+
+        # The gap the time()-based rules structurally cannot see: a CronJob that
+        # has NEVER succeeded exports no kube_cronjob_status_last_successful_time
+        # series at all, so `time() - <absent>` yields no result and no alert. A
+        # sweep that was misconfigured on the day it was created would therefore
+        # stay invisible forever.
+        #
+        # The grace period is taken from kube_cronjob_created rather than from a
+        # long `for:`. Prometheus only restores pending-alert state across a
+        # restart when the gap is under --rules.alert.for-outage-tolerance (1h by
+        # default, not overridden here), and this is a single-replica Prometheus
+        # on a cluster with a documented OOM history — so a `for: 26h` would be
+        # reset to zero by exactly the kind of event that precedes someone
+        # checking their alerts. A data-driven window survives the restart.
+        - alert: ConsoleAutomationCronJobNeverSucceeded
+          expr: |
+            kube_cronjob_spec_suspend{namespace="infraweaver-console"} == 0
+              unless on(namespace, cronjob)
+            kube_cronjob_status_last_successful_time{namespace="infraweaver-console"}
+              and on(namespace, cronjob)
+            (time() - kube_cronjob_created{namespace="infraweaver-console"} > 93600)
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has NEVER succeeded"
+            description: "CronJob {{ $labels.cronjob }} was created over 26 hours ago, is not suspended, and has no recorded successful run at all. The missed-success alerts cannot fire for it because the metric they subtract from does not exist yet. Check the job template, image tag, and RBAC."

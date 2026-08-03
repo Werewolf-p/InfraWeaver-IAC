@@ -1,4 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  # Pre-existing: infraweaver-console defaults (now also carries max + ratio).
   - namespace.yaml
+  # defaultRequest only — cannot reject a pod. Eliminates BestEffort QoS.
+  - baseline-namespaces.yaml
+  # defaults + max + maxLimitRequestRatio + ResourceQuota. CAN reject a pod.
+  # Read the header of that file before changing any cap.
+  - governed-namespaces.yaml

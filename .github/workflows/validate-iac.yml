@@ -35,11 +35,28 @@ jobs:
             https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
           tar -xzf /tmp/kc.tar.gz -C /usr/local/bin kubeconform
 
-      - name: Validate IaC (render + schema + secret-leak gate)
-        run: bash scripts/validate-iac.sh
+      # promtool gates the alerting rules (validate-iac.sh step 5/5). Pinned
+      # rather than :latest so a Prometheus release cannot turn CI red on a day
+      # nothing in this repo changed.
+      - name: Install promtool
+        env:
+          PROM_VERSION: '3.13.2'
+        run: |
+          curl -fsSL -o /tmp/prom.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prom.tar.gz -C /usr/local/bin \
+            --strip-components=1 "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+          promtool --version
 
-      - name: Install PyYAML (NetworkPolicy gate parses manifests)
+      # Moved AHEAD of validate-iac.sh: its secret-leak, cron-secret and
+      # alerting-rule gates all parse manifests with PyYAML. They were relying on
+      # the runner image happening to ship it, and would have degraded the moment
+      # it did not.
+      - name: Install PyYAML (manifest-parsing gates)
         run: python3 -m pip install --quiet pyyaml
+
+      - name: Validate IaC (render + schema + secret-leak + cron-secret + alert-rule gates)
+        run: bash scripts/validate-iac.sh
 
       - name: Validate NetworkPolicy ports (pod-port vs Service-port gate)
         run: bash scripts/validate-netpol-ports.sh

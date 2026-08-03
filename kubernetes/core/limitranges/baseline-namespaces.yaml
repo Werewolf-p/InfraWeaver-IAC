@@ -1,0 +1,263 @@
+---
+# =============================================================================
+# BASELINE PROFILE — defaultRequest ONLY. Cannot reject any pod.
+# =============================================================================
+# Purpose: eliminate BestEffort QoS. 23 pods currently run with no resource
+# requests at all. A BestEffort pod is (a) invisible to the scheduler, so it
+# lands anywhere regardless of real cost, and (b) FIRST in line to be
+# OOM-killed when a node runs short of memory. openbao alone runs BestEffort
+# while using 232Mi.
+#
+# These LimitRanges declare ONLY `defaultRequest`. They contain deliberately
+# NO `default` (limit), NO `max`, and NO `maxLimitRequestRatio`, which means
+# the LimitRanger admission controller can only ever ADD a request to a
+# container that omitted one. It has no code path that rejects a pod.
+#
+# WHY NO DEFAULT MEMORY LIMIT HERE: applying a blanket default limit to these
+# namespaces would cap workloads whose real footprint we have not measured
+# per-container (prometheus is at 1373Mi, authentik-server at 872Mi). A too-low
+# default limit turns into an OOMKill on the next rollout. Limits are set
+# explicitly, per namespace, in governed-namespaces.yaml only where the
+# footprint is known.
+#
+# WHY NO CPU LIMIT ANYWHERE IN THIS DIRECTORY: CPU is compressible. A CPU limit
+# does not protect the node, it only inflicts CFS throttling on the workload
+# that owns it. The node is protected by CPU *requests*, which is what the
+# scheduler actually reserves. Introducing CPU limits where none exist today
+# (wordpress has none) would add latency regressions and fix nothing.
+#
+# ROLLOUT EFFECT: none on running pods. LimitRange is evaluated at pod
+# admission only. Existing pods keep their current spec until they are next
+# recreated for an unrelated reason. No restarts are caused by this file.
+#
+# ROLLOUT RISK (real, read this): once a DaemonSet/Deployment in these
+# namespaces next rolls, its pods acquire a memory request they did not have
+# before. That consumes scheduler headroom. talos-prod-cp1 is at 96.4% of
+# allocatable memory requests. Apply the cp1 relief in this same directory
+# (see README.md, Phase 1) BEFORE this file, or a DaemonSet pod on cp1 can go
+# Pending. The defaults are deliberately tiny (10m / 32Mi) to keep the total
+# added footprint under ~100Mi per node.
+#
+# NOT COVERED HERE, ON PURPOSE:
+#   kube-system, kube-public, kube-node-lease — Talos-managed static pods and
+#     the CNI. A LimitRange that ever rejected a control-plane or cilium pod
+#     would take the cluster down. Their BestEffort pods (kube-proxy,
+#     cilium-envoy, hubble-relay) are left alone.
+#   longhorn-system — storage data plane; already carries its own LimitRange
+#     at kubernetes/core/longhorn/manifests/instance-manager-limits.yaml.
+# =============================================================================
+
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: argocd
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: authentik
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: cert-manager
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: dns-system
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: external-dns
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: external-secrets
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: gatus
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: infraweaver-system
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: kyverno
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: local-path-storage
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+# metallb-speaker runs BestEffort on all 3 nodes today.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: metallb-system
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+# kube-prometheus-stack-operator, kube-state-metrics and 3x node-exporter
+# all run BestEffort today.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: monitoring
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+# openbao runs BestEffort while using 232Mi — it is the secret store for the
+# whole platform and is currently first in line for the OOM killer.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: openbao
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: traefik
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: velero
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi

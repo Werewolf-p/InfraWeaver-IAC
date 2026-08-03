@@ -19,3 +19,5 @@ spec:
         - name: bm-bitwarden
           namespace: traefik
           port: 30032
+  tls:
+    secretName: platform-wildcard-tls  # public *.${BASE_DOMAIN} cert — matches bitwarden.example.com

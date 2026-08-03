@@ -1,4 +1,37 @@
 ---
+# #############################################################################
+# !! THIS POLICY IS INERT. IT HAS NEVER MATCHED A SINGLE NAMESPACE. !!
+#
+# Verified against the live cluster on 2026-08-02:
+#   match   = namespaceSelector app.kubernetes.io/part-of In [infraweaver]
+#             -> `kubectl get ns -l app.kubernetes.io/part-of=infraweaver`
+#                returns exactly ONE namespace: game-hub
+#   exclude = a namespace list whose last entry is ... game-hub
+#
+#   match ∩ ¬exclude = EMPTY SET.
+#
+# So this object is Ready and Healthy in ArgoCD and does nothing whatsoever.
+# It is a large part of why the cluster was able to drift to 494% of
+# allocatable in CPU limits and 239% in memory limits while every governance
+# object reported green.
+#
+# SUPERSEDED BY, and left in place only to avoid an unnecessary live change:
+#   kubernetes/core/limitranges/baseline-namespaces.yaml   (apiserver-native
+#       defaultRequest for 15 namespaces — cannot fail open like a webhook)
+#   kubernetes/core/limitranges/governed-namespaces.yaml   (defaults + max +
+#       maxLimitRequestRatio + ResourceQuota for 6 namespaces)
+#   kubernetes/core/kyverno/manifests/resource-governance-policies.yaml
+#       (auto-generates a LimitRange into every FUTURE namespace)
+#
+# RECOMMENDED FOLLOW-UP: delete this file. The core-kyverno Application syncs
+# with prune enabled, so removing it removes the ClusterPolicy. Deleting it is
+# safe precisely because it has no effect. It is not deleted here only because
+# removing a live object is a rollout decision, not a code decision.
+#
+# Comments below this line are the original authors'. Note the description
+# claims it is protecting catalog namespaces; it is not.
+# #############################################################################
+#
 # Mutate pods in catalog namespaces that have no memory limit set.
 # Prevents unbounded memory growth from causing node OOM crashes.
 # Excluded: system namespaces that manage their own resources.

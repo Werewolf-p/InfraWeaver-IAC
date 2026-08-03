@@ -1,0 +1,343 @@
+---
+# =============================================================================
+# GOVERNED PROFILE — LimitRange (defaults + max + maxLimitRequestRatio)
+#                    paired with a ResourceQuota.
+# =============================================================================
+# This is the layer that makes "494% of allocatable" structurally impossible to
+# reintroduce, and it does so WITHOUT depending on any webhook.
+#
+# `maxLimitRequestRatio` is the control that was missing. LimitRanges in this
+# repo previously declared only `default`/`defaultRequest`, which fills in
+# blanks but never rejects anything — that is exactly why the existing
+# core-limitranges Application was Synced and Healthy while buildkitd carried a
+# 1Gi request against a 12Gi limit. A ratio cap makes the apiserver refuse the
+# pod outright.
+#
+# WHY THIS AND NOT ONLY KYVERNO: LimitRange and ResourceQuota are implemented
+# inside kube-apiserver. Kyverno is an admission webhook with a failurePolicy —
+# if the Kyverno admission controller is down, evicted, or slow, its policies
+# fail open. The apiserver-native controls cannot fail open. Kyverno is the
+# wide net (see kubernetes/core/kyverno/manifests/resource-governance-policies.yaml);
+# these are the load-bearing floor underneath it.
+#
+# -----------------------------------------------------------------------------
+# THRESHOLDS ARE DERIVED FROM MEASURED STATE, NOT PICKED.
+# Every `max` and `maxLimitRequestRatio` below is set ABOVE the worst value
+# currently present in that namespace, deliberately rounded up so no float
+# equality edge case can reject a pod that is admissible today. Applying this
+# file rejects NOTHING that is running now.
+# -----------------------------------------------------------------------------
+#
+# ROLLOUT EFFECT: no running pod is restarted or modified. LimitRange and
+# ResourceQuota are evaluated at pod ADMISSION.
+#
+# ROLLOUT RISK (the one that matters): from the moment this syncs, a future
+# rollout that violates `max` or `maxLimitRequestRatio` will FAIL TO CREATE
+# PODS. The Deployment will report a ReplicaSet failure rather than an obvious
+# error, so it can look like a stuck rollout. That is the intended behaviour —
+# it is the "can never happen again" — but it means raising a limit now
+# requires raising the corresponding cap in this file in the same commit.
+#
+# QUOTA SAFETY INTERLOCK: a ResourceQuota that constrains `requests.cpu` /
+# `requests.memory` / `limits.memory` makes those fields MANDATORY on every pod
+# in the namespace. Each quota below is therefore paired with a LimitRange in
+# the same namespace that supplies a default for exactly those three fields.
+# LimitRanger is a mutating admission plugin and runs before the ResourceQuota
+# validating plugin, so the default is always in place before the quota is
+# checked. Never add a quota here without the matching LimitRange defaults.
+#
+# `limits.cpu` IS DELIBERATELY ABSENT FROM EVERY QUOTA. Adding it would force
+# every pod to declare a CPU limit, which would introduce CFS throttling to
+# wordpress (14 pods that run with no CPU limit today and burst well past
+# their request). CPU is compressible; the node is protected by requests.
+#
+# NOT GOVERNED WITH A QUOTA, ON PURPOSE — blocking pod creation here costs more
+# than the runaway it would prevent:
+#   traefik, dns-system    — ingress and DNS; a rejected pod is a site outage
+#   authentik              — auth; a rejected pod locks everyone out
+#   argocd                 — the thing that would have to fix a bad quota
+#   infraweaver-console    — HPA scales it to 8 replicas during load; a quota
+#                            could block scale-out at exactly the wrong moment
+#   monitoring, metallb, external-secrets, cert-manager, kyverno, openbao,
+#   longhorn-system, kube-system — DaemonSets and platform controllers
+# Those namespaces get the no-reject baseline profile instead
+# (see baseline-namespaces.yaml).
+#
+# ALREADY GOVERNED ELSEWHERE, NOT DUPLICATED HERE:
+#   game-hub  — kubernetes/catalog/game-hub/manifests/resource-quota.yaml
+#               (the only pre-existing LimitRange in the repo with max/min)
+#   n8n-prod  — kubernetes/platform/n8n/manifests/namespace.yaml
+#               (already the best-behaved namespace: worst ratio 2.0x)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# wordpress — 14 pods, the largest pod count on the cluster.
+# Measured: requests 1750m CPU / 4736Mi. Limits 14336Mi. Worst mem ratio 4.0x.
+# No CPU limits anywhere in this namespace today; that is preserved.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: governed-defaults
+  namespace: wordpress
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+      default:
+        # memory limit only — no cpu limit, see header
+        memory: 1Gi
+      max:
+        cpu: "2"
+        memory: 2Gi
+      maxLimitRequestRatio:
+        # measured worst today: 4.0x — capped at 5 so nothing current is rejected
+        memory: "5"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: wordpress-quota
+  namespace: wordpress
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  hard:
+    # measured today: 1750m / 4.63Gi requests, 14Gi limits, 14 pods
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.memory: 24Gi
+    pods: "40"
+    persistentvolumeclaims: "40"
+---
+# -----------------------------------------------------------------------------
+# build — buildkitd. Worst single offender on the cluster before the fix in
+# kubernetes/core/buildkit/buildkit.yaml: 1Gi request against a 12Gi limit
+# (12x) while using 6Mi. A 12Gi limit is larger than the entire allocatable
+# memory of talos-prod-cp3 (6.4Gi), so that pod could never have been honoured
+# there, and on cp1 it was 12Gi of uncovered OOM exposure.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: governed-defaults
+  namespace: build
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      default:
+        memory: 2Gi
+      max:
+        cpu: "4"
+        memory: 4Gi
+      maxLimitRequestRatio:
+        memory: "4"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: build-quota
+  namespace: build
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    # -------------------------------------------------------------------------
+    # DELIBERATELY LOOSE AT 16Gi — TIGHTEN TO 6Gi AFTER buildkitd IS AT 3Gi.
+    #
+    # This value exists to defuse a rollout deadlock, and 6Gi (the value this
+    # should eventually be) would cause one:
+    #
+    #   A ResourceQuota can be created while current usage already exceeds it —
+    #   quotas never evict. But from that moment NO new pod can be admitted to
+    #   the namespace until usage drops below the cap. The buildkitd pod running
+    #   right now still carries the old 12Gi limit. A rolling update to the
+    #   fixed 3Gi spec transiently needs 12Gi (old) + 3Gi (new) = 15Gi, so with
+    #   a 6Gi cap the new pod is rejected, the old pod never terminates, and
+    #   buildkitd can NEVER roll to the fixed version. Self-inflicted deadlock,
+    #   and it would look like an unexplained stuck rollout.
+    #
+    # 16Gi clears the 15Gi transition peak. The per-container ceiling is still
+    # hard-enforced at 4Gi by `max` and 4x by `maxLimitRequestRatio` in the
+    # LimitRange above, and `pods: 6` caps the count, so this is a backstop
+    # rather than the primary control.
+    #
+    # ACTION: once `kubectl get pod -n build -o jsonpath=...limits.memory`
+    # reports 3Gi, change this to 6Gi in a follow-up commit.
+    #
+    # (The LimitRange `max`/`maxLimitRequestRatio` above do NOT have this
+    # problem — they are evaluated per-pod at admission and the incoming 3Gi
+    # pod satisfies both. Only quotas aggregate across running pods.)
+    # -------------------------------------------------------------------------
+    limits.memory: 16Gi
+    pods: "6"
+---
+# -----------------------------------------------------------------------------
+# registry — zot. Measured 256Mi req / 2048Mi limit (8x), 100m / 2000m CPU
+# (20x), using 55Mi and 3m.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: governed-defaults
+  namespace: registry
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 25m
+        memory: 64Mi
+      default:
+        memory: 1Gi
+      max:
+        cpu: "2"
+        memory: 3Gi
+      maxLimitRequestRatio:
+        # measured worst today: 8.0x — capped at 10
+        memory: "10"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: registry-quota
+  namespace: registry
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.memory: 4Gi
+    pods: "8"
+---
+# -----------------------------------------------------------------------------
+# jellyfin — measured 500m CPU request while using 1m, and 256Mi req against a
+# 4096Mi limit (16x). Transcoding is genuinely bursty so the wide ratio is kept
+# rather than tightened blind; see README.md "Needs a human" — the 500m CPU
+# *request* is the part worth reclaiming, and that is a decision for the owner.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: governed-defaults
+  namespace: jellyfin
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 25m
+        memory: 64Mi
+      default:
+        memory: 1Gi
+      max:
+        cpu: "6"
+        memory: 6Gi
+      maxLimitRequestRatio:
+        # measured worst today: 16.0x — capped at 20, intentionally loose
+        memory: "20"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: jellyfin-quota
+  namespace: jellyfin
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.memory: 6Gi
+    pods: "6"
+---
+# -----------------------------------------------------------------------------
+# nextcloud — measured 512Mi req / 3072Mi limit (6x), 250m / 3000m CPU.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: governed-defaults
+  namespace: nextcloud
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 25m
+        memory: 64Mi
+      default:
+        memory: 1Gi
+      max:
+        cpu: "4"
+        memory: 4Gi
+      maxLimitRequestRatio:
+        # measured worst today: 6.0x — capped at 8
+        memory: "8"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: nextcloud-quota
+  namespace: nextcloud
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.memory: 8Gi
+    pods: "10"
+---
+# -----------------------------------------------------------------------------
+# private-test — measured 25m/64Mi req, 250m/256Mi limit (4x).
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: governed-defaults
+  namespace: private-test
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 25m
+        memory: 64Mi
+      default:
+        memory: 512Mi
+      max:
+        cpu: "1"
+        memory: 1Gi
+      maxLimitRequestRatio:
+        memory: "5"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: private-test-quota
+  namespace: private-test
+  labels:
+    infraweaver.io/governance: governed
+spec:
+  hard:
+    requests.cpu: "500m"
+    requests.memory: 1Gi
+    limits.memory: 2Gi
+    pods: "6"

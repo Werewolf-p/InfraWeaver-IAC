@@ -89,6 +89,34 @@ spec:
         # each game Service's external-dns target annotation.
         - name: PUBLIC_INGRESS_IP
           value: ${PUBLIC_INGRESS_IP}
+        # ── The master default (2026-08-02) ──────────────────────────────────
+        # Every shipped feature in this console hides behind its own env switch,
+        # off by default, each for a good per-feature reason. The aggregate was a
+        # console where roughly twenty real, tested, shipped surfaces answered
+        # "not enabled here", and the only way to light them was to remember all
+        # twenty names. Shipping the image is half of live; this block is the
+        # other half, and a list nobody can hold in their head stays half-set.
+        #
+        # PLATFORM_ENABLE_ALL supplies the DEFAULT for any gate whose own
+        # variable is unset or empty. It is a default, never an override — see
+        # apps/infraweaver-console/src/lib/feature-defaults.ts:
+        #
+        #   · an EXPLICIT value still wins in BOTH directions. Setting
+        #     GAME_HUB_SLEEP_ENABLED=0 below would leave Sleep off even with the
+        #     master on. That is what keeps a per-feature kill switch usable
+        #     during an incident: an operator killing one feature must not also
+        #     have to find and unset the master.
+        #   · the six names in NEVER_DEFAULTED are structurally unreachable from
+        #     it, so "turn everything on" can never mean "arm the chaos engine".
+        #     Each still works when set explicitly — Client Rooms is set that way
+        #     further down.
+        #
+        # The per-feature switches that follow are now REDUNDANT with the master.
+        # They are kept deliberately: each carries the operator note explaining
+        # what that feature actually does to this cluster, and the note is worth
+        # more than the two lines it costs.
+        - name: PLATFORM_ENABLE_ALL
+          value: "1"
         # ── Game Hub platform switches (2026-08-01 wave) ─────────────────────
         # Each feature reads its own switch and, when it is absent, answers with
         # an operator sentence rather than an error — so these are what make the
@@ -112,8 +140,12 @@ spec:
         # secret/platform/game-hub/networks/<name> — both shipped here.
         - name: GAME_HUB_NETWORKS_ENABLED
           value: "1"
-        # Import + review only. PUBLISH is a separate switch and stays off: it
-        # makes this console hold a signing key and needs registry push rights.
+        # Import + review. PUBLISH is a separate switch, which the master now
+        # defaults ON — but it needs a registry host plus push credentials this
+        # namespace does not hold (it has a Zot PULL secret only), so the feature
+        # report answers `available: false` with that exact sentence rather than
+        # pretending. Set GAME_HUB_EXCHANGE_HOST (or ZOT_REGISTRY_HOST) and seed
+        # push credentials to finish it.
         - name: GAME_HUB_EXCHANGE_ENABLED
           value: "1"
         # Player Passport COLLECTS: handles, presence samples, and a moderation
@@ -127,6 +159,64 @@ spec:
         # budgets defined, this grants nobody anything.
         - name: GAME_HUB_COMMUNITY_ENABLED
           value: "1"
+        # ── WordPress Client Rooms (2026-08-02) ──────────────────────────────
+        # One of the six PLATFORM_ENABLE_ALL can never reach, so it is set here
+        # explicitly and on purpose. It does two things that deserve a decision
+        # rather than a default:
+        #
+        #   · it writes REAL RBAC role assignments, so a room grants actual
+        #     platform authority to the delegate rather than a view;
+        #   · it publishes a capability-URL read surface that is UNAUTHENTICATED
+        #     — anyone holding the link reads the report, with no session.
+        #
+        # Both are the point of the feature: agency delegation, and a client
+        # report a client can open without an account on this platform. Turning
+        # it off stops new rooms and new links; it does not retroactively revoke
+        # assignments already written, so revoke those in /rbac if you reverse
+        # this decision.
+        - name: WORDPRESS_CLIENT_ROOMS_ENABLED
+          value: "1"
+        # ── The remaining five NEVER_DEFAULTED gates (2026-08-03) ────────────
+        # Set explicitly, on the operator's repeated and specific instruction to
+        # enable every feature. PLATFORM_ENABLE_ALL still structurally cannot
+        # reach these — that mechanism is intact and unchanged; this block is the
+        # deliberate per-flag decision it exists to force.
+        #
+        # WORD CHOICE IS LOAD-BEARING. Three of the five accept ONLY the literal
+        # string `true`, compared untrimmed and case-sensitive. `"1"` on those is
+        # a silent no-op — the exact footgun this repo has already shipped once.
+        #
+        # What each one now permits. Read this before reversing anything:
+        #
+        #   · FLEET_PROVISION_ENABLED — drives OpenTofu against real
+        #     infrastructure. Accepts on/true/1.
+        #   · WORDPRESS_PATCH_AUTO_REMEDIATION_ENABLED — changes production site
+        #     code with NO human in the loop. It is an AND with the patch gate,
+        #     which PLATFORM_ENABLE_ALL already defaults on, so this line is what
+        #     makes it live.
+        #   · WORDPRESS_AGENT_GATE_ACT_TIER — promotes the agent gate from
+        #     OBSERVING sites to ACTING on them. Literal `true` only.
+        #   · DR_CHAOS_INJECTION_ENABLED — arms fault injection against this live
+        #     cluster. Operator-triggered per game day rather than a background
+        #     sweep, but the blast radius is the cluster. Literal `true` only.
+        #   · SECRET_REMEDIATION_WRITE_ENABLED — lets the console re-mint and
+        #     re-seed credentials in OpenBao rather than only report on them.
+        #     Literal `true` only.
+        #
+        # To reverse ANY of them, set the value to something the gate does not
+        # accept — do NOT delete the line. A deleted line falls through to
+        # PLATFORM_ENABLE_ALL, and for these five that resolves to off: the same
+        # outcome, by a route nobody reading this file would predict.
+        - name: FLEET_PROVISION_ENABLED
+          value: "true"
+        - name: WORDPRESS_PATCH_AUTO_REMEDIATION_ENABLED
+          value: "true"
+        - name: WORDPRESS_AGENT_GATE_ACT_TIER
+          value: "true"
+        - name: DR_CHAOS_INJECTION_ENABLED
+          value: "true"
+        - name: SECRET_REMEDIATION_WRITE_ENABLED
+          value: "true"
         # AUTH_URL must include /api/auth so Auth.js v5 derives basePath="/api/auth"
         # and correctly parses actions from /api/auth/signin/authentik etc.
         # Without the path, basePath="/" and the regex extracts "api" as the action → UnknownAction.
@@ -281,6 +371,26 @@ spec:
             secretKeyRef:
               name: infraweaver-console-secret
               key: game-hub-power-cron-token
+              optional: true
+        # The wake credential Sleep Fleet hands a doorman so it can wake the
+        # server it is parked in front of. This is the PRECONDITION of
+        # GAME_HUB_SLEEP_ENABLED above, not a nicety: feature-defaults.ts refuses
+        # hibernation unless it is >= 32 characters, on the grounds that parking
+        # a server nothing can wake is worse than not parking it. Without this
+        # var the switch is on and every hibernation silently declines.
+        # Seeded in OpenBao 2026-08-03 (kv version 24) as a 64-hex value.
+        # To reseed: bao kv patch secret/platform/infraweaver-console game-hub-wake-secret=<64-hex>
+        # Store it with NO trailing newline — the gate .trim()s and would report
+        # the feature available, but the doorman compares the raw value, so a
+        # stray newline presents as a wrong secret rather than a whitespace bug.
+        # optional: true deliberately, like every entry here: if the key ever
+        # goes missing the feature must fall back to reporting itself blocked
+        # with that exact sentence, not crashloop the whole console.
+        - name: GAME_HUB_WAKE_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: game-hub-wake-secret
               optional: true
         # DEDICATED token for the hourly replica-floor sweep CronJob's POST to
         # /api/replicas/sweep, which re-asserts the "Redundancy" floor across app

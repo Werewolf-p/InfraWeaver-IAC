@@ -8,20 +8,25 @@ metadata:
     release: kube-prometheus-stack
 spec:
   groups:
+    # NOTE: the node-level >85% memory alert that used to live here was removed as
+    # a duplicate. It had a byte-identical expression to `NodeHighMemory` in
+    # alerts/manifests/prometheus-rules.yaml, and both carried severity: warning
+    # in the same Prometheus with the same `release` selector — so one condition
+    # produced two Discord notifications, and Alertmanager could not inhibit
+    # either because inhibition keys on `equal: [alertname, namespace]` and the
+    # alertnames differed.
+    #
+    # `NodeHighMemory` was kept rather than this one for two reasons:
+    #   · it pairs with `NodeCriticalMemory` (>92%, critical) as a deliberate
+    #     85/92 warning→critical ladder in the same group, and
+    #   · "Pressure" already means something specific in this repo's alert
+    #     vocabulary — `NodeDiskPressure` reads the real kubelet condition via
+    #     kube_node_status_condition{condition="DiskPressure"}. Naming a
+    #     percentage-of-usage alert `NodeMemoryPressure` invited an on-call to
+    #     read it as the kubelet MemoryPressure condition, which it was not.
+    # This rule's better operator description was carried over to NodeHighMemory.
     - name: memory.pressure
       rules:
-        - alert: NodeMemoryPressure
-          expr: |
-            (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Node {{ $labels.instance }} memory usage > 85%"
-            description: >-
-              Node {{ $labels.instance }} has sustained memory usage above 85% for 5 minutes.
-              Check eviction thresholds, kubelet reservations, and the memory heatmap in InfraWeaver.
-
         - alert: PodOOMKillRisk
           expr: |
             (

@@ -1,0 +1,308 @@
+---
+# =============================================================================
+# Resource governance ClusterPolicies.
+# =============================================================================
+# WHAT THESE ADD OVER THE LIMITRANGES:
+# The LimitRanges in kubernetes/core/limitranges/ are apiserver-native and
+# cannot fail open, but they only exist in namespaces someone remembered to
+# enumerate. These policies are the cluster-wide net, and rule 1 below closes
+# the loop permanently: any namespace created from now on gets a baseline
+# LimitRange automatically, with no human step.
+#
+# WHY THE EXISTING POLICIES DID NOT PREVENT THIS — both were measured inert:
+#
+#   require-resource-limits (cluster-policies.yaml)
+#     - validationFailureAction: Audit  -> never blocked anything
+#     - namespaceSelector infraweaver.io/type=catalog-app -> matches exactly
+#       TWO namespaces cluster-wide: gatus and infraweaver-console
+#     - it only asserts that limits EXIST. A 1Gi request against a 12Gi limit
+#       satisfies it perfectly, so it could never have caught buildkitd.
+#
+#   set-default-memory-limits (default-memory-limits-policy.yaml)
+#     - match is namespaceSelector app.kubernetes.io/part-of in [infraweaver],
+#       which matches exactly ONE namespace: game-hub
+#     - exclude explicitly lists game-hub
+#     - match ∩ ¬exclude = EMPTY SET. The policy has matched zero namespaces
+#       since it was written. It is inert, not merely weak.
+#
+# ROLLOUT POSTURE: every validate rule here ships as Audit deliberately.
+# Kyverno JMESPath expressions cannot be dry-run from a GitOps checkout, so
+# these must be observed in policy reports before being flipped to Enforce.
+# In Audit mode a malformed expression logs a policy error and ADMITS the pod;
+# it cannot cause an outage. Flip to Enforce only after confirming:
+#     kubectl get clusterpolicyreport -o wide
+#     kubectl get clusterpolicy <name> -o jsonpath='{.status}'
+# returns Ready with no unexpected failures.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# RULE 1 — the self-applying part. This is what makes it "never again".
+#
+# A namespace created tomorrow by the console, by a catalog install, or by hand
+# has no LimitRange and therefore no floor: its pods can be BestEffort and its
+# limits unbounded. That is exactly how the cluster drifted. This generates a
+# baseline LimitRange into every new namespace automatically.
+#
+# `synchronize: true` means the generated object is also repaired if someone
+# deletes or edits it — the "dynamically fixed" property, not a one-off.
+#
+# The values are IDENTICAL to baseline-namespaces.yaml on purpose. Namespaces
+# already covered explicitly there are excluded below so there is exactly one
+# LimitRange per namespace and no ambiguity about which defaults apply.
+#
+# NOTE: this rule needs the background controller to be allowed to write
+# LimitRanges — the aggregated ClusterRole at the bottom of this file grants
+# it. Without that RBAC the rule fails silently, so verify after sync with:
+#     kubectl get limitrange -A | grep auto-baseline
+# -----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-baseline-limitrange
+  annotations:
+    policies.kyverno.io/title: Auto-provision Baseline LimitRange
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Every namespace gets a LimitRange supplying a default CPU and memory
+      request, so no workload can ever be admitted as BestEffort simply
+      because nobody remembered to write a LimitRange for its namespace.
+      Self-healing via synchronize.
+spec:
+  admission: true
+  background: true
+  rules:
+    - name: add-baseline-limitrange
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          # Talos-managed static pods and the CNI. A LimitRange here is not
+          # worth the risk of ever interfering with control-plane admission.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+          # Storage data plane — carries its own LimitRange already at
+          # kubernetes/core/longhorn/manifests/instance-manager-limits.yaml
+          - resources:
+              namespaces:
+                - longhorn-system
+          # Governed explicitly in kubernetes/core/limitranges/. Excluded so
+          # each namespace has exactly one LimitRange and one set of defaults.
+          - resources:
+              namespaces:
+                - argocd
+                - authentik
+                - build
+                - cert-manager
+                - dns-system
+                - external-dns
+                - external-secrets
+                - game-hub
+                - gatus
+                - infraweaver-console
+                - infraweaver-system
+                - jellyfin
+                - local-path-storage
+                - metallb-system
+                - monitoring
+                - n8n-prod
+                - nextcloud
+                - openbao
+                - private-test
+                - registry
+                - traefik
+                - velero
+                - wordpress
+      generate:
+        apiVersion: v1
+        kind: LimitRange
+        name: auto-baseline-requests
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          metadata:
+            labels:
+              infraweaver.io/governance: auto-baseline
+          spec:
+            limits:
+              - type: Container
+                defaultRequest:
+                  cpu: 10m
+                  memory: 32Mi
+---
+# -----------------------------------------------------------------------------
+# RULE 2 — bound the memory burst ratio cluster-wide.
+#
+# This is the direct structural answer to "limits at 494% of allocatable".
+# A memory limit far above its request is a promise the node cannot keep:
+# the scheduler packs the node using REQUESTS, but the kernel OOM killer
+# enforces LIMITS. Measured worst offenders before this change:
+#     20.0x  kube-system/csi-smb-controller   20Mi  -> 400Mi
+#     16.0x  jellyfin/jellyfin               256Mi  -> 4096Mi
+#     12.0x  build/buildkitd                1024Mi  -> 12288Mi
+#
+# 8x is chosen because it admits every workload on the cluster today except
+# the three above, of which buildkitd is fixed in this same change and the
+# other two are namespace-scoped exceptions with a wider LimitRange ratio.
+#
+# CPU is deliberately NOT ratio-capped. CPU is compressible: a CPU limit
+# throttles the owning container and protects nothing. Requests are what
+# reserve CPU, and those are covered by the alerts in
+# kubernetes/monitoring/alerts/resource-allocation.yaml.
+# -----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: limit-memory-burst-ratio
+  annotations:
+    policies.kyverno.io/title: Bound Memory Limit-to-Request Ratio
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      A container's memory limit may not exceed 8x its memory request.
+      Memory is incompressible, so a limit far above the request is
+      unschedulable capacity the node cannot actually honour.
+spec:
+  # AUDIT FIRST. See rollout posture in the header before changing to Enforce.
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: memory-limit-request-ratio
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                # Talos / CNI / storage — not ours to reshape, and csi-smb
+                # ships a 20x ratio from upstream.
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - kyverno
+                # Namespace-scoped wider ratios are declared in
+                # kubernetes/core/limitranges/governed-namespaces.yaml,
+                # which is apiserver-native and authoritative for these.
+                - jellyfin
+                - registry
+                - infraweaver-console
+      validate:
+        message: >-
+          Memory limit must not exceed 8x the memory request. Memory is
+          incompressible: the scheduler packs nodes by request but the kernel
+          OOM killer enforces the limit, so a wide ratio is capacity the node
+          cannot honour. Either raise the request or lower the limit.
+        foreach:
+          - list: "request.object.spec.containers[?resources.limits.memory != null && resources.requests.memory != null]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ divide('{{ element.resources.limits.memory }}', '{{ element.resources.requests.memory }}') }}"
+                    operator: GreaterThan
+                    value: 8
+---
+# -----------------------------------------------------------------------------
+# RULE 3 — require a memory request and a memory limit.
+#
+# Replaces the intent of require-resource-limits, which covered only two
+# namespaces and asked for a CPU limit. This asks for what actually protects
+# a node:
+#   memory request  -> makes the pod visible to the scheduler and lifts it out
+#                      of BestEffort so it is not first to be OOM-killed
+#   memory limit    -> caps blast radius
+#   cpu request     -> the scheduler's only real CPU reservation
+# A CPU LIMIT IS DELIBERATELY NOT REQUIRED. Requiring one would force CFS
+# throttling onto the 14 wordpress pods that legitimately burst today.
+# -----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-memory-request-and-limit
+  annotations:
+    policies.kyverno.io/title: Require Memory Request and Limit
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Every container must declare a CPU request, a memory request and a
+      memory limit. CPU limits are intentionally not required.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-memory-request-and-limit
+      # Background scanning off for this rule: it would report against every
+      # pre-existing pod on every scan, and the LimitRange defaults only take
+      # effect on next rollout, so the reports would be noise for weeks.
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - kyverno
+                - metallb-system
+                - monitoring
+      validate:
+        message: >-
+          Containers must declare resources.requests.cpu,
+          resources.requests.memory and resources.limits.memory.
+          A container with no request is scheduled as if it were free and is
+          the first thing killed when a node runs short.
+        pattern:
+          spec:
+            containers:
+              - name: "*"
+                resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"
+---
+# -----------------------------------------------------------------------------
+# RBAC for RULE 1.
+#
+# Kyverno's background controller can only generate resource kinds it has been
+# granted. LimitRange is not in its default permission set, so without this the
+# generate rule above fails silently. Kyverno aggregates any ClusterRole
+# carrying the label below into kyverno:background-controller.
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:background-controller:limitranges
+  labels:
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+rules:
+  - apiGroups: [""]
+    resources:
+      - limitranges
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+      - get
+      - list
+      - watch
