@@ -50,8 +50,48 @@ extraArgs:
   - --default-targets=203.0.113.10
   - --annotation-filter=external-dns.alpha.kubernetes.io/managed in (true)
 
-# upsert-only: create/update records but NEVER delete them
-# Change to "sync" later once you're confident in the managed records
+# upsert-only: create/update records but NEVER delete them.
+#
+# ─── DO NOT flip this to "sync" yet. Read this first. ───────────────────────
+#
+# Why it should eventually become "sync": upsert-only is why orphaned records
+# accumulate. A game server or route that goes away leaves its A record and its
+# `edns-` ownership TXT behind forever, because nothing ever collects them. The
+# 2026-08-06 inventory found 24 such orphans in example.com.
+#
+# What "sync" actually deletes — the blast radius, measured, not assumed:
+#   Only records this instance OWNS, i.e. records with an `edns-` registry TXT
+#   carrying `external-dns/owner=infraweaver-prod`, inside
+#   `domainFilters: example.com`, whose source object no longer exists.
+#   Everything without an ownership TXT is invisible to it. Verified against the
+#   live zone on 2026-08-06: the apex A/MX/SPF/verification TXTs, `_dmarc`,
+#   `*._domainkey`, `default._bimi`, `autodiscover`, the `*.int` wildcard, the
+#   WordPress CNAMEs (hi2/hihi/lol/lolll/test), `www`, `bitwarden` and the five
+#   pre-platform manual CNAMEs (cloud, degoudentijd, feestinhetdonker, pane,
+#   teleport) have NO ownership TXT and are therefore structurally untouchable.
+#
+# BLOCKER — one owned record has no source and is NOT approved for deletion:
+#   `n8n.example.com` (A) + `edns-a-n8n.example.com` (TXT) are owned by this
+#   instance, but the only surviving route is `n8n-int` — no IngressRoute
+#   produces the public host any more (confirmed: no `Host(\`n8n.example.com\`)`
+#   exists in the cluster). The first sync pass WOULD delete both, and that
+#   record is in the operator-decision bucket, not the approved cleanup list.
+#
+# Preconditions for flipping, all of them:
+#   1. The reviewed 24-record purge has been committed
+#      (`apps/infraweaver-console/scripts/dns-purge.mjs --commit`), so the first
+#      sync pass has nothing of its own to collect.
+#   2. `n8n.example.com` is resolved by a human — EITHER delete the pair
+#      deliberately through the purge script, OR keep the A record and first
+#      delete ONLY its `edns-a-n8n.example.com` ownership TXT so external-dns
+#      stops claiming it. Keeping the record while leaving the TXT in place is
+#      the one combination that loses it.
+#   3. After flipping: watch a full interval and confirm zero deletions —
+#      `kubectl -n external-dns logs deploy/external-dns --since=10m | grep -iE "delete|error"`
+#      then re-check that auth / private-test / gt-new-horizons still resolve.
+#
+# Do NOT add `--exclude-record-types=...TXT` as an extra belt: the TXT registry
+# IS the ownership model, and excluding it would break the very guarantee above.
 policy: upsert-only
 
 # TXT records claim ownership — prevents other ExternalDNS instances interfering
