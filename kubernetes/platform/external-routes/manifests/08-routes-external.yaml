@@ -10,6 +10,36 @@ spec:
   entryPoints:
     - websecure
   routes:
+    # Self-service registration was open to the whole internet. Vaultwarden reports
+    # disableUserRegistration:false, and a well-formed POST to this path answered 200
+    # with a register object — anyone could create an account on the password manager.
+    # Verified 2026-08-06.
+    #
+    # The real fix is SIGNUPS_ALLOWED=false on the container (TrueNAS, VM 103), which
+    # leaves INVITATIONS_ALLOWED working so org invites still function. That host is
+    # unreachable from automation: SSH refused, no QEMU guest agent, API needs a key.
+    # This edge block is the stopgap until someone sets that variable.
+    #
+    # Deliberate cost: this blocks ALL registration, including an invited user
+    # accepting an org invite, because the invite token travels in the request BODY
+    # and Traefik cannot route on it. Existing users are unaffected — login is
+    # /identity/connect/token, a different path. Delete this route once the container
+    # variable is set.
+    #
+    # lan-only does the denying: this host is Cloudflare-proxied, so Traefik sees
+    # Cloudflare edge IPs, none of which fall in lan-only's sourceRange.
+    - match: Host(`bitwarden.example.com`) && PathPrefix(`/identity/accounts/register`)
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: lan-only
+          namespace: traefik
+      services:
+        - name: bm-bitwarden
+          namespace: traefik
+          port: 30032
     - match: Host(`bitwarden.example.com`)
       kind: Rule
       middlewares:
