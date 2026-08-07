@@ -332,13 +332,10 @@ metadata:
 # intended "drift is visible without breaking anything" posture used above, and
 # warn/audit are non-blocking.
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: dns-system
-  labels:
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+# dns-system is NOT declared here. It is owned by apps-dns, which ships its own
+# Namespace manifest (kubernetes/platform/dns/manifests/namespace.yaml) and now
+# carries these same PSA labels there. Declaring it in both places left apps-dns
+# permanently OutOfSync — one shared SSA field manager, two declarers.
 ---
 # ── Backup object store ──────────────────────────────────────────────────────
 # Velero itself is not deployed (GAP-C2); this namespace currently runs only

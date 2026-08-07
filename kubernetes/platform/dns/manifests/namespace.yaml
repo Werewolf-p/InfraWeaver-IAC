@@ -2,3 +2,23 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: dns-system
+  # PSA labels live HERE, not in core/psa/namespace-labels.yaml, because this
+  # file is the namespace's owning declarer — apps-dns ships it as part of its
+  # own manifest set.
+  #
+  # Two ArgoCD Applications declaring one Namespace is a real failure mode on
+  # this cluster, not a style question: every Application is applied through
+  # ONE shared server-side-apply field manager (`argocd-controller`), so a
+  # second declarer prunes whichever labels it omits. Here it presented the
+  # milder way round — the PSA app set the labels, apps-dns declared the same
+  # Namespace without them, and ArgoCD reported apps-dns permanently OutOfSync
+  # (measured 2026-08-07) while the labels themselves were correct.
+  #
+  # Values are exactly what is already live, so this is a no-op against the
+  # cluster and removes only the disagreement. dns-system was verified to pass
+  # baseline before it was labelled; `restricted` stays at audit/warn rather
+  # than enforce because coredns has not been checked against it.
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
