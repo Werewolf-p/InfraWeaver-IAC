@@ -43,11 +43,24 @@ serviceAccount:
   automountServiceAccountToken: false
 automountServiceAccountToken: false
 
-# uid 0 is required to read the 0700 dir / 0600 files above; everything else is
-# dropped. No hostPID, no hostNetwork, no capabilities, read-only rootfs.
+# Run as 65534, NOT 0. Measured 2026-08-07: with runAsUser 0 the container was
+# root in name only and could not read the audit directory at all —
+#
+#   $ id                            -> uid=0(root) gid=0(root)
+#   $ ls -ld /var/log/audit/kube    -> drwx------. 2 nobody nogroup
+#   $ ls /var/log/audit/kube/       -> Permission denied
+#
+# because `capabilities: drop: [ALL]` below removes CAP_DAC_OVERRIDE, which is
+# the single capability that lets root ignore file modes. Promtail's /ready
+# answered 500 for 13 minutes (no targets discovered) and the pods sat 0/1.
+#
+# The apiserver writes that trail as uid 65534 and owns the directory 0700, so
+# matching its UID grants full access through ordinary ownership and needs no
+# capability at all. Adding CAP_DAC_OVERRIDE back would also have worked and is
+# strictly more privilege for the same result.
 podSecurityContext:
-  runAsUser: 0
-  runAsGroup: 0
+  runAsUser: 65534
+  runAsGroup: 65534
 containerSecurityContext:
   readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
@@ -89,10 +102,19 @@ defaultVolumes: []
 defaultVolumeMounts: []
 
 extraVolumes:
+  # emptyDir, not hostPath. A hostPath created by DirectoryOrCreate is owned by
+  # root with mode 0755, and this pod now runs as uid 65534 (it has to, to read
+  # the apiserver's 0700 audit directory — see podSecurityContext above), so it
+  # could not write its positions file there.
+  #
+  # The cost is explicit: positions do NOT survive a pod restart, so promtail
+  # re-reads the current audit file from the start and Loki sees duplicate lines
+  # for that window. That is the safe direction for an audit trail — duplicates
+  # are recoverable, gaps are not — and the file rotates every few hours on this
+  # cluster, so the window is bounded. Restoring durable positions means finding
+  # a host path writable by 65534, which Talos does not readily offer.
   - name: positions
-    hostPath:
-      path: /run/promtail-audit
-      type: DirectoryOrCreate
+    emptyDir: {}
   - name: kube-audit
     hostPath:
       path: /var/log/audit/kube
