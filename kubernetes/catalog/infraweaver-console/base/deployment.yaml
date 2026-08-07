@@ -117,6 +117,29 @@ spec:
         # more than the two lines it costs.
         - name: PLATFORM_ENABLE_ALL
           value: "1"
+        # ── Infrastructure node operations (Proxmox-backed) ──────────────────
+        # Arms /infrastructure: the node inventory, per-node Proxmox + Kubernetes
+        # detail, drift, resize, power, add-node and decommission.
+        #
+        # This flag is READ DIRECTLY from process.env and is deliberately NOT
+        # defaulted by PLATFORM_ENABLE_ALL above, unlike every other switch here.
+        # That is a design decision, not an oversight: the master switch is "1"
+        # in production, and this gate can create and destroy cluster nodes. A
+        # feature that destroys VMs must not be armed as a side effect of a
+        # blanket default. tests/unit/infra-api/node-ops-flag.test.ts pins that
+        # the master switch cannot arm it.
+        #
+        # Arming it does NOT bypass authorization. Every mutating route still
+        # requires the full triple gate — cluster:admin at /clusters scope, an
+        # ACTIVE PIM elevation, and same-origin — plus arm-then-confirm receipts;
+        # destroy additionally needs a SECOND receipt, minted only after the VM
+        # is stopped, with a matching vmId AND name.
+        #
+        # Until a Proxmox host registry and its credentials are seeded, the read
+        # surface reports each host `provenance: unavailable` with a diagnosis
+        # rather than an empty table, and every write refuses.
+        - name: INFRA_NODE_OPS_ENABLED
+          value: "1"
         # ── Game Hub platform switches (2026-08-01 wave) ─────────────────────
         # Each feature reads its own switch and, when it is absent, answers with
         # an operator sentence rather than an error — so these are what make the
