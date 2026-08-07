@@ -20,6 +20,24 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: longhorn-system
+  # This directory now also carries a Kyverno ClusterPolicy
+  # (longhorn-manager-resources.yaml), and Kyverno DEFAULTS fields onto its own
+  # policy objects after admission — so the live object never matches git and
+  # this Application sat permanently OutOfSync (measured 2026-08-07).
+  #
+  # Copied verbatim from the core-kyverno-policies Application, which has
+  # carried exactly this for every other ClusterPolicy in the repo. Kept here
+  # rather than moving the policy file into core/kyverno/manifests, because the
+  # move would prune and recreate the ClusterPolicy, and during that window a
+  # new longhorn-manager pod would be admitted WITHOUT the memory mutation —
+  # which is the whole reason the policy exists.
+  ignoreDifferences:
+    - group: kyverno.io
+      kind: ClusterPolicy
+      jqPathExpressions:
+        - .status
+        - .spec.admission
+        - .spec.rules[].skipBackgroundRequests
   syncPolicy:
     automated:
       prune: true
