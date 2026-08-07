@@ -31,10 +31,21 @@ spec:
           type: RuntimeDefault
       containers:
         - name: alertmanager-discord
-          # NOTE: pin this to a specific digest/tag when next updating.
-          # Using :latest risks unexpected breakage on node restarts/rollouts.
-          # Check releases: https://github.com/benjojo/alertmanager-discord/releases
-          image: benjojo/alertmanager-discord:latest
+          # Pinned by digest, 2026-08-07.
+          #
+          # There is no version tag to pin to: benjojo/alertmanager-discord
+          # publishes exactly ONE tag, `latest`, last pushed 2022-08-17
+          # (verified against the Docker Hub tag API). Digest is therefore the
+          # only stable reference available for this image.
+          #
+          # This digest is the image already running in-cluster — confirmed
+          # against the live pod's imageID — so the pin changes nothing that is
+          # deployed; it just stops a future `latest` repush from silently
+          # swapping the alert bridge on the next node reboot or rollout.
+          #
+          # To update: check https://github.com/benjojo/alertmanager-discord/releases,
+          # then resolve the new digest before editing this line.
+          image: benjojo/alertmanager-discord@sha256:7d27cd8494b269fe592cf6a9d7f6bdf14ac628bba34c381dc43cf533eaa95158
           ports:
             - containerPort: 9094
           env:

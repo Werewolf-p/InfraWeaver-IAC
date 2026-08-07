@@ -1,11 +1,79 @@
 ---
-# Kyverno ClusterPolicy — Require health probes on catalog app Deployments
-# Source: learnk8s.io/production-best-practices — "Containers have readiness probes"
-# Source: kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+# =============================================================================
+# Kyverno ClusterPolicy — health probes on catalog app Deployments
+# =============================================================================
+# WHAT WAS BROKEN (measured live 2026-08-07, before this change):
 #
-# Mode: Audit — alerts in admission but does not block deployment.
-# This allows developers to iterate while maintaining visibility on missing probes.
-# Scope: catalog namespaces (label: infraweaver.io/type=catalog-app)
+#   kubectl get polr -A -o json | jq '.items[].results[] | select(.result=="error")'
+#     NS=infraweaver-console  POLICY=require-pod-probes  RULE=require-liveness-probe
+#     MSG=validation failure: failed to check deny conditions: failed to
+#         substitute variables in condition key: failed to resolve
+#         element.livenessProbe at path : JMESPath query failed:
+#         Unknown key "livenessProbe" in path
+#     (and the identical error for require-readiness-probe)
+#
+#   2 error results, 6 pass, 0 fail. An `error` result is worse than a `fail`:
+#   the rule did not evaluate at all, so the policy was reporting nothing about
+#   the containers it did reach.
+#
+# ROOT CAUSE: the old rules used
+#     deny.conditions.any[].key: "{{ element.livenessProbe }}"
+#     operator: Equals            # ... and NO `value:` at all
+# Kyverno resolves `element.<key>` by walking the element object, and raises
+# "Unknown key" when the key is absent — which is precisely the case the rule
+# was trying to detect. The check could only ever succeed on containers that
+# already passed, and errored on every container that should have failed.
+#
+# THE TRIGGER: the `connector-git-sync` sidecar on the infraweaver-console
+# Deployment. It has no probes, so it hit the missing-key path.
+#
+# =============================================================================
+# SCOPING DECISION: probes are required on SERVING containers, not sidecars.
+# =============================================================================
+# The naive repair — make the null test work and keep demanding probes on every
+# container — would be actively harmful here, so it was rejected.
+#
+#   connector-git-sync pulls the WordPress connector plugin source from GitHub
+#   on a loop. A readinessProbe on that container gates the whole console Pod's
+#   readiness (a Pod is Ready only when every container is Ready), so GitHub
+#   being unreachable would take EVERY console replica out of the Service
+#   endpoints. The probe would manufacture the outage it is supposed to detect.
+#
+# So the rule applies only to containers that declare a `ports` list. That is
+# the declared serving surface: a readinessProbe's only effect is Service
+# endpoint membership, and a container with no declared port is not in any
+# Service path — a readinessProbe there can only remove a healthy pod from
+# rotation, never add signal. livenessProbe is scoped the same way so the two
+# rules stay symmetrical and a container is either fully in scope or fully out.
+#
+# ACCEPTED BLIND SPOT, STATED PLAINLY: containerPort is informational, so a
+# container could serve traffic without declaring one and would then be out of
+# scope. Verified against every catalog-app Deployment on the cluster today —
+# every serving container declares its port:
+#     infraweaver-console/infraweaver-console  console(3000) probes:yes
+#                                              connector-git-sync(no ports)  <- exempted
+#     infraweaver-console/infraweaver-api      api(3001)     probes:yes
+#     infraweaver-console/infraweaver-backup   backup(3000)  probes:yes
+#     gatus/gatus                              gatus(8080)   probes:yes
+# A false negative on an undeclared port is preferable to the false-positive
+# class above, which has a live availability cost.
+#
+# MECHANISM: `foreach` + `pattern` instead of `deny` + JMESPath conditions.
+# A pattern that does not match simply fails; it cannot raise "Unknown key" on
+# an absent field, which is the entire failure mode being repaired. This is the
+# same shape as the upstream Kyverno policy-library `require-pod-probes`.
+# `periodSeconds` is always populated by API-server defaulting (which runs
+# during decode, before admission), so `>0` is a presence test in practice.
+#
+# Mode: Audit — deliberately. This is a resource/self-healing policy, not a
+# security policy. Enforce here would block the pod restart of any workload
+# that regressed, on a cluster where cp1 already sits at ~93% of allocatable
+# memory requested. Recommended end state: Enforce security policies, Audit +
+# alert resource policies. Do not flip this one without revisiting that.
+#
+# Scope: catalog namespaces (label: infraweaver.io/type=catalog-app) — live,
+# that is exactly `gatus` and `infraweaver-console`.
+# =============================================================================
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -15,9 +83,12 @@ metadata:
     policies.kyverno.io/category: Self-Healing
     policies.kyverno.io/severity: medium
     policies.kyverno.io/description: >-
-      Without a readiness probe, pods receive traffic before they are ready.
-      Without a liveness probe, stuck/deadlocked containers are never restarted.
-      Both are required for self-healing catalog apps.
+      Containers that declare a port must define both a readinessProbe and a
+      livenessProbe. Without a readiness probe, pods receive traffic before they
+      are ready. Without a liveness probe, stuck or deadlocked containers are
+      never restarted. Sidecars that declare no port are deliberately out of
+      scope: a readiness probe on a non-serving sidecar can only remove a
+      healthy pod from Service rotation.
 spec:
   validationFailureAction: Audit
   background: true
@@ -32,14 +103,14 @@ spec:
                 matchLabels:
                   infraweaver.io/type: catalog-app
       validate:
-        message: "Catalog app Deployments must define a readinessProbe on all containers. Without it, pods receive traffic before they are ready."
+        message: >-
+          Every container that declares a port must define a readinessProbe.
+          Without it, the pod is added to Service endpoints before it can serve.
         foreach:
-          - list: "request.object.spec.template.spec.containers"
-            deny:
-              conditions:
-                any:
-                  - key: "{{ element.readinessProbe }}"
-                    operator: Equals
+          - list: "request.object.spec.template.spec.containers[?ports != null]"
+            pattern:
+              readinessProbe:
+                periodSeconds: ">0"
 
     - name: require-liveness-probe
       match:
@@ -51,11 +122,11 @@ spec:
                 matchLabels:
                   infraweaver.io/type: catalog-app
       validate:
-        message: "Catalog app Deployments must define a livenessProbe on all containers. Without it, deadlocked containers are never restarted."
+        message: >-
+          Every container that declares a port must define a livenessProbe.
+          Without it, a deadlocked container is never restarted.
         foreach:
-          - list: "request.object.spec.template.spec.containers"
-            deny:
-              conditions:
-                any:
-                  - key: "{{ element.livenessProbe }}"
-                    operator: Equals
+          - list: "request.object.spec.template.spec.containers[?ports != null]"
+            pattern:
+              livenessProbe:
+                periodSeconds: ">0"

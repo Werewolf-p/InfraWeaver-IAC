@@ -96,8 +96,33 @@ prometheus:
   enabled: true
   prometheusSpec:
     priorityClassName: platform-standard
-    retention: 3d
-    retentionSize: 8GB
+    # ── Retention (GAP-H5) ───────────────────────────────────────────────────
+    # Measured 2026-08-07 (read-only, from inside the pod and from talosctl):
+    #   TSDB on disk            5.6 GiB at the old 3d/8GB settings
+    #   ingest rate             ~1.87 GiB/day
+    #   backing store           local-path → talos-prod-cp2 /var (EPHEMERAL, xfs)
+    #                           295.8 GiB total, 113.5 GiB used, 182.4 GiB free
+    # NOTE: the plan recorded this PVC as Longhorn. It is not — all three
+    # monitoring PVCs are `local-path`, and all three live on talos-prod-cp2.
+    #
+    # `local-path` enforces no quota (proof: the sibling "10Gi" Loki volume holds
+    # 10.7 GiB), so the declared 20Gi claim below is not a real ceiling; the only
+    # real ceiling is cp2's free space. retentionSize is therefore the actual
+    # safety device and is kept INSIDE the declared claim on purpose, with ~30%
+    # of it left free for compaction scratch (a compaction writes the new block
+    # before unlinking the old ones).
+    #
+    #   14GB (= 14 GiB, Prometheus units are base-2) ÷ 1.87 GiB/day ≈ 7.5 days
+    # So the size cap binds first: this raises effective retention from 3d to
+    # ~7.5d, not to the full 15d. 15d is the time ceiling for when ingest drops.
+    # Reaching a genuine 15d needs ~28 GiB, i.e. a bigger claim — which cannot be
+    # done here: the claim is a StatefulSet volumeClaimTemplate (immutable) and
+    # the `local-path` StorageClass has no allowVolumeExpansion. That resize
+    # requires recreating the Prometheus StatefulSet and is a separate change.
+    #
+    # Worst case this adds 8.4 GiB to cp2 (5.6 → 14 GiB), leaving ~174 GiB free.
+    retention: 15d
+    retentionSize: 14GB
     # Reduce scrape load to ease memory pressure on 8GB nodes
     scrapeInterval: 60s
     evaluationInterval: 60s
@@ -192,14 +217,54 @@ alertmanager:
           resources:
             requests:
               storage: 2Gi
+  # ── Alerting delivery (GAP-M4, SOC 2 CC7.3-7.5) ────────────────────────────
+  # BEFORE: every route that delivered anything at all ended at ONE Discord
+  # webhook (the `all` receiver was Discord too, despite its name), `email-admin`
+  # was defined and never referenced by any route, and four routes went to `null`
+  # with no recorded reason — including Watchdog, the dead-man's-switch signal.
+  # A broken Discord webhook therefore silenced the entire platform, silently.
+  #
+  # AFTER: critical alerts fan out over TWO independent transports, Watchdog has
+  # a real destination, and every remaining `null` is an explicit, justified
+  # decision rather than an accident.
   config:
     global:
-      smtp_from: "alertmanager@${BASE_DOMAIN}"
-      smtp_smarthost: "smtp.gmail.com:587"
-      smtp_auth_username: "noreply@${BASE_DOMAIN}"
-      smtp_auth_password: "changeme"   # set via ExternalSecret when Gmail app-password is ready
-      smtp_require_tls: true
       resolve_timeout: 5m
+      # Corrected to the mailbox the rest of the platform actually authenticates
+      # against (infraweaver-console and authentik both use smtp-mail.outlook.com);
+      # the previous smtp.gmail.com smarthost could never have worked with it.
+      # Outlook rejects a From that differs from the authenticated user (554
+      # SendAsDenied), so both are the same address — see the same note in
+      # catalog/infraweaver-console/overlays/prod/kustomization.yaml.
+      smtp_from: "${ADMIN_EMAIL}"
+      smtp_smarthost: "smtp-mail.outlook.com:587"
+      smtp_auth_username: "${ADMIN_EMAIL}"
+      # ⚠ SECOND KNOWN GAP, verified not assumed: `${...}` is NOT substituted in
+      # this file. The `platform-monitoring` ApplicationSet consumes it as a
+      # multi-source Helm `$values` valueFile, which bypasses the argocd CMP that
+      # performs substitution — so the LIVE Alertmanager secret today contains the
+      # literal string `admin@${BASE_DOMAIN}` as a recipient
+      # (kubectl get secret -n monitoring alertmanager-kube-prometheus-stack-alertmanager).
+      # Alertmanager accepts it and starts, so this has been failing silently
+      # since the receiver was written. The placeholder form is kept rather than
+      # hardcoding a real address, because this repo is mirrored to a public
+      # remote by scripts/sync-to-public.sh. Fix alongside the SMTP secret below.
+      # KNOWN GAP — placeholder, so the email transport does NOT deliver yet.
+      # It cannot be fixed from this file: the real fix is an ExternalSecret
+      # creating `alertmanager-smtp-secret` in the monitoring namespace from
+      # OpenBao (the same path authentik-smtp-secret reads), plus
+      # `alertmanagerSpec.secrets: [alertmanager-smtp-secret]` and
+      # `smtp_auth_password_file: /etc/alertmanager/secrets/.../smtp-password`.
+      # That ExternalSecret lives in kube-prometheus-stack/manifests/, which this
+      # work package does not own. It is NOT wired here on purpose: referencing a
+      # Secret that does not exist yet leaves the Alertmanager pod stuck in
+      # ContainerCreating, which would be a worse outage than a missing email.
+      # Until it lands, the email leg fails LOUDLY — the stack's built-in
+      # AlertmanagerFailedToSendAlerts fires on
+      # alertmanager_notifications_failed_total{integration="email"} — instead of
+      # this being an unnoticed single point of failure.
+      smtp_auth_password: "changeme"
+      smtp_require_tls: true
     route:
       group_by: ["alertname", "namespace", "severity"]
       group_wait: 30s
@@ -207,44 +272,101 @@ alertmanager:
       repeat_interval: 6h
       receiver: "discord"
       routes:
+        # ── Dead-man's switch ────────────────────────────────────────────────
+        # Watchdog always fires; its ABSENCE is the signal. Routing it to `null`
+        # (the old behaviour) threw that signal away, so a dead Prometheus, a
+        # dead Alertmanager or a dead notification path looked identical to
+        # "nothing is wrong". It now goes to the transport that does not share a
+        # failure domain with the Discord webhook.
+        # LIMITATION, stated deliberately: a complete dead-man's switch must
+        # terminate OUTSIDE this cluster (an external heartbeat that alarms when
+        # the ping stops — healthchecks.io / Gatus push / uptime monitor). No such
+        # endpoint exists in this platform yet, and neither does a working email
+        # transport (see the two gaps in `global` above). Until one does, this is
+        # a 12-hourly heartbeat an operator must notice the ABSENCE of — weaker
+        # than a real switch, stronger than the `null` it replaces. When an
+        # external endpoint exists, add it as another entry on this receiver;
+        # nothing else in this file changes.
         - matchers: ['alertname = "Watchdog"']
-          receiver: "null"
+          receiver: "deadmansswitch"
+          repeat_interval: 12h
           continue: false
+
+        # ── Deliberately silenced: InfoInhibitor ─────────────────────────────
+        # kube-prometheus-stack ships InfoInhibitor purely to drive the
+        # inhibit_rules below. It is a routing primitive, never an incident.
+        # Silencing it is correct, not an oversight.
         - matchers: ['alertname = "InfoInhibitor"']
           receiver: "null"
           continue: false
-        # Talos binds kube-controller-manager, kube-proxy, kube-scheduler to localhost — scraping is not possible.
-        # Both the component-down alerts AND the companion TargetDown alerts must be silenced here,
-        # otherwise TargetDown (job=kube-proxy|kube-controller-manager|kube-scheduler) leaks to Discord.
+
+        # ── Deliberately silenced: unscrapable Talos control-plane components ─
+        # Talos binds kube-controller-manager, kube-proxy and kube-scheduler to
+        # 127.0.0.1, so they can never be scraped and these alerts are
+        # permanently, structurally false. Their ServiceMonitors are also
+        # disabled at the bottom of this file, so these routes are belt-and-
+        # braces for rules that ship inside the chart's own rule groups.
+        # COMPENSATING CONTROL: control-plane liveness is covered by NodeNotReady,
+        # EtcdMemberDown and the Kubernetes API's own availability — losing these
+        # three alerts does not leave the control plane unmonitored.
         - matchers: ['alertname =~ "KubeControllerManagerDown|KubeProxyDown|KubeSchedulerDown"']
           receiver: "null"
           continue: false
+        # Same root cause: TargetDown fires for the same three unscrapable jobs.
+        # Scoped by `job` so a genuine TargetDown for any OTHER job still pages.
         - matchers: ['alertname = "TargetDown"', 'job =~ "kube-proxy|kube-controller-manager|kube-scheduler"']
           receiver: "null"
           continue: false
+
+        # ── Critical: two independent transports ─────────────────────────────
+        # `continue: true` makes the alert fall through to the next sibling, so a
+        # critical alert is delivered over BOTH Discord and email. Either one can
+        # be broken without the alert being lost.
         - matchers: ['severity = "critical"']
-          receiver: "all"
+          receiver: "discord"
+          repeat_interval: 1h
+          continue: true
+        - matchers: ['severity = "critical"']
+          receiver: "email-admin"
           repeat_interval: 1h
           continue: false
+
+        # Warnings stay single-transport on purpose: doubling every warning would
+        # train the operator to ignore both channels.
         - matchers: ['severity = "warning"']
           receiver: "discord"
           repeat_interval: 6h
           continue: false
+        # Anything unmatched falls through to the top-level `discord` receiver.
     receivers:
+      # Used ONLY by the two deliberately-silenced routes above. Every use is
+      # commented at the route; a `null` with no comment is a bug.
       - name: "null"
-      - name: "email-admin"
-        email_configs:
-          - to: "admin@${BASE_DOMAIN}"
-            send_resolved: true
+
       - name: "discord"
         webhook_configs:
           - url: "http://alertmanager-discord.monitoring.svc.cluster.local:9094"
             send_resolved: true
-      - name: "all"
-        # email disabled until Gmail app-password ExternalSecret is configured
+
+      # The second, independent transport. Now actually referenced by a route —
+      # it previously existed but nothing routed to it.
+      - name: "email-admin"
+        email_configs:
+          - to: "${ADMIN_EMAIL}"
+            send_resolved: true
+
+      # Heartbeat sink. Two legs on purpose: the Discord bridge works TODAY (so
+      # the heartbeat is real from the moment this merges), and the email leg
+      # becomes the independent transport as soon as the two gaps in `global`
+      # above are closed. send_resolved is off on both: Watchdog never resolves,
+      # so a "resolved" notification could only ever mean the pipeline died.
+      - name: "deadmansswitch"
         webhook_configs:
           - url: "http://alertmanager-discord.monitoring.svc.cluster.local:9094"
-            send_resolved: true
+            send_resolved: false
+        email_configs:
+          - to: "${ADMIN_EMAIL}"
+            send_resolved: false
     inhibit_rules:
       - source_matchers: ['severity = "critical"']
         target_matchers: ['severity = "warning"']

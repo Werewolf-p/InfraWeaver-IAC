@@ -5,7 +5,7 @@ metadata:
   name: core-metallb-manifests
   namespace: argocd
 spec:
-  project: default
+  project: default-restricted
   source:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main

@@ -1,0 +1,190 @@
+---
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  DEFERRED — this restricts who can reach six applications. It is not      ║
+# ║  GAP-C5 and it is not MFA. It ships written-but-unarmed so that a human   ║
+# ║  decides when to change access, rather than inheriting the change from    ║
+# ║  an MFA work package.                                                     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# Same two gates as the other DEFERRED files: rename off `.DEFERRED`, and add
+# `authentik-blueprint-app-access-backfill` to `blueprints.configMaps` in
+# ../../values.yaml.
+#
+# ── THE FINDING ──────────────────────────────────────────────────────────────
+# Measured live on 2026-08-07: 13 of 74 Authentik Applications have NO policy
+# binding at all. An application with no bindings admits every authenticated
+# Authentik user — the IdP imposes no restriction whatsoever. Six of the
+# thirteen have a reachable surface:
+#
+#   route-truenas   Proxy   truenas.int.example.com     — THE BAD ONE
+#   tradesphere     Proxy   tradesphere.int.example.com
+#   proxmox         OAuth2  Proxmox hypervisor web UI     — THE OTHER BAD ONE
+#   portainer       OAuth2  portainer.int (bare-metal Docker host)
+#   grafana         OAuth2  grafana.int   (mitigated, see below)
+#   infraweaver-console OAuth2 infraweaver.int (mitigated, see below)
+#
+# ── WHY route-truenas IS THE WORST OF THEM ───────────────────────────────────
+# There are two TrueNAS applications, and the protection is on the wrong one.
+#
+#   app `truenas`        provider external_host https://truenas.example.com
+#                        bound to policy-infra-truenas          ← looks safe
+#   app `route-truenas`  provider external_host https://truenas.int.example.com
+#                        NO bindings                            ← actually live
+#
+# Only `truenas.int.example.com` has an IngressRoute (traefik/truenas, with
+# secure-headers + forward-auth). `truenas.example.com` routes nowhere. So
+# the forward-auth challenge on the live TrueNAS admin UI is answered by the
+# unbound application, and every authenticated user on this platform — every
+# WordPress-site user, every Nextcloud user — passes it. The `infra-truenas`
+# group that appears to gate storage administration gates a hostname that does
+# not exist. This is a control that reads as present in the admin UI and is
+# absent in the request path.
+#
+# ── WHY proxmox IS THE OTHER BAD ONE ─────────────────────────────────────────
+# `proxmox.int.example.com` is not proxied by this cluster (Traefik answers
+# 404), so there is no forward-auth in front of it. The Proxmox hypervisor
+# offers the Authentik OIDC realm directly at its own :8006 UI. With no policy
+# binding, Authentik will complete the OIDC handshake for any authenticated
+# user; whatever restriction exists is Proxmox-side realm configuration that
+# cannot be verified from inside this cluster. Binding the policy here makes
+# the IdP refuse first, which is where it should be refused.
+#
+# Its redirect URIs also contain a literal, unsubstituted `${PROXMOX_HOST}` —
+# an envsubst that never ran. Harmless today (an unmatched redirect URI simply
+# never matches) but it means that entry has never worked and nobody noticed.
+#
+# ── WHY grafana AND infraweaver-console ARE LOWER SEVERITY ───────────────────
+# Their hostnames are served through forward-auth by their `-fwd` twins
+# (`grafana-fwd`, `infraweaver-console-fwd`), both of which ARE bound to
+# policy-admins-only. Browser access is therefore already restricted. What is
+# lost is defence in depth: a client obtaining an OIDC token directly from the
+# token endpoint is not policy-checked. Bind them anyway — the cost is zero and
+# the layering should not depend on a middleware staying attached to a route.
+#
+# ── THE SEVEN DEAD APPLICATIONS — DELETE, DO NOT BIND ────────────────────────
+# These have no reachable surface. Binding a policy to a dead application is
+# housekeeping theatre; deleting the application removes the credential and the
+# redirect URI along with it. Each deletion is destructive and reviewable, so
+# they are listed here rather than automated:
+#
+#   forgejo               forgejo.int.example.com   Traefik 404
+#   gitea                 gitea.int.example.com     Traefik 404
+#   wikijs                wiki.int.example.com      Traefik 404 — and this is
+#                         the same phantom as the `wiki-admins` group declared
+#                         in users.yaml that does not exist in Authentik, and
+#                         the `admin` grant for a wiki that was never deployed.
+#                         One dead app, one dead group, one dead grant.
+#   onedev                onedev.example.com        NXDOMAIN
+#   vaultwarden           vaultwarden.int             Traefik 404. The live
+#                         password manager is bitwarden.example.com, which
+#                         carries secure-headers only and no forward-auth at
+#                         all (GAP-H6, WP9's file) — so this ProxyProvider is
+#                         not what protects it. Nothing is.
+#   wordpress-ssoe2e      ssoe2e.example.com        NXDOMAIN — e2e leftover
+#   wordpress-ssoe2e-gate ssoe2e.example.com        NXDOMAIN — e2e leftover
+#
+# ── VERIFY BEFORE AND AFTER ──────────────────────────────────────────────────
+# The count of unbound applications is the acceptance test. The command is in
+# README.md; it should read 13 before and 7 after this file is applied, then 0
+# once the dead applications are removed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-app-access-backfill
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  app-access-backfill.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Application Access — backfill for unbound applications
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Attaches the existing per-surface access policies to the six live
+          applications that had no policy binding and therefore admitted every
+          authenticated user.
+    entries:
+      # ── TrueNAS admin UI, on the hostname that is actually routed ─────────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, route-truenas]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, route-truenas]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-truenas]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ── Proxmox hypervisor OIDC realm ─────────────────────────────────────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, proxmox]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, proxmox]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-proxmox]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ── Portainer on the bare-metal Docker host ───────────────────────────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, portainer]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, portainer]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-infra-containers]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ── Tradesphere ───────────────────────────────────────────────────────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, tradesphere]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, tradesphere]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ── Grafana OIDC (layering behind the already-bound grafana-fwd) ──────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, grafana]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, grafana]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ── InfraWeaver console OIDC (layering behind the -fwd application) ───
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, infraweaver-console]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, infraweaver-console]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30

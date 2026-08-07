@@ -1,0 +1,129 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Foyer RBAC — the complete list of cluster reads the application performs.
+#
+# Derived by enumerating every `@kubernetes/client-node` call in
+# apps/infraweaver-foyer/src/, not by copying a neighbouring app:
+#
+#   src/lib/portal-config.ts:107  core.readNamespacedConfigMap(infraweaver-foyer-config,          ns=infraweaver-console)
+#   src/lib/rights.ts:161         core.readNamespacedConfigMap(infraweaver-foyer-rights,          ns=infraweaver-console)
+#   src/lib/snapshots.ts:75       core.readNamespacedConfigMap(infraweaver-wp-manage-snapshots,   ns=infraweaver-console)
+#   src/lib/sites.ts:161          apps.listNamespacedDeployment(ns=wordpress, labelSelector=…)
+#
+# That is FOUR calls and TWO verbs. Nothing else — no Services (documented as a
+# deliberate omission in sites.ts:12-15), no Secrets, no pods/exec, no writes.
+# `grep -rn "listNamespaced\|readNamespaced\|patchNamespaced\|createNamespaced\|
+# deleteNamespaced" src/` over the app returns exactly the four lines above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 1. The three ConfigMaps, bounded BY NAME ────────────────────────────────
+#
+# `resourceNames` is the whole point of this Role. The console namespace holds
+# the console's entire config surface; a Role granting `get` on "configmaps"
+# without a name list would hand a public, internet-facing app read access to
+# all of it. Bounding by name means a future Foyer release that tried to read a
+# fourth ConfigMap gets a 403 from the apiserver rather than a widened blast
+# radius that nobody reviewed.
+#
+# NOTE the deliberate absence of `list` and `watch`. Foyer reads each map by
+# name; `list` would let it enumerate every ConfigMap in the namespace, and
+# resourceNames CANNOT restrict a list (the apiserver ignores resourceNames for
+# list/watch — the request has no name to match). So `list` here would silently
+# be a namespace-wide grant. Four `get`s by name is the honest expression of
+# what the code does.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-foyer-console-configmaps
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames:
+      # Portal master switch + hidden-site list. Read on EVERY request path
+      # before any other cluster call (my-sites.ts gate order); an unreadable
+      # map means the portal is off, not open.
+      - infraweaver-foyer-config
+      # Per-user rights projection (email → WordPress role, per site). Purely
+      # decorative: rights.ts can never add or remove a card. Unreadable ⇒
+      # neutral chips.
+      - infraweaver-foyer-rights
+      # The console's Manage snapshot store — Foyer reads three fields from it
+      # (wpVersion, coreUpdate, at) for the version chip. Read-only; the console
+      # owns the write side in lib/manage/site-snapshot.ts.
+      #
+      # ⚠ This map is NOT in the "two ConfigMaps" the ops checklist mentions.
+      # It is a real, third read (snapshots.ts:75) and omitting it here would
+      # not break the portal — it would silently drop every version chip while
+      # everything else looked healthy. That is exactly the failure class this
+      # repo keeps re-learning, so it is granted explicitly and by name.
+      - infraweaver-wp-manage-snapshots
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-foyer-console-configmaps
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-foyer-console-configmaps
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-foyer
+    namespace: infraweaver-console
+---
+# ── 2. The WordPress fleet, one verb, one namespace ─────────────────────────
+#
+# `listFleet()` issues ONE call: listNamespacedDeployment on ns=wordpress with
+# labelSelector `infraweaver/wordpress=true,infraweaver.io/component in
+# (wordpress,wordpress-slot-b)`. A label selector is applied by the apiserver
+# AFTER authorization, so it narrows the RESULT, never the GRANT — this Role
+# genuinely permits listing every Deployment in the `wordpress` namespace and
+# there is no RBAC construct that can narrow it further. That is stated plainly
+# rather than papered over; the mitigating facts are that the namespace contains
+# only WordPress site workloads, that Deployment specs there hold no secret
+# material (credentials arrive via envFrom secretRef, whose VALUES require a
+# secrets verb this SA does not have), and that the visibility decision itself
+# is made from the OIDC groups claim, not from this list.
+#
+# `get` is NOT granted: no code path reads a single Deployment by name. `watch`
+# is not granted: Foyer polls, it does not watch.
+#
+# This Role lives in the `wordpress` namespace while the Application's
+# destination namespace is `infraweaver-console`. That is the established house
+# pattern — infraweaver-console/base/rbac.yaml declares
+# `infraweaver-console-wordpress` in exactly the same cross-namespace way, and
+# the `platform` AppProject whitelists all namespaces and kinds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-foyer-wordpress-fleet
+  namespace: wordpress
+  labels:
+    app: infraweaver-foyer
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-foyer-wordpress-fleet
+  namespace: wordpress
+  labels:
+    app: infraweaver-foyer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-foyer-wordpress-fleet
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-foyer
+    namespace: infraweaver-console

@@ -1,0 +1,49 @@
+---
+# Identity + binding for the scoped automation harness (GAP-C3).
+#
+# This pair replaces ServiceAccount `infraweaver-system/claude-platform-owner`
+# and its `cluster-admin` ClusterRoleBinding. A NEW ServiceAccount is used rather
+# than rebinding the old one, so that the retirement is observable: once this is
+# live, `claude-platform-owner` has no remaining purpose and both its binding and
+# its static token Secret can be removed. See ./README.md for the mandatory
+# ordering — the old credential must not be removed before this is synced and
+# verified.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: automation-harness
+  namespace: infraweaver-system
+  labels:
+    app.kubernetes.io/name: automation-harness
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: argocd
+    infraweaver.io/compliance-gap: gap-c3
+  annotations:
+    infraweaver.io/purpose: >-
+      Out-of-cluster compliance/automation identity. Credentials are minted
+      on demand with `kubectl create token --duration=...`. This
+      ServiceAccount must never have a `kubernetes.io/service-account-token`
+      Secret created for it (CIS 5.1.1, GAP-C3).
+# No pod runs as this ServiceAccount; it exists purely as a token-minting
+# identity for out-of-cluster tooling. Disabling automount satisfies CIS 5.1.6
+# and guarantees the identity cannot be picked up implicitly by a workload that
+# happens to be scheduled into this namespace.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: automation-harness
+  labels:
+    app.kubernetes.io/name: automation-harness
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: argocd
+    infraweaver.io/compliance-gap: gap-c3
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: automation-harness
+subjects:
+  - kind: ServiceAccount
+    name: automation-harness
+    namespace: infraweaver-system

@@ -9,8 +9,13 @@ defaultSettings:
   defaultReplicaCount: 2
   # Allow scheduling on control-plane nodes (no workers in this cluster)
   taintToleration: "node-role.kubernetes.io/control-plane:NoSchedule"
-  # Give Longhorn itself platform-standard priority so storage stays online
-  # without out-prioritising ingress/DNS/control-plane components.
+  # Give Longhorn's SYSTEM-MANAGED pods (instance-manager, engine-image, CSI
+  # plugin/sidecars) platform-standard priority so storage stays online without
+  # out-prioritising ingress/DNS/control-plane components.
+  #
+  # The longhorn-manager DaemonSet is deliberately NOT covered by this any more
+  # — it is the storage CONTROL plane and is pinned to platform-critical under
+  # `longhornManager.priorityClass` below. See the incident note there.
   priorityClass: platform-standard
   # Storage reserved per node — 5% minimal ensures CP1/CP3 remain schedulable
   # with ~134GB available and 299GB scheduled at 200% overprovisioning (299 < 390).
@@ -50,13 +55,55 @@ defaultSettings:
   defaultDataLocality: best-effort
   # Faster failover
   nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
-  # TrueNAS NFS backup target — volumes in the "truenas-backup" RecurringJob group
-  # are backed up here nightly. On fresh redeploy, scripts/restore-from-truenas.sh
-  # uses this target to restore PVCs before apps deploy.
-  # TrueNAS prerequisite: create dataset at /mnt/tank/longhorn-backups and enable
-  # NFS share with network access for ${NODE_SUBNET_CIDR} (cluster nodes).
-  backupTarget: "nfs://${TRUENAS_HOST}:/mnt/pool/k8s-longhorn-backups"
+  # ---------------------------------------------------------------------------
+  # TrueNAS NFS backup target.
+  #
+  # !! THE HOST IS A RESOLVED LITERAL ON PURPOSE. DO NOT RE-PARAMETERISE IT. !!
+  #
+  # This file is a Helm valueFile consumed by ArgoCD-NATIVE Helm (see
+  # kubernetes/bootstrap/appset-core.yaml: sources[].helm.valueFiles =
+  # "$values/kubernetes/core/longhorn/values.yaml"). Native Helm rendering does
+  # NOT pass through the argocd-cmp-envsubst plugin — that plugin only runs for
+  # sources declaring `plugin: { name: envsubst-v1.0 }`, e.g. the sibling
+  # core-longhorn-manifests app. The same rule is already recorded in
+  # core/openbao/values.yaml, platform/authentik/values.yaml and
+  # platform/external-dns/values.yaml.
+  #
+  # MEASURED CONSEQUENCE of the previous value "nfs://${TRUENAS_HOST}:/mnt/...":
+  # the placeholder reached the cluster verbatim in ConfigMap
+  # longhorn-system/longhorn-default-setting, and longhorn-manager rejected it:
+  #   "Customized settings are invalid, will give up using them: ... failed to
+  #    parse nfs://${TRUENAS_HOST}:/mnt/pool/k8s-longhorn-backups as url:
+  #    invalid character \"{\" in host name"
+  # Longhorn then fell back to an EMPTY backup-target, so BackupTarget/default
+  # reported `available: false, message: "backup target URL is empty"` and ZERO
+  # backups.longhorn.io resources have ever been created. (GAP-C2.)
+  #
+  # WHY 10.1.0.135 AND NOT THE ${TRUENAS_HOST} PARAMETER'S VALUE:
+  # the live argocd-cmp-substitutions ConfigMap carries TRUENAS_HOST=10.1.0.5,
+  # which answers ICMP/443 but has NO NFS and NO SMB listener. The NAS that
+  # actually serves this platform is 10.1.0.135 — it is what platform.yaml
+  # declares (persistence.truenas.nfs_ip) and what the live SMB PVs in
+  # kubernetes/catalog/nas-shares/ mount (//10.1.0.135/infraweaver).
+  # Verified 2026-08-07 by MOUNTPROC3_EXPORT against 10.1.0.135:
+  #   EXPORT /mnt/pool/k8s-longhorn-backups  clients=[10.0.0.0/24]
+  # i.e. the export exists and is ACL'd to exactly the cluster node subnet.
+  # Do NOT "fix" this by editing TRUENAS_HOST in .env — the console and the
+  # authentik LDAP outpost consume that same parameter (out of WP2 scope).
+  #
+  # On fresh redeploy, scripts/restore-from-truenas.sh uses this target to
+  # restore PVCs before apps deploy. Restore procedure:
+  # docs/BACKUP-AND-RESTORE-RUNBOOK.md
+  # ---------------------------------------------------------------------------
+  backupTarget: "nfs://10.1.0.135:/mnt/pool/k8s-longhorn-backups"
   backupTargetCredentialSecret: ""
+  # Back up volumes even while they are detached (Longhorn attaches them briefly,
+  # then detaches again). Measured 2026-08-07: 17 of 19 Longhorn volumes are
+  # `detached` — with the Longhorn default of `false` a nightly backup job skips
+  # them silently and reports success, which is precisely how GAP-C2 stayed
+  # invisible. Backup concurrency is capped at 2 in manifests/backup-jobs.yaml so
+  # this cannot become an attach storm.
+  allowRecurringJobWhileVolumeDetached: true
 
 longhornUI:
   enabled: true
@@ -85,7 +132,42 @@ longhornManager:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
-  priorityClass: "platform-standard"
+  # ---------------------------------------------------------------------------
+  # !! DO NOT ADD `resources:` HERE. THE CHART WOULD SILENTLY IGNORE IT. !!
+  #
+  # Longhorn chart 1.7.3 (pinned "1.7.*" in ./application.yaml) exposes NO
+  # resources key for the longhorn-manager DaemonSet. templates/daemonset-sa.yaml
+  # contains no `resources:` block at all, and this `longhornManager` map accepts
+  # only log / priorityClass / tolerations / nodeSelector / serviceAnnotations.
+  # Verified by rendering the chart with the key set: zero occurrences of
+  # "resources" survive into the DaemonSet. A `longhornManager.resources` entry
+  # would look like a fix in git and change nothing on the cluster.
+  #
+  # longhorn-manager's memory request/limit is set instead by the admission
+  # mutation in ./manifests/longhorn-manager-resources.yaml, which carries the
+  # full incident write-up and the per-node request arithmetic.
+  # ---------------------------------------------------------------------------
+  #
+  # platform-critical (1000000), raised from platform-standard (500000) on
+  # 2026-08-07. longhorn-manager is the storage control plane; every stateful
+  # workload depends on it, so it belongs in the same tier as traefik/argocd/
+  # coredns rather than below them. It TIES with ingress/DNS, it does not
+  # out-prioritise them, so the hierarchy note in defaultSettings above still
+  # holds. This is the secondary eviction lever: the kubelet ranks memory
+  # evictions by (exceeds-request, priority, excess), and during the cp3
+  # incident longhorn-manager held the LOWEST priority of every pod that
+  # exceeded its request, which made it rank #1 on the node's kill list.
+  #
+  # ROLLOUT WARNING: priorityClassName is part of the pod template, so changing
+  # it rolls the DaemonSet — and the chart sets
+  # updateStrategy.rollingUpdate.maxUnavailable: "100%", meaning all three
+  # longhorn-manager pods restart AT ONCE. Volume I/O is served by the
+  # instance-manager/engine pods and keeps running, but volume management
+  # (attach/detach/replica rebuild) pauses for the restart window. Merge this
+  # during a quiet window. That roll is also what applies the new memory
+  # request on cp1/cp2, which would otherwise keep the old 50Mi request until
+  # their pods next restart on their own.
+  priorityClass: "platform-critical"
 
 longhornDriver:
   tolerations:

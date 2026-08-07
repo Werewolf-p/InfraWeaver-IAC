@@ -65,7 +65,16 @@ spec:
   failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 1800
+      # Without a TTL a Failed Job is retained indefinitely: failedJobsHistoryLimit
+      # prunes only when the count EXCEEDS the limit, so the last failure never ages
+      # out and keeps KubeJobFailed firing forever. 24h leaves the artifact visible
+      # for a full alert cycle, then it self-cleans.
+      ttlSecondsAfterFinished: 86400
+      # 300s, not 1800s: this script early-exits in seconds while disabled, and runs
+      # a handful of `kubectl scale` calls when enabled. A tight deadline caps how
+      # long a future wedged Job can hold the argocd-cm batch_CronJob health Lua
+      # (core/argocd/values.yaml) in Progressing — it keys off status.active.
+      activeDeadlineSeconds: 300
       template:
         metadata:
           labels:
@@ -102,13 +111,20 @@ spec:
                     configMapKeyRef:
                       name: game-hub-scale-schedule-config
                       key: scaleDownReplicas
+              # Must satisfy LimitRange game-hub-limits (manifests/resource-quota.yaml),
+              # shipped by THIS SAME Application, which enforces min cpu 100m /
+              # memory 256Mi on every container in the namespace — against requests
+              # AND limits. A LimitRange has no selector or scopeSelector, so a
+              # short-lived helper Job cannot be exempted from the floor; the Job
+              # matches the floor instead. Anything lower is rejected at admission
+              # (FailedCreate) and the Job never runs a single pod.
               resources:
                 requests:
-                  cpu: 25m
-                  memory: 48Mi
-                limits:
                   cpu: 100m
-                  memory: 96Mi
+                  memory: 256Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
               command: ["/bin/bash", "-c"]
               args:
                 - |
@@ -151,7 +167,16 @@ spec:
   failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 1800
+      # Without a TTL a Failed Job is retained indefinitely: failedJobsHistoryLimit
+      # prunes only when the count EXCEEDS the limit, so the last failure never ages
+      # out and keeps KubeJobFailed firing forever. 24h leaves the artifact visible
+      # for a full alert cycle, then it self-cleans.
+      ttlSecondsAfterFinished: 86400
+      # 300s, not 1800s: this script early-exits in seconds while disabled, and runs
+      # a handful of `kubectl scale` calls when enabled. A tight deadline caps how
+      # long a future wedged Job can hold the argocd-cm batch_CronJob health Lua
+      # (core/argocd/values.yaml) in Progressing — it keys off status.active.
+      activeDeadlineSeconds: 300
       template:
         metadata:
           labels:
@@ -188,13 +213,20 @@ spec:
                     configMapKeyRef:
                       name: game-hub-scale-schedule-config
                       key: scaleUpReplicas
+              # Must satisfy LimitRange game-hub-limits (manifests/resource-quota.yaml),
+              # shipped by THIS SAME Application, which enforces min cpu 100m /
+              # memory 256Mi on every container in the namespace — against requests
+              # AND limits. A LimitRange has no selector or scopeSelector, so a
+              # short-lived helper Job cannot be exempted from the floor; the Job
+              # matches the floor instead. Anything lower is rejected at admission
+              # (FailedCreate) and the Job never runs a single pod.
               resources:
                 requests:
-                  cpu: 25m
-                  memory: 48Mi
-                limits:
                   cpu: 100m
-                  memory: 96Mi
+                  memory: 256Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
               command: ["/bin/bash", "-c"]
               args:
                 - |

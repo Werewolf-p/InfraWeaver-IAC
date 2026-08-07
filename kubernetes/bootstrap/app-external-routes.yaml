@@ -8,7 +8,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "5"
 spec:
-  project: default
+  project: default-restricted
   source:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main

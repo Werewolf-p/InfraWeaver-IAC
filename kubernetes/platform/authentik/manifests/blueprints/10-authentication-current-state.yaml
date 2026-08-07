@@ -1,0 +1,147 @@
+---
+# ── Authentication path — CURRENT STATE, exported from live (WP11 stage 1) ────
+#
+# GAP-C5 (SOC 2 CC6.1, ISO A.5.17 / A.8.5) says the Authentik authentication
+# configuration existed only inside Authentik's PostgreSQL database, so nothing
+# in git proved what the single lock on every admin surface actually does.
+# This file is that proof. It is a faithful, verified export of the live
+# `default-authentication-flow` and the stages bound to it, taken read-only
+# from the running instance on 2026-08-07.
+#
+# APPLYING THIS FILE IS A NO-OP. Every attribute below was read back from the
+# live objects and matches byte-for-byte. It is evidence, not a change.
+#
+# ── WHAT THE EXPORT REVEALS ──────────────────────────────────────────────────
+# An authenticator-validation stage IS bound to the authentication flow, at
+# order 30 — so at a glance the platform looks like it enforces MFA. It does
+# not. The stage carries `not_configured_action: skip`, which means any user
+# with no enrolled device is waved straight past it. Measured on 2026-08-07,
+# device counts across every class were:
+#
+#     totp 0 · webauthn 0 · static 0 · duo 0 · sms 0 · email 0
+#
+# Zero devices + skip = every single login on this platform is one password.
+# The control is present in shape and absent in effect. That is exactly the
+# failure mode this file exists to make visible in git.
+#
+# The fix is staged deliberately — see README.md in this directory. Do NOT
+# change `not_configured_action` here; stage 4 introduces a second, group-
+# scoped stage instead (30-mfa-required-platform-admins.yaml.DEFERRED) so the
+# blast radius of the flip is one group, not every user.
+#
+# ── DELIVERY ─────────────────────────────────────────────────────────────────
+# The ConfigMap below is mounted into the authentik *worker* at
+# /blueprints/mounted/cm-authentik-blueprint-current-state/ because it is
+# listed in `blueprints.configMaps` in ../../values.yaml. A ConfigMap that is
+# not in that list is never mounted and never applied — it would look like
+# config-as-code while doing nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-current-state
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  current-state.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Authentication Path (current state)
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Read-only export of the live default-authentication-flow and its
+          stage bindings. Applying this is a no-op; it exists as GAP-C5
+          evidence that the authentication path is now declared in git.
+    entries:
+      # ── The flow every human login on this platform traverses ─────────────
+      - model: authentik_flows.flow
+        state: present
+        id: flow-default-authentication
+        identifiers:
+          slug: default-authentication-flow
+        attrs:
+          name: "Welcome to authentik!"
+          title: "Welcome to authentik!"
+          designation: authentication
+          authentication: none
+          policy_engine_mode: any
+          compatibility_mode: false
+          denied_action: message_continue
+          layout: stacked
+
+      # ── The MFA gate that is currently inert ──────────────────────────────
+      # not_configured_action: skip  →  no device enrolled means no challenge.
+      # device_classes lists what WOULD be accepted if a device existed.
+      # configuration_stages is empty, so the stage cannot even offer to
+      # enrol a user it just waved through.
+      - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+        state: present
+        id: stage-default-authentication-mfa-validation
+        identifiers:
+          name: default-authentication-mfa-validation
+        attrs:
+          not_configured_action: skip
+          device_classes:
+            - static
+            - totp
+            - webauthn
+            - duo
+            - sms
+            - email
+          configuration_stages: []
+          last_auth_threshold: seconds=0
+          webauthn_user_verification: preferred
+
+      # ── Stage bindings, in execution order ────────────────────────────────
+      # 10  identification (username/email + inline password stage)
+      # 30  MFA validation  (inert, see above)
+      # 100 user login      (issues the session)
+      #
+      # evaluate_on_plan=false + re_evaluate_policies=true is the combination
+      # that makes any policy bound to a stage evaluate against the IDENTIFIED
+      # user (plan.context["pending_user"]) rather than the anonymous request
+      # user. Stage 4 depends on this; see the README before changing it.
+      - model: authentik_flows.flowstagebinding
+        state: present
+        id: binding-authentication-identification
+        identifiers:
+          target: !KeyOf flow-default-authentication
+          order: 10
+        attrs:
+          target: !KeyOf flow-default-authentication
+          stage: !Find [authentik_flows.stage, [name, default-authentication-identification]]
+          order: 10
+          evaluate_on_plan: false
+          re_evaluate_policies: true
+          policy_engine_mode: any
+          invalid_response_action: retry
+
+      - model: authentik_flows.flowstagebinding
+        state: present
+        id: binding-authentication-mfa-validation
+        identifiers:
+          target: !KeyOf flow-default-authentication
+          order: 30
+        attrs:
+          target: !KeyOf flow-default-authentication
+          stage: !KeyOf stage-default-authentication-mfa-validation
+          order: 30
+          evaluate_on_plan: false
+          re_evaluate_policies: true
+          policy_engine_mode: any
+          invalid_response_action: retry
+
+      - model: authentik_flows.flowstagebinding
+        state: present
+        id: binding-authentication-login
+        identifiers:
+          target: !KeyOf flow-default-authentication
+          order: 100
+        attrs:
+          target: !KeyOf flow-default-authentication
+          stage: !Find [authentik_flows.stage, [name, default-authentication-login]]
+          order: 100
+          evaluate_on_plan: false
+          re_evaluate_policies: true
+          policy_engine_mode: any
+          invalid_response_action: retry

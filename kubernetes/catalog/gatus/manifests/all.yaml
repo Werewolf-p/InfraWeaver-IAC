@@ -162,6 +162,22 @@ spec:
         decodingStrategy: None
         metadataPolicy: None
 ---
+# ServiceAccount — dedicated, token NOT mounted.
+#
+# Gatus never calls the Kubernetes API: every endpoint in the ConfigMap above is
+# a plain HTTP(S) URL and the Kubernetes auto-discovery provider is not enabled.
+# It was therefore running on the `default` SA with a mounted, automounted token
+# it had no use for (CIS 5.1.5/5.1.6). A dedicated SA with no RBAC bindings and
+# automount disabled removes that credential from the pod entirely.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gatus
+  namespace: gatus
+  labels:
+    app.kubernetes.io/name: gatus
+automountServiceAccountToken: false
+---
 # Deployment — Gatus status page
 apiVersion: apps/v1
 kind: Deployment
@@ -173,6 +189,12 @@ metadata:
     app.kubernetes.io/instance: gatus
 spec:
   replicas: 1
+  # Old ReplicaSets are kept only for `kubectl rollout undo`, which this cluster
+  # cannot actually use: catalog-gatus-manifests syncs with selfHeal=true, so
+  # ArgoCD reverts any manual rollback within one reconcile. Rollback here is
+  # `git revert`. Retaining 0 old ReplicaSets keeps stale, non-conformant pod
+  # templates from lingering as permanent PolicyReport failures.
+  revisionHistoryLimit: 0
   strategy:
     type: Recreate
   selector:
@@ -186,6 +208,9 @@ spec:
         config-version: "1"
     spec:
       priorityClassName: platform-standard
+      serviceAccountName: gatus
+      # Gatus makes no Kubernetes API calls — see the ServiceAccount above.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -223,6 +248,21 @@ spec:
             requests:
               cpu: 50m
               memory: 64Mi
+            # Limits added, requests deliberately unchanged.
+            #
+            # Measured 2026-08-07: this pod uses 19Mi against a 64Mi request and
+            # had NO memory limit at all, so the kernel would let it grow into
+            # whatever the node had left. It runs on talos-prod-cp3, the small
+            # node (6.5Gi allocatable, 78% of memory already requested), which is
+            # exactly where an uncapped process does the most damage.
+            #
+            # 192Mi is 10x measured usage and a 3x burst over the request, well
+            # inside the 8x ceiling that limit-memory-burst-ratio enforces.
+            # Because only LIMITS are added here and the request is untouched,
+            # this costs zero scheduling budget on cp3.
+            limits:
+              cpu: 500m
+              memory: 192Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -229,3 +229,15 @@ spec:
       - ${NODE_SUBNET_CIDR}        # K8s node VLAN3
       - ${MGMT_SUBNET_CIDR}        # Proxmox management network
       - 192.168.1.0/24      # Home LAN
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RATE LIMITS ARE NOT DEFINED HERE — they all live in
+#   kubernetes/core/traefik/manifests/middleware-rate-limit.yaml
+# (same `traefik` namespace, so referencing them from routes rendered out of
+# this directory works unchanged). That file is the single home for every
+# rateLimit middleware on the platform: rate-limit-auth, rate-limit-auth-strict,
+# rate-limit-public and rate-limit-public-cf. Add new ones there, not here, so
+# every limit stays reviewable side by side — and read its header before picking
+# a variant, because the right one depends on whether the host is
+# Cloudflare-proxied. Decision recorded 2026-08-07 for compliance WP9 / GAP-H6.
+# ─────────────────────────────────────────────────────────────────────────────

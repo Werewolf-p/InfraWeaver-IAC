@@ -1,0 +1,130 @@
+---
+# Alerts covering the audit-log pipeline and the retention controls that make it
+# evidence (GAP-H5 / GAP-M4 — SOC 2 CC7.2/CC7.3, ISO 27001:2022 A.8.15).
+#
+# The point of these rules: a logging control that stops working silently is
+# worse than no control, because the compliance claim outlives the mechanism.
+# Every rule below therefore fails LOUD — several of them fire when the relevant
+# metric is missing entirely, not only when it reports a bad value.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: audit-and-retention-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # must match the prometheusRule selector label
+spec:
+  groups:
+
+    # ── API server audit log shipping ────────────────────────────────────────
+    - name: audit.log.shipping
+      rules:
+        - alert: KubeAuditLogShipperNotRunning
+          # Fewer audit shippers available than nodes that should have one: the
+          # audit trail for at least one control-plane node is not being collected.
+          # The on-node file is capped at 11 x 100 MB, which on cp2 is roughly
+          # 8 hours, so this is a hard deadline, not a nuisance.
+          expr: |
+            kube_daemonset_status_number_available{namespace="monitoring",daemonset="audit-log-shipper"}
+              <
+            kube_daemonset_status_desired_number_scheduled{namespace="monitoring",daemonset="audit-log-shipper"}
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Kubernetes audit log is not being shipped from every node"
+            description: >-
+              The audit-log-shipper DaemonSet has fewer available pods than nodes.
+              API-server audit events on the affected node(s) are only on local disk,
+              which rotates after ~11 x 100 MB (hours, not days). Restore the
+              DaemonSet before that window closes or the record is lost permanently.
+
+        - alert: KubeAuditLogShipperAbsent
+          # Distinct from the alert above: this one fires when the DaemonSet does
+          # not exist at all (deleted, never synced, or pruned by ArgoCD). Without
+          # it, "no unavailable pods" and "no audit shipping whatsoever" look
+          # identical to Prometheus.
+          expr: absent(kube_daemonset_status_desired_number_scheduled{namespace="monitoring",daemonset="audit-log-shipper"})
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "audit-log-shipper DaemonSet does not exist"
+            description: >-
+              kube-state-metrics reports no audit-log-shipper DaemonSet in the
+              monitoring namespace. Nothing is collecting the Kubernetes API audit
+              log. Check the monitoring-audit-log-shipper ArgoCD Application.
+
+        - alert: KubeAuditLogIngestStalled
+          # The DaemonSet can be Running and still ship nothing — a wrong path, a
+          # permission change on /var/log/audit/kube, a stuck positions file, or a
+          # filter that drops everything. This asserts on the outcome instead.
+          # `or vector(0)` makes a MISSING metric fire too: if promtail cannot be
+          # scraped we cannot prove the audit trail is flowing, and an unverifiable
+          # control is not a control.
+          expr: |
+            (
+              sum(rate(promtail_sent_entries_total{namespace="monitoring",service="audit-log-shipper-metrics"}[30m]))
+              or vector(0)
+            ) == 0
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "No Kubernetes audit events reaching Loki for 1h"
+            description: >-
+              audit-log-shipper has sent zero log entries to Loki for an hour, or its
+              metrics endpoint cannot be scraped. Verify with
+              `{job="kube-audit"}` in Grafana and check the pod logs for
+              permission errors on /var/log/audit/kube.
+
+    # ── Retention controls ───────────────────────────────────────────────────
+    - name: audit.log.retention
+      rules:
+        - alert: LokiRetentionNotRunning
+          # Loki's compactor only deletes when compactor.retention_enabled is set.
+          # It was NOT set for the first 55 days of this cluster's life, so the
+          # store grew without bound while three different config keys each looked
+          # like they were controlling retention. This alert exists so that failure
+          # mode can never be silent again. It also fires when Loki is not scraped
+          # at all, for the same reason as KubeAuditLogIngestStalled.
+          expr: |
+            (
+              time()
+              -
+              (
+                max(loki_boltdb_shipper_apply_retention_last_successful_run_timestamp_seconds{namespace="monitoring"})
+                or vector(0)
+              )
+            ) > 86400
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Loki has not applied log retention in over 24h"
+            description: >-
+              The Loki compactor has not completed a retention pass for more than a
+              day (or is not being scraped). Log volume grows unbounded on
+              talos-prod-cp2's local-path volume, which has no quota. Check
+              compactor.retention_enabled in kubernetes/monitoring/loki/values.yaml
+              and the loki-0 pod logs.
+
+        - alert: PrometheusTsdbSizeNearRetentionCap
+          # Prometheus is on a local-path volume that enforces no quota, so
+          # --storage.tsdb.retention.size is the only thing standing between the
+          # metrics store and talos-prod-cp2's root filesystem. 12 GiB is ~86% of
+          # the 14GB cap; past it, size retention starts silently discarding older
+          # blocks and the effective retention window is shorter than the 15d the
+          # manifest claims.
+          expr: prometheus_tsdb_storage_blocks_bytes{namespace="monitoring"} > 12884901888
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Prometheus TSDB is near its 14GB retention cap"
+            description: >-
+              Persisted block size is above 12 GiB against a 14GB retention.size cap,
+              so Prometheus is about to (or already does) drop blocks on size rather
+              than age — the real retention window is then shorter than the
+              configured 15d. Either reduce cardinality or move the volume to a
+              storage class that supports expansion and raise the cap.

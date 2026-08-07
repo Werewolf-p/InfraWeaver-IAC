@@ -1,0 +1,142 @@
+---
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  DEFERRED — THIS IS THE ENFORCEMENT FLIP. DO NOT ENABLE IT CASUALLY.      ║
+# ║                                                                          ║
+# ║  WP11 stage 4. Written, reviewed and committed, but deliberately NOT      ║
+# ║  delivered to the cluster. Enabling it requires a human who has already   ║
+# ║  completed stages 2 and 3 and can say yes to every line of the checklist  ║
+# ║  in README.md. Getting locked out of your own IdP is not a situation an   ║
+# ║  agent can recover from.                                                  ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# ── WHY THIS FILE CANNOT REACH THE CLUSTER AS IT STANDS ──────────────────────
+# Two independent gates are closed, and BOTH must be opened by hand:
+#
+#   1. The filename ends in `.DEFERRED`. ArgoCD's directory source only reads
+#      *.yaml, *.yml and *.json, so this file is invisible to GitOps. Renaming
+#      it to end in `.yaml` opens gate 1.
+#   2. Even then, the ConfigMap would sit unused in the namespace. The
+#      authentik chart only mounts ConfigMaps named in `blueprints.configMaps`
+#      in ../../values.yaml. Adding `authentik-blueprint-mfa-required-admins`
+#      to that list opens gate 2.
+#
+# Two gates, not one, because a single accidental rename must not be able to
+# lock the only administrator out of every admin surface on the platform.
+#
+# ── WHAT IT DOES ─────────────────────────────────────────────────────────────
+# It binds `platform-admin-mfa-validation` (defined in
+# 20-mfa-enrollment-optional.yaml) into the authentication flow at order 25 —
+# after identification at order 10, before the inert original at order 30 — and
+# gates it on membership of the `platform-admins` group. It then attaches the
+# same group check, NEGATED, to the existing order-30 binding, so exactly one
+# of the two validation stages ever runs and nobody is challenged twice:
+#
+#     platform-admins member   → order 25 runs (enrol-or-challenge), 30 removed
+#     everyone else            → order 25 removed, order 30 runs (skip, as now)
+#
+# ── THE DETAIL THAT DECIDES WHETHER THIS WORKS AT ALL ────────────────────────
+# `evaluate_on_plan: false` together with `re_evaluate_policies: true` is not
+# stylistic. It is verified in authentik 2026.5.6:
+#
+#   FlowPlanner._build_plan() only evaluates a binding's policies at plan time
+#   when evaluate_on_plan is true. At plan time nobody has identified yet, so
+#   `pending_user` is unset, the group check runs against AnonymousUser,
+#   returns False, and the stage is dropped from the plan. MFA would appear
+#   configured and never once challenge anyone.
+#
+#   With evaluate_on_plan false and re_evaluate_policies true, the binding gets
+#   a ReevaluateMarker, and ReevaluateMarker.process() builds
+#   PolicyEngine(binding, plan.context.get(PLAN_CONTEXT_PENDING_USER, ...)) —
+#   i.e. the identified user. The group check then means what it reads as.
+#
+# If you change either flag, you are choosing between "MFA enforced" and "MFA
+# silently inert", and the two look identical from the login page.
+#
+# ── A GROUP BINDING, NOT AN EXPRESSION POLICY ────────────────────────────────
+# PolicyBinding.passes() short-circuits: `if self.group: return
+# PolicyResult(self.group.is_member(request.user))`. No Python expression, no
+# AnonymousUser attribute access, nothing to get subtly wrong. The repo's
+# existing `policy-admins-only` expression policy is the right tool for
+# Applications, where the user is already authenticated; it is the wrong tool
+# here.
+#
+# ── ROLLBACK ─────────────────────────────────────────────────────────────────
+# Rename this file back to `.DEFERRED` and remove the ConfigMap from
+# `blueprints.configMaps`, then let ArgoCD sync. Blueprint entries are not
+# reverted by deleting the blueprint, so ALSO delete the two policy bindings
+# and the order-25 flow-stage binding in the Authentik admin UI (Flows →
+# default-authentication-flow → Stage Bindings). If you cannot reach the admin
+# UI because of the change you are rolling back, that is precisely what
+# docs/BREAK-GLASS.md is for — use the break-glass account, which is not in
+# `platform-admins` and therefore never traverses order 25.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-mfa-required-admins
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  mfa-required-admins.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver MFA Required — platform-admins
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Binds the platform-admin MFA validation stage into the
+          authentication flow for members of platform-admins only, and
+          suppresses the inert default stage for those same members.
+    entries:
+      # ── 1. The stage binding at order 25 ──────────────────────────────────
+      - model: authentik_flows.flowstagebinding
+        state: present
+        id: binding-platform-admin-mfa
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+          order: 25
+        attrs:
+          target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+          stage: !Find [authentik_flows.stage, [name, platform-admin-mfa-validation]]
+          order: 25
+          # Read the header before touching these two lines.
+          evaluate_on_plan: false
+          re_evaluate_policies: true
+          policy_engine_mode: any
+          invalid_response_action: retry
+
+      # ── 2. Only platform-admins reach it ──────────────────────────────────
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf binding-platform-admin-mfa
+          order: 0
+        attrs:
+          target: !KeyOf binding-platform-admin-mfa
+          group: !Find [authentik_core.group, [name, platform-admins]]
+          enabled: true
+          order: 0
+          negate: false
+          timeout: 30
+          failure_result: false
+
+      # ── 3. …and only they SKIP the original inert stage ───────────────────
+      # `!Find` on authentik_policies.policybindingmodel (not on
+      # flowstagebinding) is deliberate: a policy binding's target is a
+      # pbm_uuid, while FlowStageBinding's primary key is a different column
+      # (fsb_uuid). Targeting the flowstagebinding directly would resolve to
+      # the wrong UUID and the binding would silently attach to nothing.
+      # Verified live: both resolve paths were compared and only this one
+      # returns the binding's pbm_uuid.
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_policies.policybindingmodel, [flowstagebinding__stage__name, default-authentication-mfa-validation]]
+          order: 0
+        attrs:
+          target: !Find [authentik_policies.policybindingmodel, [flowstagebinding__stage__name, default-authentication-mfa-validation]]
+          group: !Find [authentik_core.group, [name, platform-admins]]
+          enabled: true
+          order: 0
+          negate: true
+          timeout: 30
+          failure_result: false

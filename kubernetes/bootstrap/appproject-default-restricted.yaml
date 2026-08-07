@@ -1,0 +1,76 @@
+---
+# ArgoCD AppProject — default-restricted   (WP1 / GAP-H9)
+#
+# Why this exists
+# ---------------
+# Six Applications were running under ArgoCD's built-in `default` project, whose
+# spec is entirely unrestricted:
+#
+#   sourceRepos:               ["*"]
+#   destinations:              [{namespace: "*", server: "*"}]
+#   clusterResourceWhitelist:  [{group: "*", kind: "*"}]
+#
+# `server: "*"` means an Application in that project may target ANY registered
+# cluster, and `sourceRepos: ["*"]` means it may pull from any repository. The
+# built-in project also cannot be meaningfully restricted in git without
+# affecting every future Application that forgets to set `.spec.project`.
+#
+# This project is the declared, reviewable replacement for the cluster
+# infrastructure Applications that were on `default`.
+#
+# What was copied from the `platform` project, and what was narrowed
+# ------------------------------------------------------------------
+# Copied verbatim (blast-radius safety — see the WP1 note in the compliance
+# plan: a too-narrow project spec puts apps into OutOfSync/ComparisonError):
+#   * destinations: namespace "*" on the in-cluster API server. It MUST stay
+#     namespace "*". `core-network-policies` has destination namespace
+#     kube-system but writes NetworkPolicies into ~25 namespaces, and
+#     `external-routes` writes IngressRoutes outside `traefik`; a per-namespace
+#     destination list would reject those resources at comparison time.
+#   * clusterResourceWhitelist / namespaceResourceWhitelist: group "*", kind "*".
+#     These apps legitimately create cluster-scoped objects (Cilium cluster-wide
+#     policies, MetalLB CRs).
+#
+# Narrowed deliberately (this is the actual restriction gained):
+#   * server is pinned to https://kubernetes.default.svc instead of "*".
+#   * sourceRepos is pinned to the InfraWeaver deploy/infra repositories instead
+#     of "*". All four Applications moved onto this project resolve their
+#     `${DEPLOY_REPO_URL}` token to https://github.com/example-owner/InfraWeaver-infra,
+#     so no Helm chart repository is needed here. `platform` still carries a
+#     trailing "*" in its sourceRepos; that entry is intentionally NOT copied,
+#     because copying it would leave this project exactly as permissive as
+#     `default` and defeat the point.
+#
+# Rollback: if any moved Application reports ComparisonError with
+# "application repo ... is not permitted in project", add "*" to sourceRepos (or
+# revert the whole PR — moving between projects changes no workload).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default-restricted
+  namespace: argocd
+  annotations:
+    # Negative wave so the project is created before the Applications that
+    # reference it. Without this, the Applications can land first and sit in
+    # ComparisonError ("Application referencing project default-restricted
+    # which does not exist") until the next reconcile.
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "Restricted project for cluster-infrastructure Applications formerly on the built-in default project"
+  sourceRepos:
+    # Repo ArgoCD actually pulls rendered manifests from (the private deploy repo
+    # when DEPLOY_REPO_URL is set; otherwise INFRA_REPO_URL). Same tokens the
+    # platform project uses, rendered by the envsubst-v1.0 CMP.
+    - "${DEPLOY_REPO_URL}"
+    - "${INFRA_REPO_URL}"
+  destinations:
+    - namespace: "*"
+      server: "https://kubernetes.default.svc"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

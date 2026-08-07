@@ -41,3 +41,97 @@ spec:
     # otherwise all users collapse into one shared, easily-saturated bucket.
     sourceCriterion:
       requestHeaderName: Cf-Connecting-IP
+
+# ─────────────────────────────────────────────────────────────────────────────
+# General-purpose rate limits for routes that carry no forward-auth (GAP-H6).
+#
+# HOME DECISION (compliance plan WP9 asked for exactly one home, recorded here):
+# every rateLimit middleware on this platform lives in THIS file. It is already
+# named for rate limiting and already holds the two Authentik limits, so all
+# limits stay side by side in one reviewable place — the thing you want when
+# someone reports a 429. The alternative home, external-routes/manifests/
+# 01-middlewares.yaml, was rejected for two reasons: it is rendered through the
+# envsubst CMP (a rate limit needs no ${...} token and should not inherit that
+# app's fail-closed render path), and it syncs at wave 5 while this file belongs
+# to the core-traefik-manifests Application, which converges earlier and
+# independently of the catalog apps that reference these middlewares.
+# 01-middlewares.yaml carries a pointer comment back to here.
+#
+# WHY TWO MIDDLEWARES AND NOT ONE — this is the part that is easy to get wrong.
+# Traefik's default sourceCriterion is the request's remote address. That is the
+# real client IP here, because the Traefik LoadBalancer Service runs
+# externalTrafficPolicy: Local (core/traefik/values.yaml) — kube-proxy does not
+# SNAT. But it is only the real client IP for hosts that reach the origin
+# DIRECTLY. For a Cloudflare-proxied host the remote address is a Cloudflare
+# edge IP, so every visitor on earth shares ONE token bucket — the exact failure
+# that saturated rate-limit-auth and stopped Authentik's login SPA from booting.
+# The inverse is just as broken: bucketing on Cf-Connecting-IP for a host that
+# is NOT proxied means the header is absent and every client collapses into the
+# single empty-string bucket.
+#
+# So the correct middleware depends on the host's Cloudflare posture, measured
+# against the public resolver on 2026-08-07 (dig @1.1.1.1 <host> A):
+#   bitwarden.example.com     188.114.96.0/97.0  → proxied    → *-cf variant
+#   test.example.com          188.114.96.0/97.0  → proxied    → *-cf variant
+#   auth.example.com          188.114.96.0/97.0  → proxied    (rate-limit-auth)
+#   jellyfin.int.example.com  203.0.113.10       → DIRECT     → rate-limit-public
+#   nextcloud.int.example.com 203.0.113.10       → DIRECT     → rate-limit-public
+#   registry.int.example.com  203.0.113.10       → DIRECT
+#   argocd.int.example.com    203.0.113.10       → DIRECT
+# Note the *.int wildcard is DNS-only despite the cloudflare-proxied: "true"
+# annotations on the .int IngressRoutes — external-dns is policy: upsert-only and
+# the wildcard is a manual, unowned record, so those annotations never applied.
+# Re-check with dig before assuming a host's variant; do not copy by guesswork.
+#
+# THE NUMBERS: average 100/s, burst 200, per client IP. Deliberately generous —
+# these routes are consumed by native and sync clients, not just browsers, and a
+# false 429 on them looks like data corruption to the user, not like throttling:
+#   * Nextcloud desktop/mobile sync bursts hard at the start of a large sync
+#     (parallel PROPFIND/PUT/MOVE over ~6 connections, chunked uploads
+#     multiplying requests per file). Sustaining >100 req/s over a WAN link is
+#     not reachable for these clients; burst 200 absorbs the opening salvo.
+#   * Jellyfin uses HTTP Range requests for direct play, so a seeking or
+#     scrubbing client issues many requests per playback, and a library grid
+#     fires dozens of poster requests at once. 200 burst covers a grid load.
+#   * Bitwarden mobile clients sync on a schedule; a sync plus vault icon
+#     fetches is dozens of requests, far under this ceiling. 100/s is still
+#     orders of magnitude below any credential-stuffing rate worth running.
+#   * Households and offices NAT many devices behind ONE public IP, and that is
+#     what a per-IP bucket sees. The limit has to hold a whole household
+#     streaming and syncing at once, not one device.
+# These are a starting ceiling whose job is to cap abuse, not to shape traffic.
+# If they ever need tightening, tighten bitwarden alone — it is the only one of
+# the four with a credential endpoint behind it.
+---
+# rate-limit-public — for routes reached DIRECTLY (not Cloudflare-proxied).
+# No sourceCriterion: Traefik defaults to the request's remote address, which is
+# the true client IP under externalTrafficPolicy: Local.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-public
+  namespace: traefik
+spec:
+  rateLimit:
+    average: 100      # 100 requests/second sustained, per client IP
+    burst: 200        # absorb sync-client and media-grid opening bursts
+    period: 1s
+
+---
+# rate-limit-public-cf — same limits, for Cloudflare-PROXIED routes. Buckets on
+# Cf-Connecting-IP because the remote address is a Cloudflare edge IP there.
+# Cf-Connecting-IP is set by Cloudflare on every proxied request; using it on a
+# host that is not proxied would collapse all clients into one bucket, so only
+# attach this to hosts confirmed proxied (see the dig table above).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-public-cf
+  namespace: traefik
+spec:
+  rateLimit:
+    average: 100      # 100 requests/second sustained, per real client IP
+    burst: 200
+    period: 1s
+    sourceCriterion:
+      requestHeaderName: Cf-Connecting-IP

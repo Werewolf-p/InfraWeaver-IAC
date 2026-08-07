@@ -16,7 +16,7 @@ metadata:
       Require all container images in catalog/apps namespaces to use
       a specific version tag.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   background: true
   rules:
     - name: require-image-tag
@@ -31,6 +31,43 @@ spec:
                     operator: In
                     values:
                       - catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Image tag ':latest' is not allowed. Pin to a specific version (e.g. 'myapp:1.2.3')."
         pattern:

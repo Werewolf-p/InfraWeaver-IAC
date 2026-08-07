@@ -1,7 +1,57 @@
 ---
-# ClusterRole: read + write access for InfraWeaver Console operations.
-# Includes game-hub management (scale, delete pods, create PVCs), Longhorn backups,
-# and ExternalSecrets viewing.
+# ═══════════════════════════════════════════════════════════════════════════
+# InfraWeaver Console RBAC
+#
+# SHAPE OF THIS FILE — read this before editing.
+#
+#   1. ClusterRole  infraweaver-console-reader          — cluster-wide READ only
+#   2. ClusterRole  infraweaver-console-cluster-writer  — the few cluster-wide
+#                                                          WRITES that genuinely
+#                                                          cannot be namespaced
+#   3. Role         infraweaver-console-configmaps      — ns/infraweaver-console
+#   4. Role         infraweaver-console-secrets         — ns/infraweaver-console
+#   5. Role         infraweaver-console-eso-token       — ns/external-secrets
+#   6. Role         infraweaver-console-wordpress       — ns/wordpress
+#
+# WHY IT IS SPLIT THIS WAY
+# ------------------------
+# `infraweaver-console-reader` used to be a reader in name only. It granted, to
+# a ServiceAccount belonging to an internet-facing (SSO-fronted) Next.js app,
+# cluster-wide:
+#
+#   secrets:  get list watch create update patch delete   ← every credential in
+#                                                            the cluster
+#   apps/*:   create + delete                             ← run any pod, any ns,
+#                                                            with any SA
+#   namespaces: delete
+#
+# Full CRUD on every Secret cluster-wide is cluster-admin in practice: it yields
+# the ArgoCD admin token, the OpenBao token, and everything ESO materialises. A
+# single RCE or SSRF in the console escalated straight to total cluster
+# compromise. Cluster-wide `create deployments` is a second, independent path to
+# the same place (schedule a pod that mounts a privileged ServiceAccount token).
+#
+# The rule now is: cluster scope for READS, namespace scope for WRITES and for
+# ALL Secret access. Where a write genuinely cannot be namespaced it lives in
+# `infraweaver-console-cluster-writer` under its own comment saying why.
+#
+# THE "NEW NAMESPACE" PROBLEM — resolved, not worked around
+# ---------------------------------------------------------
+# The obvious objection to namespace-scoped write is that you cannot pre-bind a
+# Role in a namespace that does not exist yet. Verified against the source: the
+# console does not create per-tenant namespaces.
+#   · WordPress: every site lives in the ONE shared `wordpress` namespace. Sites
+#     are separated by resource-name prefix and labels, never by namespace.
+#     `execInWpPod` hard-codes `WORDPRESS_NAMESPACE`; there is no namespace
+#     parameter, so a caller cannot redirect it.
+#     (src/addons/wordpress-manager/lib/k8s-exec.ts, .../lib/naming.ts)
+#   · Game Hub: one `game-hub` namespace, created once by the cluster:admin-gated
+#     bootstrap route, which ALSO creates that namespace's own Role+RoleBinding.
+#     (src/app/api/game-hub/setup/route.ts)
+# `deleteNamespace` has zero call sites anywhere in the console.
+# So no generate-rule / propagating controller is needed: the set of namespaces
+# the console writes to is fixed and enumerable, and is enumerated below.
+# ═══════════════════════════════════════════════════════════════════════════
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -9,27 +59,43 @@ metadata:
   labels:
     app: infraweaver-console
 rules:
+  # Cluster-wide inventory for the Workloads / Cluster / Storage / Security
+  # pages. Genuinely read-only.
+  #
+  # `secrets` REMOVED. RBAC cannot express "list only the metadata" or "only
+  # type=kubernetes.io/tls" — a `list` on secrets returns every value, so a
+  # cluster-wide secret read IS a cluster-wide credential read. There is no safe
+  # narrower form of it, which is exactly why it had to go rather than shrink.
+  #
+  # `pods/exec` REMOVED. It was inert here anyway: exec is authorized as
+  # CREATE on the pods/exec subresource, and this ClusterRole only ever granted
+  # get/list/watch, so `kubectl auth can-i create pods/exec --all-namespaces`
+  # already answered "no". Real exec comes from the two namespace Roles that
+  # grant `create` — wordpress (below) and game-hub (game-hub bundle) — which
+  # are the only two namespaces the console execs into.
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "pods/exec", "namespaces", "nodes", "events", "services", "endpoints", "configmaps", "persistentvolumes", "persistentvolumeclaims", "secrets"]
+    resources:
+      - pods
+      - pods/log
+      - namespaces
+      - nodes
+      - events
+      - services
+      - endpoints
+      - configmaps
+      - persistentvolumes
+      - persistentvolumeclaims
+      - serviceaccounts
     verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["secrets", "configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "update", "patch"]
+  # Read-only cluster RBAC inventory for the Security > RBAC view
+  # (/api/security/rbac). It lists ClusterRoleBindings and cross-references the
+  # ServiceAccounts they name; without these verbs the route caught the 403 and
+  # returned a generic "Kubernetes unavailable", so the whole panel read as an
+  # outage. Read-only: the console never writes cluster RBAC — verified, there
+  # is no create/patch/replace/delete on ClusterRole(Binding) anywhere in src/.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings", "clusterroles", "rolebindings", "roles"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["cronjobs", "jobs"]
     verbs: ["get", "list", "watch"]
@@ -39,6 +105,9 @@ rules:
   # silently stops being enforced while the CronJob reports a plain 500.
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
@@ -55,21 +124,20 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
-  - apiGroups: ["argoproj.io"]
-    resources: ["applications", "appprojects"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets", "secretstores", "clustersecretstores"]
     verbs: ["get", "list", "watch"]
-  # Pod firewall UI: list CNPs to show a pod's active exceptions, and
-  # create/patch/delete the per-app `<app>-<direction>-allowlist` policies that
-  # one-click Allow / remove-exception manage (cluster:admin gated in the API).
+  # Pod firewall UI: list CNPs to show a pod's active exceptions. The
+  # create/patch/delete half moved to infraweaver-console-cluster-writer.
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -85,12 +153,126 @@ subjects:
   - kind: ServiceAccount
     name: infraweaver-console
     namespace: infraweaver-console
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# ClusterRole: the cluster-wide WRITES that cannot honestly be namespaced.
+#
+# Named for what it is. Everything in here is deliberate and justified inline;
+# nothing in here touches secrets, and nothing in here can create a workload.
+#
+# The test applied to every rule below was: "is there a call site that writes
+# this resource in a namespace that is NOT wordpress / game-hub /
+# infraweaver-console?" Where the answer was no, the verb was deleted from
+# cluster scope and left to the namespace Role that already carries it.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infraweaver-console-cluster-writer
+  labels:
+    app: infraweaver-console
+rules:
+  # Pod DELETE, cluster-wide. The console is the platform's operator surface:
+  # "restart this pod" / "migrate this pod" / node drain / the placement
+  # rebalancer / the storage reclaim executor all delete a pod in whatever
+  # namespace the workload happens to live in.
+  #   src/app/api/pods/restart-pod.ts, src/app/api/cluster/migrate-pod/route.ts,
+  #   src/app/api/cluster/drain/route.ts, src/lib/placement/eviction.ts,
+  #   src/lib/storage/reclaim/deleters.ts, src/lib/dr/inject/k8s-port.ts
+  # NOT create: the console never creates a pod outside game-hub, and cluster-wide
+  # pod-create would re-open the escalation path this change closes.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  # Workload UPDATE/PATCH and SCALE, cluster-wide — restart-app, rolling-restart,
+  # scale, the placement advisor and the replica-floor reconciler all act on any
+  # app in the catalog, which is by definition every namespace.
+  #   src/app/api/cluster/{restart-app,rolling-restart,scale}/route.ts,
+  #   src/app/api/placement/route.ts, src/lib/app-power.ts,
+  #   src/lib/replicas/replica-floor-reconcile.ts
+  #
+  # DELIBERATELY NOT create/delete. Every create/delete of a Deployment,
+  # StatefulSet, ReplicaSet or DaemonSet in the console happens in `game-hub` or
+  # `wordpress`, both of which have their own namespace Role. Cluster-wide
+  # `create deployments` is a direct route to cluster-admin (schedule a pod that
+  # mounts a privileged ServiceAccount token or a hostPath), so it is gone.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  # PVC patch = the storage "expand volume" action; PVC delete = the reclaim
+  # sweep and the unused-PVC cleanup, both of which work over every namespace.
+  #   src/lib/storage/expand-pvc.ts, src/lib/storage/reclaim/deleters.ts,
+  #   src/app/api/storage/pvc-cleanup/route.ts
+  # NOT create: the only PVC creates are game-hub server provisioning, covered by
+  # the game-hub Role.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["update", "patch", "delete"]
+  # ConfigMap write, cluster-wide. ACCEPTED RISK, not a clean result — see the
+  # residual-risk note at the foot of this file. The console's own stores
+  # (audit sink, user preferences, placement reservations, replica floors) are in
+  # infraweaver-console and game-hub/wordpress are covered by their Roles, but
+  # `/api/gameservers` writes ConfigMaps into `game-servers` and the addon
+  # uninstall sweep writes into whatever namespace an addon declares, and those
+  # namespaces are not a fixed set. Narrowing this needs an addon-namespace
+  # allow-list in the code first; that is a follow-up, not something to guess at
+  # here.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "update", "patch", "delete"]
+  # Per-app firewall: the one-click Allow / remove-exception actions create and
+  # delete `<app>-<direction>-allowlist` CiliumNetworkPolicies in the namespace
+  # of the app being edited — any namespace. cluster:admin gated in the API.
+  #   src/app/api/network/{allowed-rules,learn-mode,pod-rules,blocked-flows}/route.ts
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["create", "update", "patch", "delete"]
+  # ArgoCD Application writes — app power on/off and the update-policy editor.
+  # These objects only ever live in `argocd` (src/lib/app-power.ts pins
+  # ARGOCD_NAMESPACE), so this COULD be a Role in argocd. It is left cluster-scoped
+  # only because moving it buys nothing: the power is identical either way, since
+  # writing an ArgoCD Application means telling a cluster-admin controller to
+  # apply arbitrary manifests. RECORDED AS AN ACCEPTED RISK — it is the largest
+  # remaining escalation path after this change, and the compensating control is
+  # the cluster:admin gate plus the audit log on those routes, not RBAC.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
+    verbs: ["create", "update", "patch", "delete"]
+  # Namespace CREATE only, for the Game Hub first-run bootstrap
+  # (src/app/api/game-hub/setup/route.ts, cluster:admin gated) which creates the
+  # single literal namespace `game-hub`. Kubernetes cannot restrict `create` by
+  # resourceName — the name is not known at authorization time — so this cannot
+  # be narrowed further in RBAC.
+  #
+  # `delete` REMOVED: grep proves there is no deleteNamespace call anywhere in
+  # the console, and namespace-delete cascades to every object inside it.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infraweaver-console-cluster-writer
+  labels:
+    app: infraweaver-console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infraweaver-console-cluster-writer
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-console
+    namespace: infraweaver-console
 # NOTE: the game-hub-scoped Role/RoleBinding `infraweaver-console-game-hub`
 # is owned by the game-hub namespace bundle
 # (kubernetes/catalog/game-hub/manifests/rbac.yaml), which carries the
-# authoritative superset (events, statefulsets, batch, volumesnapshots).
-# Do NOT re-declare it here — a duplicate triggers an ArgoCD
-# SharedResourceWarning / OutOfSync on this Application.
+# authoritative superset (events, statefulsets, batch, volumesnapshots,
+# secrets, pods/exec). Do NOT re-declare it here — a duplicate triggers an
+# ArgoCD SharedResourceWarning / OutOfSync on this Application.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -120,14 +302,102 @@ subjects:
     name: infraweaver-console
     namespace: infraweaver-console
 ---
+# Role: the console's OWN secrets, in its OWN namespace.
+#
+# This is what replaces the cluster-wide secrets grant for the console's internal
+# use. Two consumers, both in infraweaver-console:
+#   · the IWSL enrollment secret `infraweaver-iwsl-enroll-secrets` — get/create/
+#     update (src/addons/wordpress-manager/lib/iwsl-link-store.ts)
+#   · the IWSL signing keys — get (src/addons/wordpress-manager/lib/iwsl-keys.ts)
+# No `delete`: nothing in the console deletes a secret in its own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-console-secrets
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-console
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-console-secrets
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-console-secrets
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-console
+    namespace: infraweaver-console
+---
+# Role: ONE named Secret in the external-secrets namespace.
+#
+# `POST /api/secrets/lifecycle/remint-token` mints a fresh periodic OpenBao token
+# and writes it straight into the ESO token secret server-side
+# (src/app/api/secrets/lifecycle/remint-token/route.ts). That is the single
+# reason the console ever touched a secret outside its own namespaces, and it is
+# live today — SECRET_REMEDIATION_WRITE_ENABLED is "true" in base/deployment.yaml.
+# Dropping the cluster-wide grant without this Role would break it.
+#
+# `resourceNames` DOES constrain get/patch (unlike create/list/watch, where the
+# name is not known at authorization time), so this is a genuine single-object
+# grant: the console can rewrite `openbao-token` and nothing else in this
+# namespace — not even list what else is there.
+#
+# CAVEAT for the reviewer: the route reads ESO_TOKEN_SECRET_NAME /
+# ESO_TOKEN_SECRET_NAMESPACE from env and defaults to
+# external-secrets/openbao-token. Neither is set in base/deployment.yaml, so the
+# defaults apply and this Role matches. If either is ever overridden, this Role
+# must be updated in lockstep or the re-mint will 403.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-console-eso-token
+  namespace: external-secrets
+  labels:
+    app: infraweaver-console
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openbao-token"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-console-eso-token
+  namespace: external-secrets
+  labels:
+    app: infraweaver-console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-console-eso-token
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-console
+    namespace: infraweaver-console
+---
 # Role: full WordPress Manager addon resource management in the `wordpress`
-# namespace. The cluster-wide infraweaver-console-reader only grants read on
-# networkpolicies/ingressroutes and lacks `update` on PVCs, so site provisioning
-# (createSite/deleteSite + plugin wp-cli exec) needs create/update/delete here.
+# namespace. Every WordPress site lives here — provisioning separates sites by
+# resource-name prefix and labels, never by namespace — so this one Role covers
+# createSite/deleteSite, the blue/green updater, sandboxes, and all wp-cli exec.
+#
+# This Role is where the console's WordPress `secrets` and `pods/exec` access now
+# lives in full. It is also the only place `pods/exec` carries `create`, which is
+# the verb an exec actually needs.
+#
 # `events` (create/patch) lets the reconcile publish the deduped SsoGateUnavailable
 # Warning Event to the notification bell when a stuck SSO gate defers on Authentik
 # being unavailable (reconcile-alerts.ts); the cluster-wide reader is events:read-only.
-# Scoped to one namespace for least privilege, mirroring the game-hub Role.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -167,3 +437,27 @@ subjects:
   - kind: ServiceAccount
     name: infraweaver-console
     namespace: infraweaver-console
+# ═══════════════════════════════════════════════════════════════════════════
+# RESIDUAL RISK — what this change does NOT fix. Do not read the diff as "the
+# console is now least-privilege".
+#
+#  R1. ConfigMap write is still cluster-wide (see the rule above). ConfigMaps
+#      frequently hold credentials people did not want to call secrets, and a
+#      cluster-wide configmap write can also retarget components that read their
+#      config from one. Blocked on the code having a bounded addon-namespace set.
+#  R2. ArgoCD Application write is still granted. Writing an Application instructs
+#      a cluster-admin controller to apply arbitrary manifests, so this remains an
+#      escalation path to cluster-admin by design. Compensating control is the
+#      route-level cluster:admin gate + audit log, NOT RBAC.
+#  R3. Cluster-wide READ of configmaps, and of Secret *metadata* via the generic
+#      /api/resources reader, is unchanged. The reader strips Secret `data` but
+#      returns ConfigMap `data` in full, and its per-namespace scope check is
+#      inert because SCOPED_ENFORCEMENT is unset. That is an application-layer
+#      fix, not an RBAC one.
+#  R4. Node write (cordon/drain) was ALREADY not granted — `kubectl auth can-i
+#      patch nodes` answered "no" before this change. /api/cluster/drain's cordon
+#      step, createNamespacedPodEviction, cluster-wide service create, job create,
+#      PV delete and velero backup create are all likewise already 403. They are
+#      pre-existing gaps, NOT regressions introduced here; listed so nobody
+#      blames this commit when they surface.
+# ═══════════════════════════════════════════════════════════════════════════

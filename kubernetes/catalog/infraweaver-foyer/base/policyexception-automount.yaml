@@ -1,0 +1,48 @@
+---
+# Kyverno PolicyException for `warn-automount-service-account-token`.
+#
+# That policy (Audit-only) fires on any catalog-app pod with a mounted
+# ServiceAccount token, on the reasonable assumption that a workload which does
+# not call the Kubernetes API should not carry an API credential. Foyer DOES
+# call it — its entire feed is four apiserver reads (see base/rbac.yaml) — so
+# the finding is a false positive and would otherwise sit in the violation
+# stream for ever, which is how real findings get ignored.
+#
+# The exemption is scoped by label to this one workload. It exempts Foyer from
+# the WARNING about holding a token; it exempts nothing about what that token
+# can do, which is bounded by the Role in rbac.yaml to `get` on three named
+# ConfigMaps and `list` on Deployments in one namespace.
+#
+# Both rule names are listed for the reason the console's equivalent file
+# documents: Kyverno AUTOGENs a controller-level variant of a Pod rule, and
+# exempting only the Pod rule leaves the autogen variant raising
+# PolicyViolation events against the Deployment and ReplicaSet.
+#
+# This is a NEW object with a distinct name; the console's
+# `infraweaver-console-automount-token` exception in the same namespace is
+# untouched.
+apiVersion: kyverno.io/v2
+kind: PolicyException
+metadata:
+  name: infraweaver-foyer-automount-token
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+spec:
+  exceptions:
+    - policyName: warn-automount-service-account-token
+      ruleNames:
+        - check-automount-serviceaccount-token
+        - autogen-check-automount-serviceaccount-token
+  match:
+    any:
+      - resources:
+          kinds:
+            - Pod
+            - Deployment
+            - ReplicaSet
+          namespaces:
+            - infraweaver-console
+          selector:
+            matchLabels:
+              app: infraweaver-foyer

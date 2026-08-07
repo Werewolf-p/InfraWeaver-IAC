@@ -24,6 +24,10 @@ spec:
         app: coredns
     spec:
       priorityClassName: platform-critical
+      serviceAccountName: coredns
+      # This CoreDNS serves static zones and forwards; it never calls the
+      # Kubernetes API. See serviceaccount.yaml.
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
       # Spread across nodes for HA
       topologySpreadConstraints:

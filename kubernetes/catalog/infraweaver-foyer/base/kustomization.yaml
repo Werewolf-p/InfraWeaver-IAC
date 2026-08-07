@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Base manifests for infraweaver-foyer — environment-agnostic.
+# Tunable params (image tag, hostname, management CIDR) live in
+# overlays/prod/kustomization.yaml. base/ carries ${VAR} placeholders for OSS
+# forks; ArgoCD renders Kustomize natively with NO envsubst plugin, so every
+# placeholder MUST be overridden by an overlay patch or it reaches the
+# apiserver literally.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - externalsecret.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingressroute.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml
+  - policyexception-automount.yaml

@@ -109,6 +109,11 @@ authentik:
   redis:
     host: "authentik-redis-master"
 
+# Blueprint ConfigMaps mounted into the WORKER pod at
+# /blueprints/mounted/cm-<name>/. This list is the only thing that mounts them:
+# a ConfigMap that exists in the namespace but is missing here is never mounted
+# and never applied — config-as-code in appearance only. Adding a blueprint
+# therefore always means two edits: the manifest, and this list.
 blueprints:
   configMaps:
     - authentik-blueprint-branding
@@ -118,6 +123,40 @@ blueprints:
     - authentik-blueprint-forward-auth
     - authentik-blueprint-invitation-flow
     - authentik-blueprint-recovery-email
+    # ── WP11 / GAP-C5 (manifests/blueprints/) ────────────────────────────────
+    - authentik-blueprint-break-glass      # dormant recovery admin (stage 2)
+    - authentik-blueprint-current-state    # no-op export of the auth path (stage 1)
+    - authentik-blueprint-mfa-enrollment   # validation stage, bound to nothing (stage 3)
+    # ARMED 2026-08-07 — this closes a live hole; it is not an MFA flip.
+    # 13 of 74 Applications had NO policy binding, and an unbound application
+    # admits EVERY authenticated user. Six had a reachable surface; the worst
+    # was `route-truenas`.
+    #
+    # Verified live before arming, because the obvious reading is wrong:
+    #   app `truenas`       -> external_host truenas.example.com      1 binding
+    #   app `route-truenas` -> external_host truenas.int.example.com  0 bindings
+    # Only the .int host has an IngressRoute (traefik, secure-headers +
+    # forward-auth). So the forward-auth challenge on the LIVE TrueNAS admin UI
+    # was answered by the unbound application, and all 7 active users — every
+    # WordPress-site and Nextcloud account — passed it. The infra-truenas group
+    # that appears to gate storage administration was gating a hostname that
+    # has no route.
+    #
+    # Lockout risk was CHECKED, not assumed: infra-truenas, infra-proxmox and
+    # infra-containers all have ZERO members, so binding on group membership
+    # alone would have locked everyone out. Each of these policies is
+    # `platform-admins OR infra-<x>`, and policy-admins-only is
+    # `is_superuser OR platform-admins`; platform-admins has 1 member. Admin
+    # access is preserved; the other six users lose access they should never
+    # have had.
+    - authentik-blueprint-app-access-backfill
+    # NOT listed, deliberately — these are the MFA enforcement flips, and they
+    # can lock the sole administrator out of every admin surface at once.
+    # Adding a name here is the second of two gates a human must open, and
+    # stage 4 additionally requires break-glass to have been ARMED AND
+    # EXERCISED first. See manifests/blueprints/README.md.
+    #   - authentik-blueprint-mfa-required-admins    (stage 4)
+    #   - authentik-blueprint-mfa-required-all       (stage 5)
 
 postgresql:
   enabled: true

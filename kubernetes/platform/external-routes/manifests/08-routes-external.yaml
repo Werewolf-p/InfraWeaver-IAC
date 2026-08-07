@@ -19,8 +19,27 @@ spec:
     # "Registration not allowed" at the origin.
     - match: Host(`bitwarden.example.com`)
       kind: Rule
+      #
+      # Rate limiting only — NO edge block and NO forward-auth. The stopgap edge
+      # rule was removed on purpose in db3cab4 because it broke invite
+      # acceptance (the invite token travels in the request body, so a
+      # path/method rule cannot tell an invite from a self-registration), and
+      # registration is now shut off at the origin in Vaultwarden's config.json.
+      # Do not re-add an edge block here. forward-auth is equally out: Bitwarden
+      # mobile and desktop clients cannot complete a browser SSO redirect.
+      #
+      # rate-limit-public-cf (the Cloudflare variant): bitwarden.example.com
+      # resolves to 188.114.96.0/97.0, i.e. it IS Cloudflare-proxied, so
+      # Traefik's connection source is an edge IP and the plain rate-limit-public
+      # would put the entire internet in one shared bucket. Bucketing on
+      # Cf-Connecting-IP gives a real per-client limit. 100/s burst 200 leaves
+      # scheduled mobile vault syncs and their icon fetches untouched while
+      # capping credential-stuffing against /identity/connect/token; see the
+      # header of core/traefik/manifests/middleware-rate-limit.yaml.
       middlewares:
         - name: secure-headers
+          namespace: traefik
+        - name: rate-limit-public-cf
           namespace: traefik
       services:
         - name: bm-bitwarden

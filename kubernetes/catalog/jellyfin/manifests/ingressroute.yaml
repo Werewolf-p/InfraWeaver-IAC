@@ -30,7 +30,30 @@ spec:
     - match: Host(`jellyfin.int.${BASE_DOMAIN}`)
       kind: Rule
       # No forward-auth middleware — native clients depend on Jellyfin's own
-      # authentication, not a redirect-based SSO gate.
+      # authentication, not a redirect-based SSO gate. See the AUTH DECISION
+      # above; do not "harden" this by adding forward-auth.
+      #
+      # secure-headers (traefik ns; cross-namespace refs are enabled via
+      # providers.kubernetesCRD.allowCrossNamespace=true) is header-only and
+      # therefore safe for native clients: iOS/Android/tvOS/Roku/WebOS apps and
+      # DLNA never parse X-Frame-Options / Permissions-Policy / HSTS. It closes
+      # GAP-H6 (this route previously sent no security headers at all).
+      # Permissions-Policy only names geolocation/microphone/camera/payment/usb/
+      # bluetooth — fullscreen and encrypted-media are left at their defaults, so
+      # fullscreen playback and Widevine DRM are unaffected.
+      #
+      # rate-limit-public (NOT the -cf variant): jellyfin.int.${BASE_DOMAIN}
+      # resolves to the origin 203.0.113.10 — the *.int wildcard is DNS-only, so
+      # there is no Cf-Connecting-IP header to bucket on and Traefik's default
+      # remote-address criterion is the true client IP (externalTrafficPolicy:
+      # Local). 100/s with burst 200 per IP is sized for Range-request direct
+      # play, poster-grid loads, and a whole household behind one NAT address;
+      # see the header of core/traefik/manifests/middleware-rate-limit.yaml.
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: rate-limit-public
+          namespace: traefik
       services:
         - name: jellyfin
           port: 8096

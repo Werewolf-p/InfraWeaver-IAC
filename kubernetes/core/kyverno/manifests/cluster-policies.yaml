@@ -14,7 +14,7 @@ metadata:
       Containers must not run as root (UID 0). Pods must set runAsNonRoot: true
       or specify a non-zero runAsUser. Reduces blast radius of container escapes.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   admission: true
   background: true
   rules:
@@ -27,6 +27,43 @@ spec:
               namespaceSelector:
                 matchLabels:
                   infraweaver.io/type: catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Containers must set runAsNonRoot: true or runAsUser > 0."
         pattern:
@@ -88,7 +125,7 @@ metadata:
       Privileged containers share the host's root namespace and have full
       access to host resources. This is a critical security risk.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   admission: true
   background: true
   rules:
@@ -101,6 +138,43 @@ spec:
               namespaceSelector:
                 matchLabels:
                   infraweaver.io/type: catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Containers must not set privileged: true."
         pattern:
@@ -125,7 +199,7 @@ metadata:
       Containers should drop all Linux capabilities and only add back what
       they strictly need. This follows the principle of least privilege.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   admission: true
   background: true
   rules:
@@ -138,6 +212,43 @@ spec:
               namespaceSelector:
                 matchLabels:
                   infraweaver.io/type: catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Containers should drop ALL capabilities (securityContext.capabilities.drop: [ALL])."
         pattern:
@@ -161,7 +272,7 @@ metadata:
       Pods must not use host PID, IPC, or network namespaces — these allow
       direct access to host-level resources.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   admission: true
   background: true
   rules:
@@ -174,6 +285,43 @@ spec:
               namespaceSelector:
                 matchLabels:
                   infraweaver.io/type: catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Pods must not use hostPID, hostIPC, or hostNetwork."
         pattern:
@@ -195,7 +343,7 @@ metadata:
       Containers should set allowPrivilegeEscalation: false so a compromised process
       cannot gain additional privileges via setuid binaries or file capabilities.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   admission: true
   background: true
   rules:
@@ -208,6 +356,43 @@ spec:
               namespaceSelector:
                 matchLabels:
                   infraweaver.io/type: catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Containers should set allowPrivilegeEscalation: false."
         pattern:
@@ -234,7 +419,7 @@ metadata:
       container escape and node-compromise vector. This audit policy highlights any
       catalog workload still relying on hostPath mounts.
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   admission: true
   background: true
   rules:
@@ -247,6 +432,43 @@ spec:
               namespaceSelector:
                 matchLabels:
                   infraweaver.io/type: catalog-app
+      exclude:
+        any:
+          # ── Belt-and-braces, NOT the primary scope control ──────────────────
+          # The `match` above already restricts this rule to namespaces labelled
+          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
+          # and `infraweaver-console`. Verified 2026-08-07: every namespace
+          # listed here produces ZERO results under all eight of these policies,
+          # because none of them carries that label.
+          #
+          # The list is here anyway for one measured reason. kyverno/values.yaml
+          # declares `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
+          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
+          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
+          # only the chart defaults: resourceFilters exclude kyverno,
+          # kube-system, kube-public and kube-node-lease, and the webhook
+          # namespaceSelector excludes kube-system and kyverno. So the
+          # namespace protection the values file appears to provide does not
+          # exist, and a policy in Enforce cannot rely on it.
+          #
+          # These are the namespaces whose pods legitimately run privileged,
+          # host-networked or hostPath-mounted. If one of them is ever labelled
+          # catalog-app -- which is now the documented opt-in for this policy
+          # set -- this block is what stops admission from being blocked for
+          # cilium, longhorn, buildkitd, node-exporter and friends.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
       validate:
         message: "Pods should not use hostPath volumes."
         pattern:

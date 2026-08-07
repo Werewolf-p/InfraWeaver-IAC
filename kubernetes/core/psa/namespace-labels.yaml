@@ -15,6 +15,66 @@
 #     Individual apps must NOT include Namespace resources with PSA labels.
 #     They rely on CreateNamespace=true to auto-create their namespace; PSA is set here.
 #     This prevents SSA ownership ping-pong between apps managing the same Namespace.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# WHY THIS FILE STILL DOES NOT COVER EVERY NAMESPACE (measured 2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+# The rule above is aspirational, not true. Eight namespaces are declared as
+# `kind: Namespace` by OTHER ArgoCD Applications, several of them carrying
+# their own PSA labels. That matters because of how ArgoCD does server-side
+# apply:
+#
+#   kubectl get ns <n> -o json --show-managed-fields | jq '.metadata.managedFields'
+#
+# returns the SAME field manager -- `argocd-controller` -- for every
+# Application. Under SSA a manager owns exactly one fieldset per object, so if
+# two Applications apply the same Namespace with different label sets, each
+# sync replaces the other's fieldset and prunes the labels it no longer
+# declares. The two apps then take turns undoing each other.
+#
+# Measured owners, and what this file therefore must NOT declare:
+#
+#   ns              argocd-controller (Apply) owns          declared by
+#   ------------    ------------------------------------    ---------------------------
+#   gatus           app.kubernetes.io/name, infraweaver.io/type
+#                                                           catalog/gatus/manifests
+#   jellyfin        infraweaver.io/source, PSA x3           catalog/jellyfin/manifests
+#   nextcloud       infraweaver.io/source, PSA x3           catalog/nextcloud/manifests
+#   game-hub        app.kubernetes.io/part-of               catalog/game-hub
+#   game-servers    app.kubernetes.io/managed-by            catalog/infraweaver-console/base
+#   n8n-prod        kubernetes.io/metadata.name             platform/n8n/manifests
+#   cilium-secrets  app.kubernetes.io/part-of               core-cilium (chart-rendered)
+#   private-test /  app.kubernetes.io/part-of, PSA          private-apps/*/k8s
+#     tradesphere
+#
+# `gatus` is the sharp edge. Adding it here with only PSA labels would prune
+# `infraweaver.io/type: catalog-app` off it -- and that label is the
+# `namespaceSelector` on EVERY policy in core/kyverno/manifests/. Stripping it
+# would silently switch off the whole Kyverno security ratchet for the only
+# namespace it still covers besides infraweaver-console. Do not add gatus here.
+#
+# Closing GAP-M3 properly means REMOVING the PSA labels from those app
+# manifests, not duplicating them here. Those files are outside this package's
+# ownership; see the WP4 report.
+#
+# Namespaces added below were each checked to have no competing
+# `argocd-controller (Apply)` owner: `default`, `kube-public`, `kube-node-lease`
+# are owned by kube-apiserver (Update); `bootstrap` and `crds` come from
+# CreateNamespace=true with `managedNamespaceMetadata: none`, which creates the
+# namespace once and never re-applies it; `dns-system` is applied by apps-dns
+# with ServerSideApply=false, so it lands as an Update and shares no fieldset;
+# `infraweaver`, `velero` and `apps-grafana` are owned by kubectl (Update).
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# ON `infraweaver.io/type: catalog-app`
+# ═══════════════════════════════════════════════════════════════════════════
+# That label is not descriptive metadata -- it is the match set for every
+# ClusterPolicy in core/kyverno/manifests/, several of which are Enforce.
+# Adding it to a namespace opts that namespace into admission-time blocking.
+# None of the namespaces added below carry it, deliberately: they hold
+# platform/system components (or nothing at all), have no PolicyReport history
+# under those policies, and several would immediately violate them.
+# Only `infraweaver-console` carries it in this file, unchanged.
 
 # ── Host-level infra: privileged ────────────────────────────────────────────
 apiVersion: v1
@@ -184,3 +244,127 @@ metadata:
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
     infraweaver.io/component: buildkit
+---
+# ═════════════════════════════════════════════════════════════════════════════
+# Namespaces below were previously carrying NO PSA labels at all and were
+# inheriting the cluster-wide AdmissionConfiguration default. Verified via
+# talosctl on 2026-08-07, that default is:
+#     enforce: baseline, audit: restricted, warn: restricted   (exempt: kube-system)
+# so the levels declared below are EXACTLY what these namespaces already
+# resolve to today. This block makes the level explicit and reviewable
+# (CIS 5.2.x wants it declared, not inherited); it changes nothing at
+# admission. No namespace is tightened in this pass.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── Empty / structural namespaces (0 pods, verified) ─────────────────────────
+# `default` holds no workloads; it is the fallback destination for the
+# core-psa, core-limitranges, core-local-path and catalog-nas-shares
+# Applications, none of which create pods in it. Labeling it explicitly means a
+# pod that lands here by accident is admitted at baseline rather than by
+# whatever the cluster default happens to be at the time.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Holds ArgoCD Application objects only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bootstrap
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Holds CustomResourceDefinitions only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crds
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Legacy/reserved namespace, currently empty.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infraweaver
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ── Kubernetes-owned namespaces (not exempt from PSA; kube-system is) ────────
+# The cluster AdmissionConfiguration exempts kube-system ONLY, so these two
+# already enforce baseline. Both are empty of pods.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-public
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-node-lease
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ── Cluster DNS ──────────────────────────────────────────────────────────────
+# Verified the running coredns Deployment passes baseline before labeling:
+#   hostNetwork/hostPID/hostIPC all false, volumes: configMap only, no hostPort,
+#   securityContext { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+#   capabilities: { drop: [ALL], add: [NET_BIND_SERVICE] } }.
+# NET_BIND_SERVICE is inside both the baseline and restricted capability sets.
+# It will WARN at restricted (no runAsNonRoot, no seccompProfile) -- that is the
+# intended "drift is visible without breaking anything" posture used above, and
+# warn/audit are non-blocking.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dns-system
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ── Backup object store ──────────────────────────────────────────────────────
+# Velero itself is not deployed (GAP-C2); this namespace currently runs only
+# minio-velero. Verified both of its pods pass baseline before labeling:
+# hostNetwork false, volumes pvc + projected, no hostPort, containers set
+# allowPrivilegeEscalation: false and capabilities.drop: [ALL].
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ── Manually-labeled leftover, brought under GitOps ──────────────────────────
+# apps-grafana carries privileged PSA applied by hand (field manager
+# `kubectl-label`, an Update op with no ArgoCD Application behind it) and has
+# had 0 pods since. The level is reproduced here UNCHANGED so this commit stays
+# a no-op; tightening it to baseline is a separate, testable change and is
+# deliberately not bundled into the ratchet.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps-grafana
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

@@ -19,12 +19,44 @@
 # Secrets: store Discord webhook URL in OpenBao at:
 #   bao kv put secret/platform/falco discord_webhook="https://discord.com/api/webhooks/..."
 
+# ── Driver (the reason Falco is still not running) ──────────────────────────
+# WAS: kind: ebpf — the CLASSIC eBPF probe, which makes falco-driver-loader ask
+# falcoctl for a prebuilt `.o` compiled against the running kernel. No such
+# artifact exists (or ever will) for `6.18.24-talos`, which is exactly the
+# recorded failure: "unable to find a prebuilt driver".
+#
+# NOW: modern_ebpf — a CO-RE probe compiled into the Falco binary itself. It
+# needs no prebuilt artifact and no compiler; it needs BTF, which is present:
+#   talosctl -n 10.0.0.90 ls -l /sys/kernel/btf/vmlinux  → 8.7 MB   (2026-08-07)
+#   talosctl -n 10.0.0.92 ls -l /sys/kernel/btf/vmlinux  → 8.7 MB
+# Kernel 6.18.24-talos is far above modern_ebpf's 5.8 floor.
+#
+# ⚠ This is a CORRECTION, NOT A VERIFICATION. Nothing here proves the probe
+# actually attaches on this kernel — that requires starting a pod, and this work
+# package runs no mutating commands. The earlier note claiming "modern_ebpf
+# scap_init fails on Talos 6.18.x" is retained as a hypothesis to disprove: it
+# was written against an older Falco, and the failure it describes is also the
+# signature of the classic-eBPF loader. See README.md for the canary procedure
+# that must be executed on ONE node before this is trusted.
 driver:
-  kind: ebpf   # Use classic eBPF probe — modern_ebpf scap_init fails on Talos 6.18.x
+  kind: modern_ebpf
+  modernEbpf:
+    # 4 = 8 MB per ring buffer, one buffer per 2 CPUs → ~24 MB on a 6-vCPU node.
+    bufSizePreset: 4
+    cpusForEachBuffer: 2
+    dropFailedExit: false
+  loader:
+    # modern_ebpf needs no driver artifact, so the falco-driver-loader init
+    # container has nothing to do. Leaving it on is what produced the crash loop.
+    enabled: false
 
-# Disable Falco DaemonSet on all nodes — no prebuilt eBPF driver available for
-# Talos kernel 6.18.24-talos. Pods crash with "unable to find a prebuilt driver".
-# Re-enable by removing this nodeSelector once driver issue is resolved.
+# ── Canary gate — LOAD-BEARING, DO NOT REMOVE CASUALLY ──────────────────────
+# Falco is a privileged DaemonSet. Without this selector it lands on all three
+# converged control-plane nodes at once. Verified 2026-08-07:
+#   kubectl get nodes -l falco-enabled=true  → No resources found
+# so nothing schedules until an operator deliberately labels exactly one node.
+# Removing this line is the fleet rollout; do it only after README.md's canary
+# stage passes. Resource cost per node, and why that matters here, is in README.md.
 nodeSelector:
   falco-enabled: "true"
 
@@ -58,6 +90,11 @@ falco:
 
 falcoctl:
   artifact:
+    # Rules only. With modern_ebpf there is no driver artifact to fetch, so
+    # falcoctl's job here is limited to pulling/refreshing the ruleset — which
+    # means it needs egress to the OCI registry. The falco namespace has
+    # default-deny ingress but no egress policy today, so this works; if WP6 adds
+    # egress deny for `falco`, this is the flow that must be allowed.
     install:
       enabled: true
     follow:
@@ -101,6 +138,11 @@ falcosidekick:
       drop:
         - ALL
 
+# Cost per node, measured against live allocation on 2026-08-07 (see README.md):
+#   requests  256Mi / 100m   → cp1 goes 92.1% → 93.4% of allocatable memory
+#   limits   1024Mi / 1000m  → cp1 179% → 185%, cp3 209% → 225% overcommitted
+# The limit is deliberately below the chart default (512Mi req / 1Gi limit): on
+# this cluster the request is the scarce resource, not the limit.
 resources:
   requests:
     memory: 256Mi

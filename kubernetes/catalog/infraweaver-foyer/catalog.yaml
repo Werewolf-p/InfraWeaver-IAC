@@ -1,0 +1,47 @@
+name: infraweaver-foyer
+description: "InfraWeaver Foyer — customer-facing WordPress SSO portal"
+
+# Runs IN the console's namespace, not one of its own. This is a deliberate,
+# security-driven choice, not a shortcut — see README.md §"Why no dedicated
+# namespace". In one line: PSA levels and the Kyverno `infraweaver.io/type:
+# catalog-app` selector are set EXCLUSIVELY in
+# kubernetes/core/psa/namespace-labels.yaml, a file this package must not edit,
+# so a namespace created here would be born with NO Pod Security enforcement
+# and OUTSIDE every Kyverno policy's namespaceSelector.
+namespace: infraweaver-console
+
+ingressroute:
+  # PUBLIC host on the apex wildcard, not the *.int wildcard. Foyer is the
+  # surface a WordPress client signs in to from the open internet.
+  host: portal.${BASE_DOMAIN}
+  entrypoint: websecure
+
+secrets:
+  path: platform/infraweaver-foyer
+  keys:
+    # Authentik OAuth2 client id for Foyer's own provider. Declared static so a
+    # fresh install seeds it deterministically and the ExternalSecret (which
+    # uses deletionPolicy: Retain) never aborts the whole secret over a missing
+    # property — the failure that reads as a Degraded ArgoCD app while every
+    # individual resource reports healthy.
+    oidc-client-id:
+      type: static
+      value: "infraweaver-foyer"
+    # ⚠ The ONE value that cannot be generated: Authentik mints it when the
+    # provider is created and the two must match byte-for-byte. seed-catalog-
+    # secrets.sh will generate a random placeholder so the Retain sync
+    # succeeds; an operator MUST then overwrite it with the real value:
+    #   bao kv patch secret/platform/infraweaver-foyer oidc-client-secret=<value>
+    # Until it is overwritten every sign-in fails at the token exchange.
+    oidc-client-secret:
+      type: password
+      length: 64
+    # Auth.js v5 session/JWT signing key (exported to the pod as AUTH_SECRET
+    # and NEXTAUTH_SECRET). MUST be distinct from the console's — a shared
+    # signing key would make a token minted for one app presentable to the
+    # other.
+    nextauth-secret:
+      type: password
+      length: 64
+
+replicas: "2"

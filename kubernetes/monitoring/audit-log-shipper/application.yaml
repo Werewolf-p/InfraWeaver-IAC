@@ -1,0 +1,15 @@
+# audit-log-shipper — ships the Kubernetes API server audit log into Loki.
+#
+# Consumed by the `platform-monitoring` ApplicationSet
+# (kubernetes/bootstrap/appset-core-monitoring.yaml), whose git generator globs
+# `kubernetes/monitoring/*/application.yaml`. The generated Application is named
+# `monitoring-audit-log-shipper`. No bootstrap file is needed.
+#
+# Chart is PINNED, not a floating range: this is a privileged hostPath DaemonSet
+# that reads the audit trail. A range would let an unrelated chart release change
+# its mounts or security context without a PR.
+repoURL: https://grafana.github.io/helm-charts
+targetRevision: "6.17.1"
+chart: promtail
+releaseName: audit-log-shipper
+namespace: monitoring

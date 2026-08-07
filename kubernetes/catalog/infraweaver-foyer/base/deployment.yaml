@@ -1,0 +1,227 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraweaver-foyer
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+spec:
+  # Two replicas, no HPA. The console omits `replicas` because an HPA owns the
+  # count and the two would fight; Foyer has no HPA, so ArgoCD owns it here.
+  # Two (not one) because `maxUnavailable: 0` needs a surviving pod to keep the
+  # portal answering through a rollout or a node drain, and because this is a
+  # customer-facing surface where a 30-second gap is a support ticket.
+  replicas: 2
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  minReadySeconds: 15
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: infraweaver-foyer
+  template:
+    metadata:
+      labels:
+        app: infraweaver-foyer
+    spec:
+      # Deliberately NOT platform-high. The console is platform-high because
+      # losing it means losing the operator's ability to fix the cluster; the
+      # customer portal is important but must not evict the tool you fix things
+      # with. Unset = the cluster default class.
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: infraweaver-foyer
+      # Required — see serviceaccount.yaml. Foyer's whole feed comes from four
+      # apiserver reads, so the projected token is load-bearing, not incidental.
+      # The mitigation is the bounded Role in rbac.yaml, not a missing token.
+      automountServiceAccountToken: true
+      # Pod-level baseline. The container securityContext below is what PSA and
+      # Kyverno actually evaluate per-container; this sets the pod-scoped half
+      # (seccomp + the non-root floor) so a future sidecar cannot inherit less.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # The image lives on the in-cluster Zot registry. The pull secret is the
+      # console package's `registry-pull-secret` (ESO-synced) — one of the
+      # concrete benefits of sharing the namespace: a dedicated namespace would
+      # need its own copy of that ExternalSecret. Foyer does NOT declare that
+      # Secret, it only references it, so there is no shared-resource conflict.
+      imagePullSecrets:
+        - name: registry-pull-secret
+      # Keep the two replicas off one node so a single node loss cannot take the
+      # portal down. ScheduleAnyway (not DoNotSchedule): the cluster is tight
+      # (cp1 at 92% memory requested), and a portal on one node beats a portal
+      # that will not schedule.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: infraweaver-foyer
+      containers:
+        - name: foyer
+          # Tag intentionally omitted here — overlays/prod/kustomization.yaml is
+          # the single source of truth for the image tag, exactly as it is for
+          # the console. ${BASE_DOMAIN} is a placeholder for OSS forks; the prod
+          # overlay bakes the concrete registry host (ArgoCD renders Kustomize
+          # natively, with no envsubst plugin, so base/ placeholders MUST be
+          # overridden by the overlay or they reach the apiserver literally).
+          image: registry.int.${BASE_DOMAIN}/infraweaver-foyer
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            # Next.js standalone reads both of these. The console achieves the
+            # same thing with `command: ["sh","-c","HOSTNAME=0.0.0.0 node
+            # server.js"]`; setting env instead keeps the image's own CMD
+            # authoritative and avoids wrapping the app in a shell that would
+            # swallow signals.
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3000"
+            - name: NODE_ENV
+              value: production
+            # ── Deployment facts, all server-side ────────────────────────────
+            # Foyer has NO NEXT_PUBLIC_* variable of any kind (next.config.js
+            # and src/lib/env.ts both document why): one image stays portable
+            # across forks and the build artefact discloses nothing about the
+            # fleet it will serve. Everything below is read at request time.
+            - name: BASE_DOMAIN
+              value: ${BASE_DOMAIN}
+            # Namespace holding the WordPress site Deployments (src/lib/env.ts:13).
+            - name: WORDPRESS_NAMESPACE
+              value: wordpress
+            # Namespace holding the three ConfigMaps Foyer may read (env.ts:16).
+            # Same namespace Foyer itself runs in — see README.
+            - name: CONSOLE_NAMESPACE
+              value: infraweaver-console
+            # Host-building label default, matched to the console's own
+            # WORDPRESS_INTERNAL_SUBDOMAIN so both derive identical hosts.
+            - name: WORDPRESS_INTERNAL_SUBDOMAIN
+              value: int
+            # ── Auth.js / Authentik OIDC ─────────────────────────────────────
+            - name: AUTH_URL
+              value: https://portal.${BASE_DOMAIN}/api/auth
+            - name: NEXTAUTH_URL
+              value: https://portal.${BASE_DOMAIN}
+            # Per-application issuer path. auth-callbacks.ts derives the token
+            # and userinfo endpoints from this URL's ORIGIN, not from the path
+            # (Authentik's OIDC endpoints live at the auth-server root — the
+            # trap that produced a 404 userinfo in the console).
+            - name: AUTHENTIK_ISSUER
+              value: https://auth.${BASE_DOMAIN}/application/o/infraweaver-foyer/
+            - name: AUTHENTIK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-foyer-secret
+                  key: oidc-client-id
+            - name: AUTHENTIK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-foyer-secret
+                  key: oidc-client-secret
+            # Auth.js v5 reads AUTH_SECRET from the environment itself and falls
+            # back to NEXTAUTH_SECRET. Both are supplied because the app code
+            # never references either name, so a rename in the library would
+            # otherwise be a silent total sign-in outage.
+            - name: AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-foyer-secret
+                  key: nextauth-secret
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraweaver-foyer-secret
+                  key: nextauth-secret
+          # ── Resources ──────────────────────────────────────────────────────
+          # Requests are what the scheduler reserves; see README §Capacity for
+          # the arithmetic against live node allocation. Limits are set on both
+          # CPU and memory because Kyverno `require-resource-limits` checks for
+          # both, while `require-memory-request-and-limit` checks requests.cpu,
+          # requests.memory and limits.memory. Memory burst ratio 384/128 = 3x,
+          # inside Kyverno's 8x ceiling and the namespace LimitRange's 10x; the
+          # 384Mi limit is inside that LimitRange's 2Gi max and the 300m CPU
+          # limit inside its 2-core max.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 384Mi
+          # ── Probes ─────────────────────────────────────────────────────────
+          # Target is /signin, chosen over the obvious candidates for one
+          # reason: it must not couple pod health to a dependency the app is
+          # designed to survive. /signin is force-dynamic, renders server-side,
+          # and touches NEITHER the apiserver NOR Authentik — so an apiserver
+          # blip degrades the feed (by design: portal-config.ts and
+          # snapshots.ts both fail soft) without marking every pod Unready and
+          # taking the whole portal offline. /api/my-sites would be wrong twice
+          # over: it reads the cluster AND is per-user rate limited.
+          #
+          # (The console probes /api/ping. Foyer has no such route — its only
+          # routes are /, /signin, /go/[site], /api/my-sites and
+          # /api/auth/[...nextauth]. Adding a ping route is a reasonable
+          # follow-up in the app repo; until then /signin is the honest target.)
+          startupProbe:
+            httpGet:
+              path: /signin
+              port: 3000
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30 # up to 150s for a cold Next.js start
+          readinessProbe:
+            httpGet:
+              path: /signin
+              port: 3000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /signin
+              port: 3000
+            periodSeconds: 30
+            timeoutSeconds: 5
+            # Deliberately slack: a wedged node process must restart, but a
+            # momentarily slow render must not turn a busy pod into a crash
+            # loop. 6 x 30s = three minutes of sustained failure.
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            # 1001 matches the `nextjs` user baked into Dockerfile.prebuilt
+            # (adduser --uid 1001). A mismatch here would make every write to
+            # the emptyDirs below fail with EACCES.
+            runAsUser: 1001
+            runAsGroup: 1001
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            # readOnlyRootFilesystem is only shippable if the two paths Next.js
+            # genuinely writes to are writable volumes.
+            - name: next-cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: next-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

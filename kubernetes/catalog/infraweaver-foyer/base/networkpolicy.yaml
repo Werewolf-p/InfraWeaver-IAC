@@ -1,0 +1,125 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Foyer network posture: default-deny both directions, then exactly the four
+# things the app provably needs.
+#
+# Scoped to `podSelector: app=infraweaver-foyer` rather than `{}`. A namespace-
+# wide `podSelector: {}` policy here would also apply to the console's pods, in
+# a namespace whose console package already owns its own default-deny-ingress
+# — two packages writing overlapping cluster-wide selectors in one namespace is
+# how you get a policy nobody can reason about. Every rule below names Foyer.
+#
+# NOTE on ports: a NetworkPolicy `ports[].port` matches the DESTINATION POD
+# port, after Service translation — never the Service front port. That is what
+# scripts/validate-netpol-ports.sh gates, and why the ingress rule says 3000
+# (the containerPort) rather than anything else.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infraweaver-foyer-default-deny
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-foyer
+  policyTypes:
+    - Ingress
+    - Egress
+  # No rules: this object exists solely to put Foyer's pods into deny-by-default
+  # in BOTH directions. The allow-list below is additive. Keeping the deny and
+  # the allows in separate objects means deleting the allow policy fails closed
+  # (portal unreachable) rather than open (portal unrestricted).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infraweaver-foyer
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+spec:
+  podSelector:
+    matchLabels:
+      app: infraweaver-foyer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The ONLY way in: Traefik. There is no in-cluster consumer of Foyer, no
+    # metrics scrape, and no console → foyer call — the data flows the other
+    # way (console writes ConfigMaps, Foyer reads them through the apiserver).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - port: 3000
+          protocol: TCP
+  egress:
+    # 1. DNS. Everything else here is a name that has to resolve first.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # 2. Kubernetes apiserver — the four reads in rbac.yaml. Two paths because
+    #    both are real on this cluster: the in-cluster Service ClusterIP
+    #    (10.96.0.1:443, what loadFromCluster() dials) and the control-plane
+    #    nodes on the management subnet (6443), which is the path taken when
+    #    the client resolves an endpoint rather than the Service VIP. The
+    #    ${MGMT_SUBNET_CIDR} placeholder is replaced concretely in
+    #    overlays/prod (ArgoCD does not envsubst).
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - port: 443
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: ${MGMT_SUBNET_CIDR}
+      ports:
+        - port: 6443
+          protocol: TCP
+    # 3. Authentik, in-cluster. authentik-server listens on 9000 (http) and
+    #    9443 (https) — NOT 80/443. Allowing the Service ports here instead of
+    #    the pod ports is precisely the bug that once broke every SSO
+    #    front-channel login on this cluster, so both real pod ports are named.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: authentik
+      ports:
+        - port: 9000
+          protocol: TCP
+        - port: 9443
+          protocol: TCP
+    # 4. Public HTTPS, RFC1918 excluded. This is Foyer's ONLY egress to the
+    #    internet and it exists for exactly one caller: idpFetch() in
+    #    auth-callbacks.ts, which reaches AUTHENTIK_ISSUER
+    #    (https://auth.${BASE_DOMAIN}/…) by its PUBLIC name for discovery,
+    #    JWKS, token refresh and the 15-minute userinfo group re-verification.
+    #    That name resolves to the public ingress IP and hairpins back in, so
+    #    rule 3 alone does not cover it.
+    #
+    #    Everything private is excluded, so this rule cannot become a path to
+    #    any other cluster or LAN service. Foyer talks to no database, no SMTP,
+    #    no GitHub, no WordPress site — a narrower rule would be better and
+    #    there is nothing left to narrow: no port but 443, no private address.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP

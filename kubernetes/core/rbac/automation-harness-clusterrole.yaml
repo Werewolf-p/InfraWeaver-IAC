@@ -1,0 +1,240 @@
+---
+# ClusterRole: automation-harness
+#
+# GAP-C3 (CIS 5.1.1/5.1.5, SOC2 CC6.1/6.3, ISO A.5.15/A.8.2).
+#
+# Replaces the standing `cluster-admin` grant held by ServiceAccount
+# `infraweaver-system/claude-platform-owner`, which was created outside GitOps on
+# 2026-06-29 and carries a non-expiring static `kubernetes.io/service-account-token`
+# Secret. See ./README.md for the retirement ordering and the token-minting
+# procedure that replaces that Secret.
+#
+# DESIGN RULE: this role is READ-ONLY except for a single, enumerated write verb
+# (`delete` on `pods`, justified inline below). Every platform change is made by
+# committing to this repository and letting ArgoCD converge — the automation
+# harness never needs to mutate desired state directly.
+#
+# DELIBERATELY ABSENT (each of these would re-create cluster-admin by another
+# route; do not add them without a written risk acceptance in
+# docs/compliance/risk-register.md):
+#   * `secrets` — any verb. `get`/`list` on Secrets returns full plaintext, which
+#     would expose the ArgoCD admin token, OpenBao credentials and every
+#     ESO-materialised secret. Secret *posture* is audited through
+#     `external-secrets.io` objects (which carry references, not values) and
+#     through Kyverno PolicyReports instead.
+#   * `serviceaccounts/token` — `create`. Cluster-scoped token minting would let
+#     this identity mint a token for ANY ServiceAccount, including
+#     `argocd-application-controller` (which holds `*` on `*/*`). It would also
+#     let the identity renew itself forever, defeating the whole point of a
+#     short-lived token. Tokens are minted by the break-glass admin credential.
+#   * `escalate`, `bind`, `impersonate` — no use case; each is a direct path back
+#     to cluster-admin.
+#   * write verbs on `rbac.authorization.k8s.io` — the authz graph is GitOps-owned.
+#   * write verbs on `argoproj.io/applications` — patching an Application's
+#     `repoURL`/`path` executes arbitrary manifests as ArgoCD. GitOps changes go
+#     through pull requests; syncs happen automatically (`selfHeal: true`).
+#   * write verbs on `apps/*` — patching a Deployment's image is arbitrary code
+#     execution inside the cluster.
+#   * `pods/exec`, `pods/attach`, `pods/portforward` — interactive access to
+#     running workloads.
+#   * `create` on `nodes/proxy` — would allow exec/attach through the kubelet API.
+#     Only `get` is granted (see below).
+#
+# NOT RESTATED HERE (already held by every authenticated principal via the
+# built-in `system:discovery` and `system:basic-user` ClusterRoleBindings):
+# API discovery (`/api`, `/apis`) and `selfsubjectaccessreviews` /
+# `selfsubjectrulesreviews` (`kubectl auth can-i`).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: automation-harness
+  labels:
+    app.kubernetes.io/name: automation-harness
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: argocd
+    infraweaver.io/compliance-gap: gap-c3
+rules:
+  # ── READ: core cluster and workload inventory ─────────────────────────────
+  # The floor for the CIS/SOC2/ISO evidence commands in
+  # docs/compliance/ (plan §5): namespace PSA labels, node/kubelet posture,
+  # pod security context, default-ServiceAccount automount (CIS 5.1.5/5.1.6),
+  # LimitRange/ResourceQuota coverage, and PVC/PV inventory for the DR review.
+  #
+  # Note on `serviceaccounts`: reading a ServiceAccount object exposes no
+  # credential — modern Kubernetes does not attach tokens to the SA object. This
+  # is required to audit `automountServiceAccountToken` across all namespaces.
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - nodes
+      - pods
+      - services
+      - configmaps
+      - serviceaccounts
+      - events
+      - persistentvolumes
+      - persistentvolumeclaims
+      - limitranges
+      - resourcequotas
+    verbs: ["get", "list", "watch"]
+
+  # Container logs. Required to evidence CronJob outcomes — the
+  # `longhorn-backup-verifier` finding (GAP-C2) was only visible in job logs.
+  # RESIDUAL RISK: application logs can contain secrets. Accepted; the
+  # alternative is having no evidence of scheduled-job failure at all.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Kubelet read-only configuration (`/api/v1/nodes/<node>/proxy/configz`) for
+  # the CIS 4.x kubelet benchmark. `get` ONLY — `create` on this subresource is
+  # what would permit exec/attach through the kubelet, and is not granted.
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+
+  # ── READ: workload controllers ────────────────────────────────────────────
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: authorization graph (CIS 5.1) ───────────────────────────────────
+  # This is how the standing-cluster-admin finding is re-verified. Read-only:
+  # discovering who holds what is not escalation; changing it would be.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: admission control posture (CIS 1.2.11, 5.2) ─────────────────────
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: network segmentation (CIS 5.3.2, ISO A.8.22) ────────────────────
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies", "ciliumclusterwidenetworkpolicies"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: edge routing and middleware (ISO A.8.20/8.21) ───────────────────
+  # Evidences which public IngressRoutes carry forward-auth / rate-limit /
+  # secure-headers middleware.
+  - apiGroups: ["traefik.io"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - traefikservices
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: GitOps change-management evidence (SOC2 CC8.1) ──────────────────
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets", "appprojects"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: policy engine and its findings (CIS 5.2/5.7) ────────────────────
+  - apiGroups: ["kyverno.io"]
+    resources:
+      - clusterpolicies
+      - policies
+      - policyexceptions
+      - cleanuppolicies
+      - clustercleanuppolicies
+    verbs: ["get", "list", "watch"]
+  # PolicyReports are the pass/fail evidence for the whole policy ratchet.
+  # Both the stable `wgpolicyk8s.io` group and Kyverno's own reporting group are
+  # listed because which one backs `kubectl get polr` varies across Kyverno
+  # releases; missing the backing group silently returns "no resources found".
+  - apiGroups: ["wgpolicyk8s.io"]
+    resources: ["policyreports", "clusterpolicyreports"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["reports.kyverno.io"]
+    resources: ["ephemeralreports", "clusterephemeralreports"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: secrets *pipeline* posture, never secret values (ISO A.8.24) ────
+  # These objects carry references and sync status only.
+  - apiGroups: ["external-secrets.io"]
+    resources:
+      - externalsecrets
+      - clusterexternalsecrets
+      - secretstores
+      - clustersecretstores
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "certificaterequests", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: storage, backup and DR posture (SOC2 A1.2/A1.3, ISO A.8.13) ─────
+  - apiGroups: ["longhorn.io"]
+    resources:
+      - volumes
+      - nodes
+      - backuptargets
+      - backupvolumes
+      - backups
+      - recurringjobs
+      - settings
+      - systembackups
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # ── READ: monitoring and alerting configuration (SOC2 CC7.x) ──────────────
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - prometheuses
+      - prometheusrules
+      - servicemonitors
+      - podmonitors
+      - alertmanagers
+      - alertmanagerconfigs
+    verbs: ["get", "list", "watch"]
+
+  # Live resource usage. Right-sizing requests/limits (GAP-H4) must be driven by
+  # measured usage rather than guesses, on a cluster with a documented history of
+  # control-plane memory pressure.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+
+  # ── READ: cluster liveness endpoints ──────────────────────────────────────
+  - nonResourceURLs: ["/version", "/healthz", "/healthz/*", "/readyz", "/livez"]
+    verbs: ["get"]
+
+  # ── THE ONLY WRITE VERB IN THIS ROLE ──────────────────────────────────────
+  # `delete` on `pods`.
+  #
+  # JUSTIFICATION: the compliance plan's own breakage flag §4.2 requires a
+  # controlled pod restart immediately after a PSA or Kyverno level change, so
+  # that a manifest which no longer admits fails *while an operator is watching*
+  # rather than silently at 03:00 during an unrelated eviction. Deleting a pod is
+  # the least-privilege way to do that: the owning controller recreates it from
+  # the ArgoCD-managed spec, so this grants NO ability to change any workload
+  # definition, image, or security context. The `patch` on Deployments that
+  # `kubectl rollout restart` would need is deliberately NOT granted, because
+  # patching a Deployment is arbitrary code execution.
+  #
+  # RESIDUAL RISK: availability only, and cluster-wide — deleting a `kube-system`
+  # or `longhorn-system` pod causes a brief disruption. RBAC ClusterRoles cannot
+  # exclude namespaces, so this is accepted rather than mitigated. This is the
+  # first grant to remove if the role is tightened further; restarts then require
+  # the break-glass admin credential.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]

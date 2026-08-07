@@ -31,7 +31,21 @@ spec:
         fsGroup: 1000
       containers:
         - name: jellyfin
-          image: lscr.io/linuxserver/jellyfin
+          # Pinned by digest, 2026-08-07. This reference was previously bare
+          # (`lscr.io/linuxserver/jellyfin`, no tag), which Docker resolves as
+          # `:latest` — so every pod restart could silently land a different
+          # Jellyfin build, including a schema-migrating major upgrade, with no
+          # record in git of what was actually running.
+          #
+          # This digest is the image running now (Jellyfin Server 10.11.11,
+          # confirmed via the container's /System/Info/Public endpoint) and was
+          # verified resolvable on lscr.io before committing, so the pin is a
+          # no-op for the running pod.
+          #
+          # To upgrade: pick the new tag from
+          # https://github.com/linuxserver/docker-jellyfin/pkgs/container/jellyfin,
+          # resolve it to a digest, and bump this line — deliberately, in a PR.
+          image: lscr.io/linuxserver/jellyfin@sha256:b8dcc7b71d0ea872b74314da4b995c0cf282b1778438c295996e7be88c70fdda
           env:
             - name: JELLYFIN_PublishedServerUrl
               value: http://192.168.0.5

@@ -10,6 +10,8 @@ on:
       - "kubernetes/**"
       - "scripts/validate-iac.sh"
       - "scripts/validate-netpol-ports.sh"
+      - "scripts/validate-openbao-policy-drift.sh"
+      - "scripts/deploy/bootstrap-openbao.sh"
       - ".github/workflows/validate-iac.yml"
   push:
     branches: [main]
@@ -60,6 +62,13 @@ jobs:
 
       - name: Validate NetworkPolicy ports (pod-port vs Service-port gate)
         run: bash scripts/validate-netpol-ports.sh
+
+      # Static half of the OpenBao policy drift check. CI has no route to the
+      # cluster, so it cannot diff live — but it CAN guarantee the heredocs stay
+      # parseable and well-formed, which is what keeps the live check (run with
+      # --live from an operator host / cron) from silently comparing nothing.
+      - name: Validate OpenBao policy definitions (static drift gate)
+        run: bash scripts/validate-openbao-policy-drift.sh
 
       - name: Validate ESO references
         run: bash scripts/validate-eso-refs.sh || true   # informational until hardened

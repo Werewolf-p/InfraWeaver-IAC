@@ -1,6 +1,17 @@
 global:
   domain: argocd.int.${BASE_DOMAIN}
   priorityClassName: platform-critical
+  # Old ReplicaSets are retained only for `kubectl rollout undo`. The chart
+  # default is 3, and dex alone was carrying 2 dead ReplicaSets from 2026-06-30
+  # whose pod templates declare no resources at all — they are permanent
+  # PolicyReport failures for a spec nothing will ever run again.
+  #
+  # 1 rather than 0: unlike every other app here, ArgoCD cannot roll ITSELF back
+  # through git — if argocd-server is the broken component, there is no
+  # reconcile loop left to apply the revert. One retained ReplicaSet keeps
+  # `kubectl rollout undo` available as break-glass while still discarding the
+  # stale backlog.
+  revisionHistoryLimit: 1
   # repo-server's cmp-envsubst sidecar is a PRIVATE ghcr image
   # (ghcr.io/example-owner/argocd-cmp-tools). Without a pull secret the SA pulls
   # anonymously and ghcr returns 401, leaving repo-server stuck 1/2 ImagePullBackOff.
@@ -35,6 +46,37 @@ controller:
           - key: infraweaver.io/node-class
             operator: In
             values: [standard]
+
+dex:
+  # ── Resources ───────────────────────────────────────────────────────────────
+  # argocd-dex-server was the ONLY ArgoCD component with no resources declared
+  # at all: no requests, no limits. It runs on talos-prod-cp1, the node already
+  # at 92% of allocatable memory requested, so the scheduler was packing that
+  # node as if this pod were free while it actually held 138Mi.
+  #
+  # The values below apply to both the `dex-server` container and the
+  # `copyutil` init container (verified with `helm template`); init requests are
+  # max()'d rather than summed, so the scheduling cost is 64Mi once.
+  #
+  # 256Mi limit = 4x the request, inside the 8x burst ceiling.
+  #
+  # ⚠ THIS POD DOES NOTHING. Its own log says "dex is not configured", and
+  # `dex.config` is absent from argocd-cm — ArgoCD authenticates against
+  # Authentik directly via configs.cm.oidc.config, which does not route through
+  # dex. The correct fix is `enabled: false`, which would delete the Deployment,
+  # both stale ReplicaSets and the Pod (5 PolicyReport results) and hand 138Mi
+  # of real memory back to the most contended node in the cluster. That is NOT
+  # done here because (a) it is a functional change to the login path rather
+  # than a conformance fix, and (b) core-argocd syncs with prune=false, so the
+  # orphaned Deployment would need a manual delete to actually go away. Raise it
+  # as its own change with a login test attached.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
 
 server:
   replicas: 1  # Memory-optimised: 3-node homelab, single replica is sufficient

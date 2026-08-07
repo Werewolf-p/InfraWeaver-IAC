@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: authentik-ldap-outpost
     infraweaver.io/layer: platform
 spec:
-  project: default
+  project: default-restricted
   source:
     repoURL: http://onedev.onedev.svc.cluster.local/InfraWeaver-platform
     targetRevision: main

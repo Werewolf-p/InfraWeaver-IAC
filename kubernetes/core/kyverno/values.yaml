@@ -60,9 +60,9 @@ cleanupController:
       cpu: 50m
       memory: 64Mi
   cleanupJobsImage:
-    registry: docker.io
-    repository: bitnami/kubectl
-    tag: "latest"
+    registry: registry.k8s.io
+    repository: kubectl
+    tag: "v1.35.4"
 
 reportsController:
   replicas: 1
@@ -160,44 +160,65 @@ features:
 # ── Webhook cleanup ───────────────────────────────────────────────────────────
 webhooksCleanupEnabled: true
 
-# ── Override bitnami/kubectl (1.28.5 no longer on DockerHub) ─────────────────
-# Use official registry.k8s.io/kubectl instead across all cleanup jobs.
+# ── kubectl image for all cleanup/webhook jobs ───────────────────────────────
+# NOW ACTUALLY registry.k8s.io — this comment previously claimed the switch had
+# been made while every block below still said `docker.io/bitnami/kubectl:latest`.
+#
+# Two problems with the old value, fixed together on 2026-08-07:
+#
+#  1. `:latest` is a floating tag on jobs that run `kubectl delete` against
+#     cluster-scoped report resources. Whatever Bitnami last pushed became the
+#     binary doing the deleting, unreviewed.
+#  2. It is unpinnable. `docker.io/bitnami/kubectl` no longer publishes version
+#     tags at all — Bitnami moved versioned images to `bitnamilegacy/kubectl`,
+#     which is frozen at 1.33.4 (2025-08). Verified against the Docker Hub tag
+#     API: the only non-digest tag left on bitnami/kubectl is `latest`. So there
+#     was no in-place pin available; the registry had to change.
+#
+# registry.k8s.io/kubectl is the upstream Kubernetes-published image and carries
+# real version tags. v1.35.4 matches this cluster's server version exactly and
+# was verified to exist before committing
+# (digest sha256:e8bc9c71a813d90d5f7689fa57516b2aacd7a02bb9d70d3ab6664ed6d202fc10).
+#
+# Bump this in step with the cluster's Kubernetes version — kubectl supports
+# +/-1 minor, so drifting more than one release behind will eventually break
+# these jobs.
 webhooksCleanup:
   image:
-    registry: docker.io
-    repository: bitnami/kubectl
-    tag: "latest"
+    registry: registry.k8s.io
+    repository: kubectl
+    tag: "v1.35.4"
 
 policyReportsCleanup:
   enabled: false  # Post-upgrade migration hook — not needed for fresh installs
   image:
-    registry: docker.io
-    repository: bitnami/kubectl
-    tag: "latest"
+    registry: registry.k8s.io
+    repository: kubectl
+    tag: "v1.35.4"
 
 cleanupJobs:
   admissionReports:
     image:
-      registry: docker.io
-      repository: bitnami/kubectl
-      tag: "latest"
+      registry: registry.k8s.io
+      repository: kubectl
+      tag: "v1.35.4"
   clusterAdmissionReports:
     image:
-      registry: docker.io
-      repository: bitnami/kubectl
-      tag: "latest"
+      registry: registry.k8s.io
+      repository: kubectl
+      tag: "v1.35.4"
   ephemeralReports:
     image:
-      registry: docker.io
-      repository: bitnami/kubectl
-      tag: "latest"
+      registry: registry.k8s.io
+      repository: kubectl
+      tag: "v1.35.4"
   clusterEphemeralReports:
     image:
-      registry: docker.io
-      repository: bitnami/kubectl
-      tag: "latest"
+      registry: registry.k8s.io
+      repository: kubectl
+      tag: "v1.35.4"
   updateRequests:
     image:
-      registry: docker.io
-      repository: bitnami/kubectl
-      tag: "latest"
+      registry: registry.k8s.io
+      repository: kubectl
+      tag: "v1.35.4"

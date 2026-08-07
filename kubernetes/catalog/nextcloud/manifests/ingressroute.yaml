@@ -23,6 +23,39 @@ spec:
   routes:
     - match: Host(`nextcloud.int.${BASE_DOMAIN}`)
       kind: Rule
+      # secure-headers (traefik ns; cross-namespace refs are enabled via
+      # providers.kubernetesCRD.allowCrossNamespace=true) is header-only, so it
+      # is safe for the sync clients this route exists to serve: the desktop /
+      # iOS / Android clients speak WebDAV and never parse X-Frame-Options,
+      # Permissions-Policy or HSTS. Closes GAP-H6 (this route previously sent no
+      # security headers at all). Still NO forward-auth — see AUTH DECISION above.
+      #
+      # ⚠ Known caveat, browser-only: the shared secure-headers sets
+      # X-Frame-Options: DENY, which is stricter than the SAMEORIGIN Nextcloud
+      # sends itself. DENY blocks same-origin framing too, so any Nextcloud
+      # feature that renders in an iframe (files_pdfviewer; richdocuments /
+      # onlyoffice if they are ever installed — neither is today, the postinstall
+      # Job enables only user_oidc and files_external) would stop rendering, and
+      # Nextcloud's admin "Security & setup warnings" panel expects SAMEORIGIN.
+      # Verify PDF preview after this merges. Remedy if it breaks: give this
+      # route its own headers middleware identical to secure-headers except
+      # X-Frame-Options: SAMEORIGIN — do NOT chain a second headers middleware to
+      # patch the value, because which one wins depends on Traefik's response
+      # modifier ordering and that is not worth depending on.
+      #
+      # rate-limit-public (NOT the -cf variant): nextcloud.int.${BASE_DOMAIN}
+      # resolves to the origin 203.0.113.10 — the *.int wildcard is DNS-only, so
+      # there is no Cf-Connecting-IP header to bucket on and Traefik's default
+      # remote-address criterion is the true client IP (externalTrafficPolicy:
+      # Local). 100/s with burst 200 per IP is sized for the opening salvo of a
+      # large desktop/mobile sync (parallel PROPFIND/PUT/MOVE, chunked uploads)
+      # with every device in a household sharing one NAT address; see the header
+      # of core/traefik/manifests/middleware-rate-limit.yaml.
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+        - name: rate-limit-public
+          namespace: traefik
       services:
         - name: nextcloud
           port: 80

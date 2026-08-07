@@ -1,0 +1,97 @@
+---
+# =============================================================================
+# local-path-provisioner — BROUGHT UNDER GITOPS.
+# =============================================================================
+# This Deployment was NOT in git. It carried
+# `kubectl.kubernetes.io/last-applied-configuration` and no ArgoCD tracking
+# label, i.e. it was applied by hand at cluster build time and has been drifting
+# untracked ever since. The core-local-path-manifests Application existed but
+# only ever managed storageclass-retain.yaml.
+#
+# That is why it failed require-memory-request-and-limit with `resources: {}`
+# and why nothing in the repo could fix it: there was no file to edit. Adding
+# it here lets ArgoCD adopt the existing object (same name/namespace/selector,
+# so this is an adoption, not a replacement) and makes the resource declaration
+# below the source of truth.
+#
+# Everything except `resources` and `revisionHistoryLimit` is reproduced
+# verbatim from the live object as read on 2026-08-07, so adoption is a no-op
+# apart from the two intended changes.
+#
+# The ServiceAccount (local-path-provisioner-service-account), its RBAC and the
+# local-path-config ConfigMap are still unmanaged and referenced by name — they
+# are deliberately NOT added here, so this commit adopts exactly one object.
+#
+# RESTART NOTE: adoption rolls the pod once. local-path-provisioner is only in
+# the path when a PVC is being provisioned or deleted; it holds no data and
+# serves no I/O (volumes are plain node directories), so a restart is invisible
+# to every workload with an already-bound volume.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-path-provisioner
+  namespace: local-path-storage
+spec:
+  replicas: 1
+  # See kubernetes/core/buildkit/buildkit.yaml for the reasoning. The live
+  # object was on the default of 10; rollback for this app is `git revert`,
+  # and core-local-path-manifests syncs with selfHeal=true so a manual
+  # `kubectl rollout undo` would be reverted anyway.
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: local-path-provisioner
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: local-path-provisioner
+    spec:
+      serviceAccountName: local-path-provisioner-service-account
+      containers:
+        - name: local-path-provisioner
+          image: rancher/local-path-provisioner:v0.0.30
+          imagePullPolicy: IfNotPresent
+          command:
+            - local-path-provisioner
+            - --debug
+            - start
+            - --config
+            - /etc/config/config.json
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: CONFIG_MOUNT_PATH
+              value: /etc/config/
+          # Measured 2026-08-07: 1m CPU / 34Mi memory. This is a control-loop
+          # process that wakes up on PVC events and is otherwise idle, so its
+          # footprint is flat and predictable.
+          #
+          # It runs on talos-prod-cp1, which is at 92% of allocatable memory
+          # requested — the tightest node in the cluster. It was previously
+          # requesting NOTHING, so the scheduler treated it as free while it
+          # actually held 34Mi. 64Mi is ~2x measured usage; 128Mi limit is a 2x
+          # burst, far inside the 8x ceiling.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config/
+      volumes:
+        - name: config-volume
+          configMap:
+            name: local-path-config
+            defaultMode: 420

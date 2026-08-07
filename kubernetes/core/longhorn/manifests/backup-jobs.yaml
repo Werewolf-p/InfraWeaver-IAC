@@ -1,11 +1,37 @@
 ---
-# Longhorn RecurringJob — daily backup to TrueNAS NFS for all persistent volumes
-# in the "truenas-backup" group. Any PVC annotated with:
-#   recurring-job-group.longhorn.io/truenas-backup: "enabled"
-# will be included in this backup schedule.
+# Longhorn RecurringJobs — nightly volume backup to the TrueNAS NFS backup target.
 #
-# Prerequisite: Longhorn backupTarget configured to nfs://${TRUENAS_HOST}/mnt/pool/k8s-longhorn-backups
-# TrueNAS NFS share is already configured with network access for ${NODE_SUBNET_CIDR}.
+# Backup target: nfs://10.1.0.135:/mnt/pool/k8s-longhorn-backups
+#   declared in ../values.yaml (resolved literal — that file is rendered by
+#   ArgoCD-native Helm, which does NOT run the envsubst CMP; see the long comment
+#   there). Export verified live 2026-08-07: exists, ACL'd to 10.0.0.0/24.
+#
+# ---------------------------------------------------------------------------
+# GROUP MEMBERSHIP — why every job lists BOTH "default" and "truenas-backup"
+# ---------------------------------------------------------------------------
+# Longhorn auto-labels any volume that has no recurring job of its own with
+#   recurring-job-group.longhorn.io/default: enabled
+# and only the operator/StorageClass ever adds other group labels.
+#
+# MEASURED 2026-08-07 (GAP-C2): all 19 Longhorn volumes carried ONLY the
+# `default` group label. NONE carried `truenas-backup`. Because these jobs were
+# scoped to `truenas-backup` alone, every run logged
+#   "Found 0 volumes with recurring job truenas-backup-daily"
+# and exited 0. A green job that backs up nothing is worse than a red one.
+#
+# The `recurring-job-group.longhorn.io/truenas-backup: enabled` ANNOTATION on a
+# PVC (3 PVCs carry it today) does not propagate to the Longhorn Volume CR —
+# only a StorageClass `recurringJobSelector` parameter or a label written
+# directly onto the Volume does. So `default` is the group that actually
+# describes "every volume in this cluster", which is the correct DR scope here.
+#
+# `truenas-backup` is retained so an explicit opt-in still works and so the
+# existing PVC annotations and scripts/restore-from-truenas.sh keep their meaning.
+#
+# Any PVC that must be EXCLUDED has to be given its own recurring-job group
+# label — do not narrow these jobs back to a single group without first checking
+# `kubectl get volumes.longhorn.io -n longhorn-system --show-labels`.
+# ---------------------------------------------------------------------------
 apiVersion: longhorn.io/v1beta2
 kind: RecurringJob
 metadata:
@@ -16,8 +42,13 @@ spec:
   cron: "0 1 * * *"        # 01:00 nightly
   task: backup
   groups:
+    - default
     - truenas-backup
   retain: 7                 # 7 daily backups per volume
+  # Concurrency 2 deliberately: with allowRecurringJobWhileVolumeDetached=true
+  # (../values.yaml) Longhorn briefly attaches each detached volume to back it
+  # up. 2 at a time keeps that off the critical path on a 3-node converged
+  # cluster with a documented cp3 memory-pressure history.
   concurrency: 2
   labels:
     infraweaver.io/backup: truenas
@@ -33,6 +64,7 @@ spec:
   cron: "0 2 * * 0"        # 02:00 every Sunday
   task: backup
   groups:
+    - default
     - truenas-backup
   retain: 4                 # 4 weekly backups per volume
   concurrency: 2
@@ -40,7 +72,10 @@ spec:
     infraweaver.io/backup: truenas
     infraweaver.io/schedule: weekly
 ---
-# Local snapshot before the NFS backup — allows fast rollback without TrueNAS
+# Local snapshot before the NFS backup — allows fast rollback without TrueNAS.
+# Snapshots are NOT backups: they live on the same Longhorn replicas as the
+# volume and do not survive loss of the node's disk. They exist to make the
+# 01:00 backup incremental and to give a fast in-place rollback path.
 apiVersion: longhorn.io/v1beta2
 kind: RecurringJob
 metadata:
@@ -51,6 +86,7 @@ spec:
   cron: "0 0 * * *"        # midnight, before NFS backup
   task: snapshot
   groups:
+    - default
     - truenas-backup
   retain: 3
   concurrency: 4

@@ -49,6 +49,13 @@ run_iac_validation() {
   if [ -x "$root/scripts/validate-netpol-ports.sh" ]; then
     bash "$root/scripts/validate-netpol-ports.sh" --repo-root "$root" || rc=1
   fi
+  # OpenBao policy heredocs must stay extractable and well-formed, otherwise the
+  # live drift check silently degrades into comparing nothing — and a `bao policy
+  # write` clobber goes unnoticed again (2026-08-06, ~12h of Degraded apps).
+  # Static only: no cluster access, so it is safe and fast on a laptop.
+  if [ -x "$root/scripts/validate-openbao-policy-drift.sh" ]; then
+    bash "$root/scripts/validate-openbao-policy-drift.sh" --repo-root "$root" || rc=1
+  fi
   if [ "$rc" -ne 0 ]; then
     echo "" >&2
     echo "✖ pre-push BLOCKED: IaC validation failed (see above)." >&2

@@ -1,0 +1,228 @@
+---
+# =============================================================================
+# `default` ServiceAccount token automount — CIS 5.1.5 / 5.1.6
+# =============================================================================
+# THIS FILE IS AT ITS AUDIT STAGE. IT REPORTS; IT DOES NOT YET MUTATE.
+# The filename keeps the name the work package assigned it so the eventual
+# mutation lands here and nowhere else. The mutate rule is written out verbatim
+# at the bottom of this file, inactive, with the exact gate it is waiting on.
+#
+# WHY NOT SIMPLY SHIP THE MUTATION IN "AUDIT MODE":
+# there is no such thing. `validationFailureAction` governs validate rules only.
+# A mutate rule has exactly two states -- present and rewriting every matched
+# object at admission, or absent. Shipping it "to observe first" would in fact
+# have flipped token automount off for every namespace on the next pod restart,
+# which is the precise change the staged rollout exists to avoid taking blind.
+# So the observation stage is done with validate rules that produce the same
+# list in PolicyReports, and the mutation is gated behind reviewing that list.
+#
+# -----------------------------------------------------------------------------
+# MEASURED STATE, 2026-08-07 (live, read-only)
+# -----------------------------------------------------------------------------
+#   kubectl get sa -A --field-selector metadata.name=default -o json
+#     -> 37 of 37 `default` ServiceAccounts have automountServiceAccountToken
+#        UNSET, i.e. automount is on. CIS 5.1.5 fails cluster-wide.
+#
+#   Pods running as the `default` SA, and whether a token is actually projected
+#   into them:
+#     wordpress 17/17   infraweaver-console 36/0   kube-system 9/0
+#     dns-system 4/4    authentik 2/2   registry 2/2   velero 2/2
+#     jellyfin 2/1      nextcloud 2/1   longhorn-system 2/2   n8n-prod 2/0
+#     build 1/1  gatus 1/1  monitoring 1/1  private-test 1/1  game-hub 1/0
+#   (infraweaver-console, kube-system, n8n-prod, game-hub already opt out at the
+#   pod level; game-hub and game-servers additionally pin the SA object to
+#   automountServiceAccountToken: false in their own manifests.)
+#
+#   WHO ACTUALLY NEEDS THE TOKEN:
+#     kubectl get rolebindings -A -o json | jq '.. | select(.kind?=="ServiceAccount" and .name?=="default")'
+#     kubectl get clusterrolebindings -o json | jq  '... same ...'
+#     -> ZERO RoleBindings and ZERO ClusterRoleBindings name the `default`
+#        ServiceAccount, in any namespace. The only ClusterRoleBinding that
+#        reaches it does so via the `system:serviceaccounts` GROUP:
+#        `system:service-account-issuer-discovery`, which grants read access to
+#        the OIDC discovery document and nothing else.
+#     So no default SA on this cluster holds any meaningful API permission, and
+#     every projected token above is credential exposure with no counterpart
+#     capability.
+#
+#   CORRECTION TO THE WORK PACKAGE PLAN: it flagged "coredns in dns-system uses
+#   the default SA -- needs its own SA first". Measured, that is not the case.
+#   dns-system/coredns runs NO `kubernetes` plugin: its Corefile is zone files
+#   for example.com / prod.local plus a forwarder to 1.1.1.1 and 8.8.8.8. It
+#   makes no Kubernetes API calls at all, so it needs automount switched OFF,
+#   not a dedicated ServiceAccount. The cluster DNS is a different deployment --
+#   kube-system/coredns -- and it already runs on a dedicated `coredns` SA.
+#
+# -----------------------------------------------------------------------------
+# WHAT STILL HAS TO HAPPEN BEFORE THE MUTATION AT THE BOTTOM IS ENABLED
+# -----------------------------------------------------------------------------
+# 1. Review `kubectl get polr -A` for the two rules below and confirm the fail
+#    list matches the census above (it is regenerated on every background scan,
+#    so it stays true as workloads change).
+# 2. For any workload the review shows genuinely calling the API on the default
+#    SA, give it a dedicated ServiceAccount. Those manifests belong to other
+#    work packages; on today's evidence the set is EMPTY.
+# 3. Then enable the mutate rule, in its own commit, so it reverts alone.
+#
+# Blast radius when it is enabled: none immediately. Token projection is fixed
+# at pod creation, so running pods keep their token until they are next
+# recreated; the change materialises workload by workload at the next rollout.
+# That is also why it must not be enabled and forgotten -- the breakage, if any,
+# would surface at an unrelated future restart.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: audit-default-sa-automount
+  annotations:
+    policies.kyverno.io/title: Audit default ServiceAccount Token Automount
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: ServiceAccount, Pod
+    policies.kyverno.io/description: >-
+      Reports every `default` ServiceAccount that still automounts its API token
+      and every Pod that runs as the `default` ServiceAccount without opting out.
+      CIS 5.1.5 and 5.1.6. This is the observation stage of the automount
+      ratchet: it produces the exact worklist that gates enabling the mutation
+      documented at the bottom of this file.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    # -------------------------------------------------------------------------
+    # RULE 1 — the control itself (CIS 5.1.5).
+    # Background scanning is deliberately LEFT ON. The whole point of this rule
+    # is to report the 37 pre-existing ServiceAccounts; skipBackgroundRequests
+    # would make it report nothing until someone happened to edit one.
+    # -------------------------------------------------------------------------
+    - name: default-sa-must-disable-automount
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+              names:
+                - default
+      exclude:
+        any:
+          # Talos-managed. kube-system is already outside Kyverno's
+          # resourceFilters; listed for the reader, and so the rule stays scoped
+          # if those filters are ever loosened.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      validate:
+        message: >-
+          ServiceAccount "default" in namespace "{{ request.object.metadata.namespace }}"
+          does not set automountServiceAccountToken: false. Every pod that does not
+          name a ServiceAccount runs as this one and receives a projected API token
+          it almost certainly never uses. CIS 5.1.5.
+        pattern:
+          automountServiceAccountToken: "false"
+
+    # -------------------------------------------------------------------------
+    # RULE 2 — the workload side (CIS 5.1.6). This is the list that must be
+    # reviewed before the mutation is enabled: these are exactly the pods whose
+    # next restart would stop receiving a token.
+    #
+    # `spec.serviceAccountName` is always populated on a matched Pod: the
+    # in-tree ServiceAccount admission plugin defaults it before any webhook is
+    # called, and background scans read the persisted object. So the
+    # precondition cannot hit the missing-key failure that broke
+    # require-pod-probes.
+    # -------------------------------------------------------------------------
+    - name: pods-should-not-use-default-sa-token
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.serviceAccountName }}"
+            operator: Equals
+            value: default
+      validate:
+        message: >-
+          Pod "{{ request.object.metadata.name }}" runs as the `default`
+          ServiceAccount and does not set automountServiceAccountToken: false.
+          No RoleBinding or ClusterRoleBinding on this cluster grants the default
+          ServiceAccount any permission, so the projected token is exposure
+          without capability. Either set automountServiceAccountToken: false on
+          the pod spec, or give the workload its own ServiceAccount if it really
+          does call the Kubernetes API. CIS 5.1.6.
+        pattern:
+          spec:
+            automountServiceAccountToken: "false"
+
+# =============================================================================
+# STAGE 2 — THE MUTATION. INACTIVE. DO NOT UNCOMMENT WITHOUT DOING STEP 2 ABOVE.
+# =============================================================================
+# Enabling this rewrites every `default` ServiceAccount in scope at admission
+# and, with mutateExistingOnPolicyUpdate, the ones that already exist. Ship it
+# as its own commit so it can be reverted without reverting the audit rules.
+#
+# ---
+# apiVersion: kyverno.io/v1
+# kind: ClusterPolicy
+# metadata:
+#   name: mutate-default-sa-automount
+#   annotations:
+#     policies.kyverno.io/title: Disable Automount on default ServiceAccounts
+#     policies.kyverno.io/category: Pod Security
+#     policies.kyverno.io/severity: medium
+# spec:
+#   admission: true
+#   background: true
+#   mutateExistingOnPolicyUpdate: true
+#   rules:
+#     - name: set-automount-false
+#       match:
+#         any:
+#           - resources:
+#               kinds:
+#                 - ServiceAccount
+#               names:
+#                 - default
+#       exclude:
+#         any:
+#           - resources:
+#               namespaces:
+#                 - kube-system
+#                 - kube-public
+#                 - kube-node-lease
+#       mutate:
+#         targets:
+#           - apiVersion: v1
+#             kind: ServiceAccount
+#             name: default
+#         patchStrategicMerge:
+#           automountServiceAccountToken: false
+#
+# The background controller needs write access to ServiceAccounts for the
+# mutate-existing half. Kyverno aggregates any ClusterRole carrying the label
+# below into kyverno:background-controller, same mechanism the LimitRange
+# generate rule in resource-governance-policies.yaml uses:
+#
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRole
+# metadata:
+#   name: kyverno:background-controller:serviceaccounts
+#   labels:
+#     rbac.kyverno.io/aggregate-to-background-controller: "true"
+# rules:
+#   - apiGroups: [""]
+#     resources: [serviceaccounts]
+#     verbs: [get, list, watch, update, patch]
+# =============================================================================

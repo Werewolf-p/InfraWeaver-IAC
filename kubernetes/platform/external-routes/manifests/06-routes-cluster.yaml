@@ -17,8 +17,16 @@ spec:
   routes:
     - match: Host(`test.${BASE_DOMAIN}`)
       kind: Rule
+      # rate-limit-public-cf (the Cloudflare variant): test.${BASE_DOMAIN}
+      # resolves to 188.114.96.0/97.0, i.e. it IS Cloudflare-proxied, so
+      # Traefik's connection source is an edge IP and the plain rate-limit-public
+      # would put every visitor in one shared bucket. 100/s burst 200 per real
+      # client is far above anything a static site needs; see the header of
+      # core/traefik/manifests/middleware-rate-limit.yaml.
       middlewares:
         - name: secure-headers
+          namespace: traefik
+        - name: rate-limit-public-cf
           namespace: traefik
       services:
         - name: test-website

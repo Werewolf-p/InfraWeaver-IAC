@@ -1,0 +1,78 @@
+---
+# catalog-infraweaver-foyer-manifests.yaml
+# Source: kubernetes/catalog/infraweaver-foyer/overlays/prod/
+#
+# Hand-written to match, byte-for-byte in shape, what scripts/sync-catalog.sh
+# generates for a raw-manifests catalog app (see generate_manifests_bootstrap),
+# with the same field values the live infraweaver-console Application carries.
+#
+# ⚠ ONE-LINE ADDITION STILL REQUIRED, AND IT IS NOT MADE HERE.
+#   sync-catalog.sh reads platform.yaml's `catalog.enabled` list and DELETES any
+#   kubernetes/bootstrap/catalog-*.yaml whose app is not on it (see its
+#   "Checking for disabled apps to remove" loop). platform.yaml is a shared
+#   repo-root file owned by no single package, so this bundle does not edit it.
+#
+#   The addition, under `catalog.enabled:` in platform.yaml:
+#
+#       - infraweaver-foyer
+#
+#   Do NOT add it until a Foyer container image exists in the registry — none
+#   does today (verified 2026-08-07), so enabling the app now would only
+#   produce an ImagePullBackOff. See the catalog README §Go-live.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-infraweaver-foyer-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: catalog-app
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/infraweaver-foyer/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    # The Application's destination namespace. The bundle also declares two
+    # objects outside it — a Role/RoleBinding in `wordpress` and the public
+    # IngressRoute in `traefik`. That is the established pattern here (the
+    # console Application does the same for its `wordpress` Role) and the
+    # `platform` AppProject whitelists every namespace and kind.
+    namespace: "infraweaver-console"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      # The namespace already exists (the console lives there) — this is
+      # belt-and-braces, matching every other catalog Application.
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    # ESO defaults these fields server-side; without the exclusions the app
+    # sits permanently OutOfSync on its own ExternalSecret.
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+        - /spec/target/creationPolicy
+        - /spec/target/deletionPolicy
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'
+    # NOTE the deliberate absence of the console's
+    # `apps/Deployment /spec/replicas` ignoreDifference. The console needs it
+    # because an HPA owns its replica count; Foyer has no HPA, so git IS the
+    # source of truth for replicas and selfHeal should correct manual scaling.

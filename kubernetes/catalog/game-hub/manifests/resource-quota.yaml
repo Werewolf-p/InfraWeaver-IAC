@@ -36,6 +36,16 @@ spec:
       max:
         memory: "12Gi"
         cpu: "6"
+      # Floor for console-provisioned game servers (palworld, cobalt-grove and any
+      # future API-created server) that never appear in git and so are never
+      # reviewed — it stops an undersized or BestEffort game pod being created
+      # through the API.
+      #
+      # A LimitRange has NO selector and NO scopeSelector: this floor applies to
+      # EVERY container in the namespace, including short-lived helper Jobs, and it
+      # is checked against requests AND limits. Anything scheduled into game-hub
+      # must declare at least these values or the pod is rejected at admission.
+      # See scale-schedule.yaml — its scaler Jobs are sized to this floor.
       min:
         memory: "256Mi"
         cpu: "100m"

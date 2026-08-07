@@ -4,7 +4,32 @@ kind: Namespace
 metadata:
   name: jellyfin
   labels:
-    pod-security.kubernetes.io/enforce: privileged
-    pod-security.kubernetes.io/warn: privileged
+    # Demoted privileged -> baseline 2026-08-07 (GAP-M3). `privileged` disables
+    # Pod Security Admission entirely, so this namespace had NO admission-time
+    # pod-security control at all — on a namespace published to the internet.
+    #
+    # Verified against the LIVE pods before demoting, not assumed. Both
+    # jellyfin-69846c88dc-* and the jellyfin-library-bootstrap CronJob pod:
+    #   hostNetwork / hostPID / hostIPC : false
+    #   privileged                      : unset
+    #   capabilities.add                : none
+    #   hostPort                        : none
+    #   volume types                    : persistentVolumeClaim, projected, configMap
+    # Baseline-clean on every dimension baseline checks, so enforcement admits
+    # the workload running today rather than blocking its next restart.
+    #
+    # `audit: baseline` was already present and is now redundant with enforce,
+    # but is kept so a future relaxation of enforce still leaves an audit trail.
+    #
+    # NOT raised to `restricted`: the LinuxServer image runs its own s6 init as
+    # root before dropping privileges, which restricted refuses.
+    #
+    # This file is the authoritative declarer of these labels — core/psa/
+    # namespace-labels.yaml deliberately does not carry jellyfin, because
+    # ArgoCD applies every Application through ONE shared SSA field manager
+    # (argocd-controller), so a second declarer would prune whichever labels it
+    # omits. Change them here, not there.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline
     pod-security.kubernetes.io/audit: baseline
     infraweaver.io/source: community-apps

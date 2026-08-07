@@ -1,0 +1,149 @@
+---
+# =============================================================================
+# Container image registry allowlist — CIS 5.5.1, GAP-M1
+# =============================================================================
+# Every image on this cluster must come from a registry someone chose on
+# purpose. Today nothing checks that: a manifest can name any host on the
+# internet and it will be pulled.
+#
+# THE ALLOWLIST IS DERIVED FROM MEASUREMENT, NOT FROM A WISHLIST.
+# Census of every container and initContainer on every running pod, 2026-08-07:
+#
+#     139  docker.io  (implicit — image string carries no registry at all)
+#      51  quay.io
+#      30  registry.k8s.io
+#      19  registry.int.example.com   (the in-cluster Zot)
+#      18  ghcr.io
+#      12  docker.io  (explicit)
+#       3  oci.external-secrets.io
+#       1  ecr-public.aws.com
+#       1  lscr.io
+#
+# Those nine values are the allowlist, so this policy admits everything running
+# today and denies everything else. It is a ratchet against NEW supply-chain
+# surface, not a cleanup of the existing one.
+#
+# BE HONEST ABOUT WHAT THIS BUYS: docker.io accounts for 151 of ~254 image
+# references, so allowing it means most of the fleet is still pulling from an
+# unauthenticated public registry under floating tags. This policy does not fix
+# that -- it stops the list from growing and makes the next addition a reviewed
+# decision. Narrowing docker.io (mirror through the in-cluster Zot at
+# registry.int.example.com) is the follow-up, and it is a migration, not a
+# policy edit.
+#
+# MECHANISM: iterate Kyverno's parsed `images` context rather than pattern-
+# matching the raw image string. Kyverno resolves each reference into
+# {registry, path, tag, digest} and applies the cluster's configured
+# defaultRegistry (verified live: the kyverno ConfigMap has
+# defaultRegistry=docker.io and enableDefaultRegistryMutation=true). That is
+# what makes the 139 implicit `nginx:1.27`-style references resolve to
+# docker.io instead of failing an `image: "docker.io/*"` glob. `element.registry`
+# is always populated by that parse, so this cannot hit the missing-key error
+# class that broke require-pod-probes.
+#
+# Mode: AUDIT. Stage 4 of the ratchet is measurement; the Enforce flip is a
+# separate commit gated on the PolicyReport showing zero fails, same rule as
+# every other policy here. Note the flip is NOT free even at zero fails: it
+# blocks pod creation for any future image from an unlisted registry, which
+# includes a Helm chart bumping its own image host during an upgrade.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict Image Registries
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Container, initContainer and ephemeralContainer images must be pulled from
+      an approved registry. The allowlist was derived from a census of every
+      image running on the cluster, so it admits the current fleet and denies
+      anything new and unreviewed. CIS 5.5.1.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: validate-image-registry
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Talos-managed static pods. Their images are set by the machine
+          # config, not by anything in this repo, so a policy result here is
+          # noise no one can act on. Already outside Kyverno's resourceFilters;
+          # listed so the scope survives those filters being loosened.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      validate:
+        # NOTE: the message is rule-level, so it must NOT reference `element`.
+        # Kyverno's own policy webhook rejects that outright:
+        #   "variable 'element.name' present outside of foreach at path
+        #    /validate/message"
+        # (caught by `kubectl apply --dry-run=server`, which is why that check
+        # is worth running on every policy edit -- kubeconform passes this file
+        # either way, since the error is semantic, not schema.)
+        message: >-
+          Pod "{{ request.object.metadata.name }}" references an image from a
+          registry that is not on the approved list. Allowed: docker.io,
+          ghcr.io, quay.io, registry.k8s.io, registry.int.example.com,
+          lscr.io, oci.external-secrets.io, ecr-public.aws.com. Mirror the image
+          through the in-cluster registry (registry.int.example.com) or add
+          the registry here in its own reviewed commit. CIS 5.5.1.
+        foreach:
+          # `images.containers.*` is Kyverno's parsed view of the pod's images.
+          # Each element carries .registry with the cluster defaultRegistry
+          # already applied, so implicit docker.io references resolve correctly.
+          - list: "images.containers.*"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.registry }}"
+                    operator: AnyNotIn
+                    value:
+                      - docker.io
+                      - ghcr.io
+                      - quay.io
+                      - registry.k8s.io
+                      - registry.int.example.com
+                      - lscr.io
+                      - oci.external-secrets.io
+                      - ecr-public.aws.com
+          - list: "images.initContainers.*"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.registry }}"
+                    operator: AnyNotIn
+                    value:
+                      - docker.io
+                      - ghcr.io
+                      - quay.io
+                      - registry.k8s.io
+                      - registry.int.example.com
+                      - lscr.io
+                      - oci.external-secrets.io
+                      - ecr-public.aws.com
+          - list: "images.ephemeralContainers.*"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.registry }}"
+                    operator: AnyNotIn
+                    value:
+                      - docker.io
+                      - ghcr.io
+                      - quay.io
+                      - registry.k8s.io
+                      - registry.int.example.com
+                      - lscr.io
+                      - oci.external-secrets.io
+                      - ecr-public.aws.com

@@ -1,0 +1,76 @@
+---
+# ── MFA enrollment, OPTIONAL (WP11 stage 3) ──────────────────────────────────
+#
+# This file is SAFE TO MERGE AND SYNC. It defines a second authenticator-
+# validation stage but binds it to nothing, so no login path changes. It is the
+# loaded-but-not-fired half of the MFA enforcement; stage 4
+# (30-mfa-required-platform-admins.yaml.DEFERRED) is the trigger.
+#
+# ── ENROLLMENT IS ALREADY POSSIBLE TODAY ─────────────────────────────────────
+# Verified live on 2026-08-07: the built-in TOTP, WebAuthn and static-token
+# stages all have a `configure_flow` set, which means self-service enrollment
+# is already reachable at
+#
+#     https://auth.<BASE_DOMAIN>/if/user/#/settings;page-mfa
+#
+# No manifest is required to make enrollment possible. What was missing is
+# anyone having used it: totp 0, webauthn 0, static 0, duo 0, sms 0, email 0.
+# Stage 3 is therefore mostly a HUMAN step — enrol the platform admin — and
+# this file only prepares the stage that stage 4 will bind.
+#
+# ── WHY A SECOND STAGE INSTEAD OF EDITING THE EXISTING ONE ───────────────────
+# `not_configured_action` is a property of the stage, not of the binding, so
+# changing it on `default-authentication-mfa-validation` changes behaviour for
+# EVERY user at once. On a single-admin platform that is the wrong shape of
+# change. A separate stage can be bound behind a group policy, which is how
+# stage 4 limits the blast radius to `platform-admins` while everyone else
+# keeps traversing the untouched original.
+#
+# ── `configure` VS `deny` ────────────────────────────────────────────────────
+# This stage ships with `not_configured_action: configure`: a matching user
+# with no device is walked through enrollment inline and then challenged. It
+# enforces MFA without ever being able to lock anyone out — the correct posture
+# for the flip. Once the platform admin is confirmed enrolled AND break-glass
+# has been exercised, change the single line below to `deny` for the stricter
+# posture (no device = refused, no inline escape). Do not start there.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-mfa-enrollment
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  mfa-enrollment.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver MFA Enrollment (optional, unbound)
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Defines the group-scopable authenticator-validation stage used by
+          WP11 stage 4. Bound to no flow, so applying this changes no login.
+    entries:
+      - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+        state: present
+        id: stage-platform-admin-mfa-validation
+        identifiers:
+          name: platform-admin-mfa-validation
+        attrs:
+          # configure = enrol-then-challenge. See the header before changing
+          # this to `deny`.
+          not_configured_action: configure
+          # Offer TOTP first (works with any authenticator app, no hardware)
+          # and WebAuthn second (phishing-resistant, needs a registered
+          # authenticator). Static tokens are accepted as a factor but are not
+          # offered as an enrollment path here — printed backup codes belong to
+          # the break-glass procedure, not to routine login.
+          configuration_stages:
+            - !Find [authentik_flows.stage, [name, default-authenticator-totp-setup]]
+            - !Find [authentik_flows.stage, [name, default-authenticator-webauthn-setup]]
+          device_classes:
+            - totp
+            - webauthn
+            - static
+          # seconds=0 → challenge on every authentication, never remembered.
+          last_auth_threshold: seconds=0
+          webauthn_user_verification: preferred

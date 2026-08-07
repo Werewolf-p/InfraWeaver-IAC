@@ -564,6 +564,40 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-backup-cron-token
               optional: true
+        # DEDICATED token for the hourly sandbox-sweep CronJob's POST to
+        # /api/wordpress/sandboxes/sweep — the TTL reaper that DELETES expired
+        # sandbox sites. Distinct value from every other cron token precisely
+        # because it destroys sites.
+        #
+        # This entry was MISSING while the CronJob and the OpenBao key both
+        # existed, so the sweep never once ran: the job presented a perfectly
+        # good `wordpress-sandbox-cron-token`, the handler compared it against an
+        # undefined env var, failed closed, and logged
+        # `auth:unauthorized user=anonymous POST /api/wordpress/sandboxes/sweep`
+        # every hour since deployment. `curl --fail` turned that 401 into a job
+        # Error, so the failures accumulated as Error pods rather than an alert.
+        # Fail-closed behaved exactly as designed — the gap was that nothing on
+        # the server side had ever been given the secret to check.
+        - name: WORDPRESS_SANDBOX_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-sandbox-cron-token
+              optional: true
+        # DEDICATED token for the daily patch-sweep CronJob's POST to
+        # /api/wordpress/patch/sweep — the unattended remediation pass. Distinct
+        # value because this one can change production code on every site.
+        #
+        # Missing for the same reason as the sandbox token above, with the same
+        # symptom at 04:31 daily. Auto-remediation still ships OFF by default, so
+        # restoring auth makes the sweep report "refused at the first gate" —
+        # a real answer — instead of a 401.
+        - name: WORDPRESS_PATCH_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-patch-cron-token
+              optional: true
         resources:
           requests:
             memory: 384Mi

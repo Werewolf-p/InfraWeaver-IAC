@@ -261,3 +261,148 @@ spec:
       defaultRequest:
         cpu: 10m
         memory: 32Mi
+
+# =============================================================================
+# COVERAGE COMPLETION (2026-08-07) — the namespaces that had NO LimitRange.
+# =============================================================================
+# Audited with `kubectl get limitrange -A` against `kubectl get ns`. Everything
+# below had zero LimitRange of any kind, so a pod created there would be
+# admitted with no request at all — BestEffort QoS, invisible to the scheduler,
+# first to be OOM-killed. That is precisely the hole the rest of this file
+# exists to close.
+#
+# ALL OF THESE NAMESPACES CURRENTLY RUN ZERO PODS (verified pod-by-pod on
+# 2026-08-07), so this section changes no running workload and adds nothing to
+# any node's request total today. It is a floor for what lands there NEXT:
+#
+#   default        — where a hand-run `kubectl run` or an unqualified manifest
+#                    lands. The single most likely source of an unaccounted pod.
+#   tradesphere    — 0 pods only because its ExternalSecrets are failing
+#                    (GAP-H7). Its pods come back when WP10 repairs them.
+#   falco          — app is disabled today; WP8 re-enables it as a DaemonSet,
+#                    i.e. a pod on every node including the small cp3.
+#   apps-grafana,
+#   infraweaver    — provisioned namespaces awaiting workloads.
+#   bootstrap,
+#   crds,
+#   cilium-secrets — hold only Applications / CRDs / Secrets and are not
+#                    expected to schedule pods. Covered anyway: the cost is
+#                    nothing and "every namespace except the three documented
+#                    exclusions is covered" is a far stronger control statement
+#                    than "most are".
+#
+# Still deliberately excluded, for the reasons in the header above:
+# kube-system, kube-public, kube-node-lease.
+# =============================================================================
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: apps-grafana
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: bootstrap
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: cilium-secrets
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: crds
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: default
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: falco
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: infraweaver
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: baseline-requests
+  namespace: tradesphere
+  labels:
+    infraweaver.io/governance: baseline
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi

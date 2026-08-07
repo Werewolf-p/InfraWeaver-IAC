@@ -21,6 +21,19 @@ metadata:
     infraweaver.io/component: buildkit
 spec:
   replicas: 1
+  # The running pod template is already conformant (1Gi request / 3Gi limit, a
+  # 3x ratio — see the resources block below). The ONLY thing still failing
+  # limit-memory-burst-ratio for this workload is a dead ReplicaSet from
+  # 2026-06-13 that is scaled to 0 and still carries the old 1Gi/12Gi (12x)
+  # template. It is retained purely as rollout history and nothing will ever
+  # schedule from it again.
+  #
+  # revisionHistoryLimit is not part of the pod template, so changing it creates
+  # no new revision and does NOT restart buildkitd. It simply lets the deployment
+  # controller garbage-collect that stale ReplicaSet. 0 rather than 1 because 1
+  # would retain precisely the offending ReplicaSet; buildkitd is a stateless
+  # build daemon on an emptyDir, and rollback is `git revert` on this file.
+  revisionHistoryLimit: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: buildkitd

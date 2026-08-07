@@ -13,10 +13,79 @@ loki:
             values: [standard]
   persistence:
     enabled: true
+    # NOT a real quota. `local-path` (rancher.io/local-path) provisions a plain
+    # directory under /opt/local-path-provisioner on the node and enforces no
+    # project quota — proof: on 2026-08-07 this "10Gi" volume held 10.7 GiB.
+    # The real bound is talos-prod-cp2's EPHEMERAL partition (295.8 GiB total,
+    # 182.4 GiB free) plus the compactor retention configured below.
+    # Do NOT change this number: it is a StatefulSet volumeClaimTemplate, which
+    # Kubernetes forbids updating, and the `local-path` StorageClass does not set
+    # allowVolumeExpansion. Editing it makes the app fail to sync, not grow.
     size: 10Gi
+
+  # ── Retention (GAP-H5, SOC 2 CC7.2 / ISO 27001 A.8.15) ────────────────────
+  # BEFORE this change, retention was configured three contradictory ways and
+  # therefore did not happen AT ALL (verified against the live config in
+  # secret/loki, 2026-08-07):
+  #   limits_config.retention_period: 168h   ← inert on its own
+  #   table_manager.retention_period: 0s     ← chart default, and table_manager
+  #   table_manager.retention_deletes_enabled: false     does not apply to
+  #                                                      boltdb-shipper anyway
+  #   compactor: present, but WITHOUT retention_enabled  ← compaction only
+  # `limits_config.retention_period` is only honoured when the compactor is
+  # explicitly running retention. Nothing ever deleted a chunk: the store held
+  # 55 days of logs (oldest chunk 2026-06-13), 10.7 GiB across 1,332,102 chunk
+  # files, growing at ~199 MiB/day (562 MB/day raw in, ≈2.8x compression).
+  #
+  # 90d is chosen so that enabling deletion DELETES NOTHING TODAY — the oldest
+  # data on disk is 55 days old. It starts pruning from day 91 onward. A later
+  # tightening to 30d is a deliberate, separate decision that WILL destroy data
+  # and belongs with the written retention policy (WP7), not with the change
+  # that first makes retention work at all.
+  #
+  # Disk arithmetic at 90d, on talos-prod-cp2 (182.4 GiB free):
+  #   pod/app logs   199 MiB/day × 90 = ~17.9 GB
+  #   kube-audit     ~425 MB/day raw ÷ 2.8 × 90 = ~13.7 GB
+  #   steady state   ~32 GB  (today: 10.7 GiB)  → ~150 GiB still free
   config:
+    compactor:
+      working_directory: /data/loki/boltdb-shipper-compactor
+      shared_store: filesystem
+      compaction_interval: 10m
+      # THE key that was missing. Without it the two settings below are inert.
+      retention_enabled: true
+      # Grace period between marking a chunk for deletion and unlinking it, so a
+      # misconfiguration can be reverted before data is actually gone.
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 50
     limits_config:
-      retention_period: 168h  # 7 days
+      retention_period: 2160h   # 90 days — global default for every stream
+      # Explicit floor for the API-server audit trail. Redundant while the global
+      # is also 90d, and that is the point: if the global default is ever lowered
+      # for noisy pod logs, the compliance trail keeps its own retention instead
+      # of silently shortening with it.
+      retention_stream:
+        - selector: '{job="kube-audit"}'
+          priority: 1
+          period: 2160h
+    table_manager:
+      # Restated, not inherited: table_manager is NOT the retention mechanism
+      # here (it does not apply to boltdb-shipper). Leaving it off is deliberate
+      # so nobody "fixes" retention by turning this on and getting nothing.
+      retention_deletes_enabled: false
+      retention_period: 0s
+    chunk_store_config:
+      # 0s = unlimited query look-back. Deliberately NOT clamped to the retention
+      # period: clamping would make queries return empty instead of returning
+      # whatever is still on disk, which reads as "no such event" to an auditor.
+      max_look_back_period: 0s
+
+  # Lets Prometheus scrape loki_boltdb_shipper_apply_retention_last_successful_run_
+  # timestamp_seconds, which is what the LokiRetentionNotRunning alert asserts on.
+  # monitoring/allow-intra-namespace already permits the scrape.
+  serviceMonitor:
+    enabled: true
+
   resources:
     requests:
       memory: 256Mi

@@ -1,0 +1,39 @@
+# CODEOWNERS — example-owner/InfraWeaver-infra (GitOps manifests, ArgoCD source of truth)
+#
+# Scope of what this file actually buys you
+# -----------------------------------------
+# GitHub only honours CODEOWNERS on public repositories and on private
+# repositories under Pro/Team/Enterprise. This repository is PRIVATE on the FREE
+# plan, so GitHub will NOT auto-request review from the owners listed here, and
+# "Require review from Code Owners" cannot be enabled — branch protection
+# returns 403 "Upgrade to GitHub Pro or make this repository public".
+#
+# It is kept as the declared, version-controlled record of ownership (SOC 2
+# CC8.1 / ISO A.8.32 evidence) and activates unchanged on a plan upgrade.
+#
+# The control that bites today is CI: .github/workflows/validate-iac.yml renders
+# and validates every manifest on pull request. Merging still requires a human.
+# Procedure: ../infrastructure/docs/CHANGE-MANAGEMENT.md (InfraWeaver-base repo).
+
+# Default owner for everything in the repository.
+*                                       @example-owner
+
+# ArgoCD bootstrap — AppProjects and Applications. A change here can retarget or
+# widen what ArgoCD is permitted to deploy cluster-wide.
+/kubernetes/bootstrap/                  @example-owner
+
+# Security-relevant platform surfaces.
+/kubernetes/core/kyverno/               @example-owner
+/kubernetes/core/psa/                   @example-owner
+/kubernetes/core/network-policies/      @example-owner
+/kubernetes/core/rbac/                  @example-owner
+/kubernetes/core/openbao/               @example-owner
+/kubernetes/core/external-secrets/      @example-owner
+/kubernetes/platform/external-routes/   @example-owner
+/kubernetes/platform/authentik/         @example-owner
+
+# Access register and CI gates.
+/users.yaml                             @example-owner
+/platform.yaml                          @example-owner
+/.github/workflows/                      @example-owner
+/CODEOWNERS                             @example-owner

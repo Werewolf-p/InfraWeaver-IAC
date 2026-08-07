@@ -603,27 +603,79 @@ if [ -z "$EXISTING_API" ]; then
 fi
 
 
-          # Write least-privilege policy for ESO (use env to properly pass VAULT_TOKEN/VAULT_ADDR)
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenBao policies — THE ONLY COPY. Do not fork this file into another repo.
+#
+# `bao policy write` is a FULL REPLACE, not a merge. On 2026-08-06T20:21:18Z a
+# run of a SECOND copy of this script (InfraWeaver-platform scripts/deploy/,
+# resurrected by platform 3728d3f6 after af622592 moved IaC here, then edited by
+# platform 1e8e30e3) overwrote platform-k8s with its own half of the policy. That
+# silently dropped secret/{data,metadata}/{iwsl,catalog}/* and broke four
+# ExternalSecrets; three ArgoCD Applications sat Degraded for ~12 hours because
+# nothing compared live policy to git. The platform copy is now deleted and
+# scripts/validate-openbao-policy-drift.sh diffs live against these heredocs.
+#
+# Both policies below are the UNION and match live byte-for-byte, so re-running
+# this script is a no-op against the current cluster, never a regression.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# platform-k8s — held by the ESO kubernetes-auth role AND by console service
+# tokens. Least privilege for both: read-only over secret/platform/* with a
+# single more-specific CRUD carve-out for the service-account subtree the
+# console mints PATs into.
 kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
   env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 sh -c \
   'bao policy write platform-k8s - <<EOF
 path "secret/data/platform/*" { capabilities = ["read","list"] }
 path "secret/metadata/platform/*" { capabilities = ["read","list"] }
+# Service-account tokens are minted BY the console at runtime, so this one
+# subtree needs write — a more-specific path overrides the read-only glob above.
+path "secret/data/platform/service-accounts/*" { capabilities = ["create","read","update","delete","list"] }
+path "secret/metadata/platform/service-accounts/*" { capabilities = ["create","read","update","delete","list"] }
 path "secret/data/infraweaver/*" { capabilities = ["read","list","create","update","delete"] }
 path "secret/metadata/infraweaver/*" { capabilities = ["read","list","create","update","delete"] }
+# IWSL phase-3 signer keys (infra 2520225). Regressed 2026-08-06T20:21:18Z.
 path "secret/data/iwsl/*" { capabilities = ["read","list"] }
 path "secret/metadata/iwsl/*" { capabilities = ["read","list"] }
-# game-hub server credentials (PR#82) — app catalog secrets, read-only for ESO
+# game-hub server credentials (PR#82) — app catalog secrets, read-only for ESO.
 path "secret/data/catalog/*" { capabilities = ["read","list"] }
 path "secret/metadata/catalog/*" { capabilities = ["read","list"] }
+# tradesphere ESO reads. NARROW single path on purpose: secret/private/* is the
+# per-app self-service namespace and ESO must never be able to read all of it.
+path "secret/data/private/tradesphere" { capabilities = ["read"] }
+path "secret/metadata/private/tradesphere" { capabilities = ["read"] }
 EOF'
 echo "==> ESO policy platform-k8s written"
 
 # Console runtime policy (attached to the console's OpenBao token, -policy=wordpress).
-# Covers the WordPress Manager addon's KV paths plus the UDM connector config the
-# console settings card writes to secret/platform/udm. Policies are referenced by
-# name and evaluated per-request, so updating this content lifts the live token's
-# permissions without recreating the token or restarting the console.
+# Covers the WordPress Manager addon's KV paths, the UDM/NAS/app-account config the
+# console settings cards write, and the audit-log signing key. Policies are
+# referenced by name and evaluated per-request, so updating this content lifts the
+# live token's permissions without recreating the token or restarting the console.
+#
+# ── PENDING, DELIBERATELY NOT WRITTEN ────────────────────────────────────────
+# Commit d35d412 added six further paths to this policy in git. They were never
+# applied to the cluster, and re-adding them here would make the next run of this
+# script silently widen the console token beyond what was approved — the exact
+# failure mode that caused the 2026-08-06 outage, only in the granting direction.
+# They are parked here as text, NOT inside the heredoc. To adopt them: get sign-off,
+# move the six lines into the heredoc, run this script, and re-run
+# scripts/validate-openbao-policy-drift.sh --live to confirm live matches git.
+#
+#   # Fleet Command member-cluster credentials (kubeconfig + ArgoCD token per cluster)
+#   path "secret/data/platform/fleet/*" { capabilities = ["create","read","update","delete"] }
+#   path "secret/metadata/platform/fleet/*" { capabilities = ["read","delete","list"] }
+#   # Velocity forwarding secret, one per Game Hub network
+#   path "secret/data/platform/game-hub/networks/*" { capabilities = ["create","read","update","delete"] }
+#   path "secret/metadata/platform/game-hub/networks/*" { capabilities = ["read","delete","list"] }
+#   # Signing keyrings for lib/trust (read+create only — a deletable keyring would
+#   # make every signature it ever produced unverifiable)
+#   path "secret/data/platform/trust/*" { capabilities = ["create","read","update"] }
+#   path "secret/metadata/platform/trust/*" { capabilities = ["read","list"] }
+#
+# Until then, console features reading those paths get 403 — the same silent
+# failure audit-log signing had. Tracked, not hidden.
+# ─────────────────────────────────────────────────────────────────────────────
 kubectl --kubeconfig "$KB" exec -n openbao openbao-0 -- \
   env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 sh -c \
   'bao policy write wordpress - <<EOF
@@ -646,25 +698,16 @@ path "secret/metadata/platform/nas/creds/*" { capabilities = ["read","delete"] }
 # and the console must be able to re-read them to hand them to their owner.
 path "secret/data/platform/app-accounts/*" { capabilities = ["create","read","update","delete"] }
 path "secret/metadata/platform/app-accounts/*" { capabilities = ["read","delete","list"] }
-# Fleet Command member-cluster credentials (kubeconfig + ArgoCD token per cluster).
-# These are the reason the fleet registry ConfigMap holds inventory metadata ONLY:
-# lib/fleet/credentials.ts is the single module allowed to touch them, and routes
-# are handed a three-boolean credentialStatus, never a value.
-path "secret/data/platform/fleet/*" { capabilities = ["create","read","update","delete"] }
-path "secret/metadata/platform/fleet/*" { capabilities = ["read","delete","list"] }
-# Velocity forwarding secret, one per Game Hub network. Written here rather than
-# into a manifest because an inline env value returned from a read-tier GET is
-# exactly the RCON_PASSWORD incident; the ExternalSecret in git carries the remote
-# key path only, and the proxy mounts the materialised Secret as a 0400 file.
-path "secret/data/platform/game-hub/networks/*" { capabilities = ["create","read","update","delete"] }
-path "secret/metadata/platform/game-hub/networks/*" { capabilities = ["read","delete","list"] }
-# Signing keyrings for lib/trust. One signing substrate, several purposes —
-# compliance-evidence, game-hub-exchange, game-hub-delegate-session,
-# game-world-timeline, wordpress-room-share, game-hub-moderation-record.
-# Read+create only: a keyring that the console can DELETE would make every
-# signature it ever produced unverifiable, which is the opposite of the point.
-path "secret/data/platform/trust/*" { capabilities = ["create","read","update"] }
-path "secret/metadata/platform/trust/*" { capabilities = ["read","list"] }
+# Audit-log signing key (console lib/audit/signing.ts, SIGNING_KV_PATH).
+# readKv+writeKv on this ONE path: the key is created on first use and rotated
+# in place, so read alone is not enough. Granted here rather than in
+# platform-k8s because that policy is also held by the ESO token, which has no
+# business writing the key that signs the audit trail.
+# Measured before this grant: 908 "permission denied" on
+# secret/data/platform/audit/signing from token-infraweaver-console, continuous
+# since at least 2026-08-02 — audit-log signing was failing silently.
+path "secret/data/platform/audit/signing" { capabilities = ["create","read","update"] }
+path "secret/metadata/platform/audit/signing" { capabilities = ["read"] }
 EOF'
 echo "==> Console runtime policy wordpress written"
 

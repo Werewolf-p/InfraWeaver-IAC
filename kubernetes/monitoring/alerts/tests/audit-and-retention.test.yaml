@@ -1,0 +1,139 @@
+# promtool unit tests for the audit.log.shipping and audit.log.retention groups.
+#
+# Run by: scripts/validate-iac.sh (gate 5/5). Do not run promtool against this
+# file directly from the repo — `rules.yaml` below does not exist here. The rules
+# live inside a PrometheusRule custom resource, which promtool cannot read, so
+# the gate extracts `.spec` from every PrometheusRule into a temp directory as
+# `rules.yaml`, copies this file next to it, and runs there.
+#
+# promtool's clock starts at 0, so a constant `..._last_successful_run_timestamp`
+# of 0 means "never ran" and `time() - 0` is simply the evaluation time.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── A missing audit shipper on one node must page ──────────────────────────
+  - interval: 1m
+    name: audit shipper unavailable on one of three nodes fires
+    input_series:
+      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="monitoring",daemonset="audit-log-shipper"}'
+        values: '3+0x60'
+      - series: 'kube_daemonset_status_number_available{namespace="monitoring",daemonset="audit-log-shipper"}'
+        values: '2+0x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KubeAuditLogShipperNotRunning
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: KubeAuditLogShipperNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: monitoring
+              daemonset: audit-log-shipper
+            exp_annotations:
+              summary: 'Kubernetes audit log is not being shipped from every node'
+              description: 'The audit-log-shipper DaemonSet has fewer available pods than nodes. API-server audit events on the affected node(s) are only on local disk, which rotates after ~11 x 100 MB (hours, not days). Restore the DaemonSet before that window closes or the record is lost permanently.'
+      # A fully available DaemonSet must never fire it.
+      - eval_time: 20m
+        alertname: KubeAuditLogShipperAbsent
+        exp_alerts: []
+
+  # ── A healthy shipper must stay quiet ──────────────────────────────────────
+  - interval: 1m
+    name: fully available audit shipper does not fire
+    input_series:
+      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="monitoring",daemonset="audit-log-shipper"}'
+        values: '3+0x60'
+      - series: 'kube_daemonset_status_number_available{namespace="monitoring",daemonset="audit-log-shipper"}'
+        values: '3+0x60'
+      - series: 'promtail_sent_entries_total{namespace="monitoring",service="audit-log-shipper-metrics",pod="audit-log-shipper-aaa"}'
+        values: '0+500x180'
+      - series: 'loki_boltdb_shipper_apply_retention_last_successful_run_timestamp_seconds{namespace="monitoring"}'
+        values: '0+60x180'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: KubeAuditLogShipperNotRunning
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: KubeAuditLogIngestStalled
+        exp_alerts: []
+
+  # ── REGRESSION: the DaemonSet vanishing entirely must page ────────────────
+  # Without KubeAuditLogShipperAbsent, "0 unavailable pods" and "no DaemonSet at
+  # all" are indistinguishable — the first alert compares two series that both
+  # cease to exist, so it can never fire on a deleted DaemonSet.
+  - interval: 1m
+    name: absent audit shipper DaemonSet fires
+    input_series:
+      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="monitoring",daemonset="loki-promtail"}'
+        values: '3+0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: KubeAuditLogShipperAbsent
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: KubeAuditLogShipperAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: monitoring
+              daemonset: audit-log-shipper
+            exp_annotations:
+              summary: 'audit-log-shipper DaemonSet does not exist'
+              description: 'kube-state-metrics reports no audit-log-shipper DaemonSet in the monitoring namespace. Nothing is collecting the Kubernetes API audit log. Check the monitoring-audit-log-shipper ArgoCD Application.'
+      # No promtail metric at all: `or vector(0)` must make this fire rather than
+      # evaluate to no-data and stay silent.
+      - eval_time: 2h
+        alertname: KubeAuditLogIngestStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'No Kubernetes audit events reaching Loki for 1h'
+              description: 'audit-log-shipper has sent zero log entries to Loki for an hour, or its metrics endpoint cannot be scraped. Verify with `{job="kube-audit"}` in Grafana and check the pod logs for permission errors on /var/log/audit/kube.'
+
+  # ── Loki retention that never runs must page ──────────────────────────────
+  # This is the exact state the cluster was in before WP8: compactor present,
+  # retention_enabled absent, so the metric never advanced past 0.
+  - interval: 1m
+    name: loki retention never running fires
+    input_series:
+      - series: 'loki_boltdb_shipper_apply_retention_last_successful_run_timestamp_seconds{namespace="monitoring"}'
+        values: '0+0x2000'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: LokiRetentionNotRunning
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: LokiRetentionNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Loki has not applied log retention in over 24h'
+              description: "The Loki compactor has not completed a retention pass for more than a day (or is not being scraped). Log volume grows unbounded on talos-prod-cp2's local-path volume, which has no quota. Check compactor.retention_enabled in kubernetes/monitoring/loki/values.yaml and the loki-0 pod logs."
+
+  # ── Prometheus TSDB approaching the size cap must warn ────────────────────
+  - interval: 1m
+    name: tsdb over 12GiB fires
+    input_series:
+      # 13 GiB of persisted blocks, against the 14GB retention.size cap.
+      - series: 'prometheus_tsdb_storage_blocks_bytes{namespace="monitoring",pod="prometheus-kube-prometheus-stack-prometheus-0"}'
+        values: '13958643712+0x300'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: PrometheusTsdbSizeNearRetentionCap
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: PrometheusTsdbSizeNearRetentionCap
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              pod: prometheus-kube-prometheus-stack-prometheus-0
+            exp_annotations:
+              summary: 'Prometheus TSDB is near its 14GB retention cap'
+              description: 'Persisted block size is above 12 GiB against a 14GB retention.size cap, so Prometheus is about to (or already does) drop blocks on size rather than age — the real retention window is then shorter than the configured 15d. Either reduce cardinality or move the volume to a storage class that supports expansion and raise the cap.'

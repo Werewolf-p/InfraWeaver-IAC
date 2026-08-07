@@ -1,0 +1,78 @@
+---
+# ── Break-glass recovery admin (WP11 stage 2) ────────────────────────────────
+#
+# This platform has essentially ONE administrator. Authentik is the single lock
+# on ArgoCD, the console, Grafana, Longhorn, OpenBao, TrueNAS and every other
+# admin surface. Requiring MFA on that lock without a verified way back in is
+# how a single misconfigured stage becomes a total loss of administrative
+# access. This account is the way back in.
+#
+# It is DELIBERATELY SHIPPED DORMANT: `is_active: false` and no password. It
+# cannot authenticate as written. A human must arm it once, by hand, following
+# docs/BREAK-GLASS.md — set a long random password, set is_active, verify a
+# real login, and store the credential offline. Nothing here creates a usable
+# credential, and no secret value appears in this repository.
+#
+# ── WHY `state: created` AND NOT `present` ───────────────────────────────────
+# `created` means: create this object if it is missing, then never touch it
+# again. That is essential. With `present`, every blueprint run would reassert
+# `is_active: false` and silently disarm the account — you would discover it
+# at the exact moment you needed it. Do not change this to `present`.
+#
+# A consequence worth writing down: after a disaster restore onto an empty
+# Authentik database, this blueprint recreates the account DORMANT. Re-arming
+# it is a named step in the restore runbook, not something that happens on its
+# own.
+#
+# ── WHY IT IS NOT IN `platform-admins` ───────────────────────────────────────
+# It is a member of `authentik Admins` (is_superuser=true), which is what
+# actually grants administrative rights and what `policy-admins-only` accepts
+# via its `request.user.is_superuser` branch. It is deliberately NOT in
+# `platform-admins`, because stage 4 scopes required-MFA to that group. Group
+# membership is therefore the mechanism that keeps the break-glass path free of
+# the factor that could lock you out. This is intentional, and it is also the
+# account's biggest risk: it is a standing MFA-free superuser. The
+# compensating controls — offline storage, rotation, alerting on use, and a
+# scheduled exercise — are specified in docs/BREAK-GLASS.md and are not
+# optional.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-break-glass
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  break-glass.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Break-glass Recovery Admin
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Dormant local recovery superuser. Shipped inactive and without a
+          password; armed by hand per docs/BREAK-GLASS.md. state=created so
+          arming is never reverted by a later blueprint run.
+    entries:
+      - model: authentik_core.user
+        state: created
+        id: user-break-glass
+        identifiers:
+          username: break-glass
+        attrs:
+          username: break-glass
+          name: "Break-glass recovery admin — see docs/BREAK-GLASS.md"
+          type: internal
+          path: users/break-glass
+          # Dormant on creation. A human sets this to true when arming.
+          is_active: false
+          # No email on purpose: this account must not be recoverable through
+          # the email/recovery flow, which depends on SMTP, DNS and Office365
+          # — three things that can be down in the same incident that made you
+          # reach for this account.
+          email: ""
+          groups:
+            - !Find [authentik_core.group, [name, "authentik Admins"]]
+          attributes:
+            break_glass: true
+            managed_by: "kubernetes/platform/authentik/manifests/blueprints/00-break-glass-account.yaml"
+            runbook: "docs/BREAK-GLASS.md"

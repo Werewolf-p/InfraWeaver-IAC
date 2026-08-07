@@ -1,3 +1,22 @@
+# NOTE: despite the name, a LimitRange has NO per-workload selector — these
+# defaults apply to EVERY container in longhorn-system that does not set its
+# own, which is 10-16 containers per node.
+#
+# longhorn-manager is the one workload these defaults were badly wrong for: it
+# steadily uses 236-247Mi, so the 50Mi defaultRequest put the storage control
+# plane at the top of the kubelet's memory-eviction ranking (it was evicted
+# from talos-prod-cp3 three times in 25 minutes on 2026-08-07), while the
+# 256Mi default limit sat only 4% above its steady state, leaving it equally
+# close to an OOMKill.
+#
+# That is fixed by a targeted admission mutation in
+# ./longhorn-manager-resources.yaml (320Mi request / 512Mi limit on the
+# longhorn-manager container only), NOT by editing the numbers below.
+#
+# DO NOT "fix" it by raising the values here. A 320Mi defaultRequest would hit
+# all 10-16 containers per node — roughly +2700Mi on talos-prod-cp3, which has
+# only 6563Mi allocatable and 4888Mi already requested. That makes the node
+# unschedulable. The arithmetic is in ./longhorn-manager-resources.yaml.
 apiVersion: v1
 kind: LimitRange
 metadata:
@@ -7,7 +26,9 @@ spec:
   limits:
   - type: Container
     default:
-      # Conservative limit: actual instance-manager usage is ~50-100Mi
+      # Conservative limit: actual instance-manager usage is ~50-100Mi.
+      # longhorn-manager is exempted from this via the mutation above.
       memory: 256Mi
     defaultRequest:
+      # longhorn-manager is exempted from this via the mutation above.
       memory: 50Mi

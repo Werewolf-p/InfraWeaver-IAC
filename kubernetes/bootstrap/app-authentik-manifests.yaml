@@ -14,6 +14,14 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/platform/authentik/manifests
+    directory:
+      # Required for manifests/blueprints/ (WP11, GAP-C5) to be seen at all.
+      # A plain directory source is non-recursive by default, so without this
+      # the blueprint ConfigMaps in that subdirectory would never be created —
+      # they would look like config-as-code and do nothing. ArgoCD reads only
+      # *.yaml / *.yml / *.json, which is what keeps the *.yaml.DEFERRED
+      # enforcement blueprints out of the cluster.
+      recurse: true
   destination:
     server: https://kubernetes.default.svc
     namespace: authentik

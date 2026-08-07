@@ -1,0 +1,23 @@
+---
+# Front port == target port == container port, deliberately.
+#
+# scripts/validate-netpol-ports.sh exists because a NetworkPolicy `ports[].port`
+# matches the DESTINATION POD port, not the Service port, and the mismatch is
+# invisible under a non-enforcing CNI. Making all three 3000 removes the class
+# of mistake entirely for this app.
+apiVersion: v1
+kind: Service
+metadata:
+  name: infraweaver-foyer
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+spec:
+  type: ClusterIP
+  selector:
+    app: infraweaver-foyer
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP

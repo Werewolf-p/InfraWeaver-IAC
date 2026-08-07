@@ -1,0 +1,67 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Public edge for the client portal.
+#
+# WHY THIS LIVES IN THE `traefik` NAMESPACE (and the console's does not):
+#
+#   The console's route sits in kubernetes/platform/external-routes/manifests/
+#   (10-routes-int.yaml) because it is an INTERNAL host on the *.int wildcard,
+#   which the default TLSStore already serves. Foyer is a PUBLIC host and needs
+#   the `platform-wildcard-tls` certificate — and Traefik resolves `tls.
+#   secretName` in the IngressRoute's OWN namespace, where that Secret does not
+#   exist. Putting the route in `traefik` is the house pattern for exactly this
+#   case (kubernetes/core/registry/registry.yaml ships its own route the same
+#   way, cross-namespace service ref included: Traefik runs with
+#   allowCrossNamespace=true).
+#
+#   The alternative — appending a route to 08-routes-external.yaml — would mean
+#   editing a file the external-routes package owns. This bundle stays
+#   self-contained instead; the route is a NEW object, so there is no
+#   shared-resource conflict and no ArgoCD SharedResourceWarning.
+#
+# DNS: external-dns runs with `sources: [traefik-proxy]` and
+# `--annotation-filter=external-dns.alpha.kubernetes.io/managed in (true)`, so
+# the two annotations below are what publish portal.${BASE_DOMAIN} to
+# Cloudflare, proxied, against --default-targets=<public ingress IP>. Without
+# the `managed` annotation the record is simply never created (opt-in, not
+# opt-out).
+#
+# AUTH: no forward-auth middleware, on purpose. Foyer authenticates its own
+# users with Authentik OIDC through Auth.js and must own the whole session
+# lifecycle — the fail-closed 60-minute group-staleness ceiling and the
+# session-death recovery in src/lib/session-guard.ts both live in the app. A
+# forward-auth proxy in front would add a second, differently-expiring session
+# and re-create the "every page blank" class of bug. `secure-headers` is
+# attached because it is the standard edge posture on every route in this
+# cluster; the app additionally sets its own CSP per response (src/proxy.ts).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: infraweaver-foyer
+  namespace: traefik
+  annotations:
+    external-dns.alpha.kubernetes.io/managed: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+  labels:
+    app: infraweaver-foyer
+    infraweaver.io/access-tier: public
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`portal.${BASE_DOMAIN}`)
+      kind: Rule
+      middlewares:
+        - name: secure-headers
+          namespace: traefik
+      services:
+        - name: infraweaver-foyer
+          namespace: infraweaver-console
+          port: 3000
+  tls:
+    # Public apex wildcard (*.${BASE_DOMAIN}), issued by letsencrypt-dns into
+    # the traefik namespace by 02-certificates.yaml. NOT the default TLSStore,
+    # which serves *.int.${BASE_DOMAIN} and would present a name-mismatched
+    # certificate to every customer.
+    secretName: platform-wildcard-tls

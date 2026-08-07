@@ -1,0 +1,93 @@
+---
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  DEFERRED — WP11 stage 5. Do not enable until stage 4 has been live and   ║
+# ║  quiet for at least one week and every human account has enrolled.        ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# Same two gates as stage 4: rename off `.DEFERRED`, and add
+# `authentik-blueprint-mfa-required-all` to `blueprints.configMaps` in
+# ../../values.yaml. Neither happens by accident.
+#
+# ── WHAT IT DOES ─────────────────────────────────────────────────────────────
+# Stage 4 left the flow with two validation stages: the enforcing one at order
+# 25 gated on `platform-admins`, and the original inert `skip` stage at order
+# 30 for everyone else. Stage 5 widens enforcement by removing the gates rather
+# than by adding anything new — the stage that has already been proven in
+# production for a week simply stops being group-scoped:
+#
+#   - delete the group policy binding on the order-25 binding  → it applies to
+#     every user
+#   - delete the negated group policy binding on order 30      → nothing left
+#     to suppress
+#   - delete the order-30 stage binding itself                 → otherwise
+#     every user would be challenged twice, once per validation stage
+#
+# End state: one authenticator-validation stage, order 25, unconditional,
+# `not_configured_action: configure` — a user with no device enrols inline and
+# is then challenged. Nobody is refused, and nobody gets in on a password
+# alone.
+#
+# Every entry uses `state: absent`, which authentik treats as idempotent: an
+# absent entry whose object no longer exists is skipped, not an error. Running
+# this twice is safe.
+#
+# ── ⚠ REQUIRED COMPANION EDIT — DO NOT SKIP ──────────────────────────────────
+# `10-authentication-current-state.yaml` still declares the order-30 stage
+# binding with `state: present`. If you enable this file without also removing
+# the `binding-authentication-mfa-validation` entry from that file, the two
+# blueprints will fight: one deletes the binding, the other recreates it, on
+# every blueprint run, forever. Edit file 10 in the SAME commit that renames
+# this one. File 10 is a snapshot of the authentication path; when you change
+# the path, the snapshot has to move with it or git stops being the truth.
+#
+# ── OPTIONAL HARDENING, ONCE EVERYONE IS ENROLLED ────────────────────────────
+# With every account holding a device, `not_configured_action` in
+# 20-mfa-enrollment-optional.yaml can go from `configure` to `deny`. Only do
+# this after `kubectl exec` confirms a device count equal to the count of
+# active human users — the verification command is in README.md. `deny` with a
+# gap between those two numbers is a lockout with extra steps.
+#
+# Consider renaming the stage from `platform-admin-mfa-validation` to something
+# accurate once it applies to everyone. Renaming is a rename of the `name`
+# identifier and will create a NEW stage rather than rename the existing one,
+# so it is a stage-4-shaped change of its own. Leaving the name alone is the
+# boring, correct choice.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-mfa-required-all
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  mfa-required-all.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver MFA Required — all users
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Removes the platform-admins scoping from the MFA validation stage
+          and retires the original skip stage, so every user is challenged.
+    entries:
+      # ── 1. Un-scope the enforcing stage ───────────────────────────────────
+      - model: authentik_policies.policybinding
+        state: absent
+        identifiers:
+          target: !Find [authentik_policies.policybindingmodel, [flowstagebinding__stage__name, platform-admin-mfa-validation]]
+          order: 0
+
+      # ── 2. Drop the negated suppression on the legacy stage ───────────────
+      - model: authentik_policies.policybinding
+        state: absent
+        identifiers:
+          target: !Find [authentik_policies.policybindingmodel, [flowstagebinding__stage__name, default-authentication-mfa-validation]]
+          order: 0
+
+      # ── 3. Retire the legacy inert stage from the flow ────────────────────
+      # The stage object itself is left in place, unbound — deleting it would
+      # also delete any historical references and buys nothing.
+      - model: authentik_flows.flowstagebinding
+        state: absent
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+          order: 30

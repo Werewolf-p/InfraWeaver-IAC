@@ -1,0 +1,17 @@
+---
+# Keeps one Foyer pod serving through a voluntary disruption (node drain,
+# Talos upgrade). With replicas: 2 this permits exactly one pod to go at a
+# time. minAvailable rather than maxUnavailable so the guarantee is expressed
+# as "the portal stays up", which is the property that matters.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: infraweaver-foyer
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-foyer
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: infraweaver-foyer
