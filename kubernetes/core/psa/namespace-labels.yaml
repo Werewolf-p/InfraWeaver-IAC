@@ -323,19 +323,20 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
 ---
 # ── Cluster DNS ──────────────────────────────────────────────────────────────
-# Verified the running coredns Deployment passes baseline before labeling:
-#   hostNetwork/hostPID/hostIPC all false, volumes: configMap only, no hostPort,
-#   securityContext { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
-#   capabilities: { drop: [ALL], add: [NET_BIND_SERVICE] } }.
-# NET_BIND_SERVICE is inside both the baseline and restricted capability sets.
-# It will WARN at restricted (no runAsNonRoot, no seccompProfile) -- that is the
-# intended "drift is visible without breaking anything" posture used above, and
-# warn/audit are non-blocking.
-apiVersion: v1
-# dns-system is NOT declared here. It is owned by apps-dns, which ships its own
-# Namespace manifest (kubernetes/platform/dns/manifests/namespace.yaml) and now
-# carries these same PSA labels there. Declaring it in both places left apps-dns
-# permanently OutOfSync — one shared SSA field manager, two declarers.
+# dns-system is DELIBERATELY NOT DECLARED HERE. It is owned by apps-dns, which
+# ships its own Namespace manifest (kubernetes/platform/dns/manifests/
+# namespace.yaml) and now carries the PSA labels there instead.
+#
+# Declaring one Namespace in two Applications left apps-dns permanently
+# OutOfSync, and is dangerous in general on this cluster: every Application is
+# applied through ONE shared server-side-apply field manager, so a second
+# declarer prunes whatever labels it omits.
+#
+# The verification that justified the level is kept with the labels, in that
+# file: the running coredns Deployment passes baseline (hostNetwork/hostPID/
+# hostIPC false, configMap volumes only, no hostPort, allowPrivilegeEscalation
+# false, readOnlyRootFilesystem true, capabilities drop ALL add
+# NET_BIND_SERVICE, which is inside both the baseline and restricted sets).
 ---
 # ── Backup object store ──────────────────────────────────────────────────────
 # Velero itself is not deployed (GAP-C2); this namespace currently runs only
