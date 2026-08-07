@@ -60,9 +60,9 @@ cleanupController:
       cpu: 50m
       memory: 64Mi
   cleanupJobsImage:
-    registry: registry.k8s.io
-    repository: kubectl
-    tag: "v1.35.4"
+    registry: docker.io
+    repository: alpine/k8s
+    tag: "1.35.4"
 
 reportsController:
   replicas: 1
@@ -175,35 +175,61 @@ webhooksCleanupEnabled: true
 #     API: the only non-digest tag left on bitnami/kubectl is `latest`. So there
 #     was no in-place pin available; the registry had to change.
 #
-# registry.k8s.io/kubectl is the upstream Kubernetes-published image and carries
-# real version tags. v1.35.4 matches this cluster's server version exactly and
-# was verified to exist before committing
-# (digest sha256:e8bc9c71a813d90d5f7689fa57516b2aacd7a02bb9d70d3ab6664ed6d202fc10).
+# registry.k8s.io/kubectl was tried next and BROKE EVERY CLEANUP JOB. It is a
+# DISTROLESS image with no shell, and the chart hardcodes the entrypoint:
 #
-# Bump this in step with the cluster's Kubernetes version — kubectl supports
-# +/-1 minor, so drifting more than one release behind will eventually break
-# these jobs.
+#   templates/cleanup/*.yaml  ->  command: [/bin/bash, -c, ...]
+#
+# That is not overridable from values — five cleanup templates plus three
+# pre-delete/post-upgrade hooks all spell `/bin/bash` literally. Measured
+# 2026-08-07, once the change actually reached the cluster:
+#
+#   Error: failed to create containerd task: ... unable to start container
+#   process: exec: "/bin/bash": stat /bin/bash: no such file or directory
+#
+# All four report-cleanup CronJobs failed on every 10-minute run. The image swap
+# had been committed and reviewed, but nothing had exercised it — the CronJobs
+# only re-render when the release syncs, so the breakage surfaced hours later at
+# an unrelated sync, looking like it came from that sync. Verify an image can
+# RUN the command the chart hands it, not merely that the tag exists.
+#
+# docker.io/alpine/k8s bundles kubectl AND bash and publishes real version tags.
+# 1.35.4 matches this cluster's server version exactly — note there is no `v`
+# prefix, unlike registry.k8s.io. Verified in-cluster before committing, under
+# the same hardening these jobs run with (runAsNonRoot, all capabilities
+# dropped, RuntimeDefault seccomp):
+#
+#   bash=OK
+#   Client Version: v1.35.4
+#
+# The `:latest` problem that motivated leaving bitnami stays solved: this is a
+# pinned, versioned tag.
+#
+# Bump in step with the cluster's Kubernetes version — kubectl supports +/-1
+# minor, so drifting more than one release behind will eventually break these
+# jobs. When you bump it, confirm the new tag still ships bash.
 webhooksCleanup:
   image:
-    registry: registry.k8s.io
-    repository: kubectl
-    tag: "v1.35.4"
+    registry: docker.io
+    repository: alpine/k8s
+    tag: "1.35.4"
 
 policyReportsCleanup:
   enabled: false  # Post-upgrade migration hook — not needed for fresh installs
   image:
-    registry: registry.k8s.io
-    repository: kubectl
-    tag: "v1.35.4"
+    registry: docker.io
+    repository: alpine/k8s
+    tag: "1.35.4"
 
 cleanupJobs:
   admissionReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: "v1.35.4"
-    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
-    # defaults to (which baked in USER 1001). The chart's securityContext sets
+      registry: docker.io
+      repository: alpine/k8s
+      tag: "1.35.4"
+    # alpine/k8s has USER root, like registry.k8s.io/kubectl and unlike the
+    # bitnami image the chart defaults to (which baked in USER 1001). The
+    # chart's securityContext sets
     # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
     # with "container has runAsNonRoot and image will run as root" (measured
     # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
@@ -221,11 +247,12 @@ cleanupJobs:
         type: RuntimeDefault
   clusterAdmissionReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: "v1.35.4"
-    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
-    # defaults to (which baked in USER 1001). The chart's securityContext sets
+      registry: docker.io
+      repository: alpine/k8s
+      tag: "1.35.4"
+    # alpine/k8s has USER root, like registry.k8s.io/kubectl and unlike the
+    # bitnami image the chart defaults to (which baked in USER 1001). The
+    # chart's securityContext sets
     # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
     # with "container has runAsNonRoot and image will run as root" (measured
     # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
@@ -243,11 +270,12 @@ cleanupJobs:
         type: RuntimeDefault
   ephemeralReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: "v1.35.4"
-    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
-    # defaults to (which baked in USER 1001). The chart's securityContext sets
+      registry: docker.io
+      repository: alpine/k8s
+      tag: "1.35.4"
+    # alpine/k8s has USER root, like registry.k8s.io/kubectl and unlike the
+    # bitnami image the chart defaults to (which baked in USER 1001). The
+    # chart's securityContext sets
     # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
     # with "container has runAsNonRoot and image will run as root" (measured
     # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
@@ -265,11 +293,12 @@ cleanupJobs:
         type: RuntimeDefault
   clusterEphemeralReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: "v1.35.4"
-    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
-    # defaults to (which baked in USER 1001). The chart's securityContext sets
+      registry: docker.io
+      repository: alpine/k8s
+      tag: "1.35.4"
+    # alpine/k8s has USER root, like registry.k8s.io/kubectl and unlike the
+    # bitnami image the chart defaults to (which baked in USER 1001). The
+    # chart's securityContext sets
     # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
     # with "container has runAsNonRoot and image will run as root" (measured
     # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
@@ -287,11 +316,12 @@ cleanupJobs:
         type: RuntimeDefault
   updateRequests:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: "v1.35.4"
-    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
-    # defaults to (which baked in USER 1001). The chart's securityContext sets
+      registry: docker.io
+      repository: alpine/k8s
+      tag: "1.35.4"
+    # alpine/k8s has USER root, like registry.k8s.io/kubectl and unlike the
+    # bitnami image the chart defaults to (which baked in USER 1001). The
+    # chart's securityContext sets
     # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
     # with "container has runAsNonRoot and image will run as root" (measured
     # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
