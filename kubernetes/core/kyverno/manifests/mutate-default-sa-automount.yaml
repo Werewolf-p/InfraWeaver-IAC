@@ -257,6 +257,61 @@ spec:
         patchStrategicMerge:
           automountServiceAccountToken: false
 
+    # -------------------------------------------------------------------------
+    # RULE 2 — the Pod side. Added 2026-08-07. This is what makes the audit
+    # policy's `pods-should-not-use-default-sa-token` satisfiable at all.
+    #
+    # THE BUG THIS FIXES. The ServiceAccount mutation above is the real control
+    # and it works: measured 2026-08-07, a pod recreated after the sweep has no
+    # `kube-api-access-*` volume at all. But the audit rule asserts
+    # `spec.automountServiceAccountToken: "false"` ON THE POD, and Kubernetes
+    # never copies that field down from the ServiceAccount — it simply omits the
+    # volume and leaves the pod field unset. So every workload relying on the
+    # SA-level mutation reported a failure it could never clear.
+    #
+    # Measured: build/buildkitd, monitoring/alertmanager-discord,
+    # authentik/authentik-server and private-test were restarted, came back with
+    # no token projected, and still failed the audit rule. The handoff note
+    # claiming these "clear on natural restart" was wrong — restarting alone
+    # never cleared them and the count sat at 31 indefinitely.
+    #
+    # That is the same defect class this file exists to remove, inverted: not a
+    # control that reads present and is absent, but one that IS present and reads
+    # absent. 31 permanent false failures are not cosmetic — they are where a
+    # real finding goes to hide.
+    #
+    # Setting the field explicitly is also better than relying on the SA alone:
+    # it survives someone flipping the ServiceAccount back, and it states the
+    # intent in the workload instead of three levels away.
+    #
+    # Blast radius: none. The token is already absent for these pods via the SA
+    # mutation, so this changes what the spec SAYS, not what the kubelet DOES.
+    # Admission-only (`mutateExistingOnPolicyUpdate: false` above), so running
+    # pods are untouched and each workload picks it up at its next restart.
+    # -------------------------------------------------------------------------
+    - name: set-pod-automount-false
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.serviceAccountName || 'default' }}"
+            operator: Equals
+            value: default
+      mutate:
+        patchStrategicMerge:
+          spec:
+            automountServiceAccountToken: false
+
 # The background controller needs write access to ServiceAccounts for the
 # mutate-existing half. Kyverno aggregates any ClusterRole carrying the label
 # below into kyverno:background-controller, the same mechanism the LimitRange
