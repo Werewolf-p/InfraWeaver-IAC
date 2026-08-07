@@ -9,10 +9,19 @@
 
 ## 0. READ THIS FIRST — current honest state
 
-> **No restore of a Longhorn volume or of etcd has ever been performed on this
-> platform.** Not once. Everything below section 3 is a *written* procedure
-> derived from the tooling and the live cluster's configuration. It is **not
-> verified**. Treat every step as unproven until the drill log in §7 has an entry.
+> **Updated 2026-08-07 — §4a is now VERIFIED; everything else is still not.**
+>
+> A Longhorn volume backup and restore was performed end to end and verified by
+> checksum on 2026-08-07. See the drill log in §7 for the row, the timings, and
+> the defect that had to be fixed first (the backup target was configured but
+> unreachable, and no backup had *ever* been taken). §4a is therefore a proven
+> procedure.
+>
+> Still unproven, and to be treated as such in any compliance evidence:
+> **§4b** (destructive restore over a live volume), **§4c** (full rebuild), and
+> **§5** (etcd / control plane) — no etcd restore or tabletop has been done.
+> The §7 drill also used a purpose-built scratch volume, so no *production*
+> volume has yet been restored.
 
 As of 2026-08-07, the measured state that this runbook's changes repair:
 
@@ -298,7 +307,36 @@ the Longhorn/Talos version.
 
 | Date | Type | Operator | Source artifact | Target | Result | Data verified how | Time to restore | Issues found |
 |---|---|---|---|---|---|---|---|---|
-| _(none yet)_ | | | | | | | | |
+| 2026-08-07 | Longhorn volume, §4a non-destructive | platform admin (assisted) | `drill-backup-20260807` of `pvc-f53b7533…4650` — a purpose-built 1 GiB scratch volume in ns `restore-drill`, 201 files including a 16 MiB urandom blob | new volume `restore-drill-20260807` + scratch PVC `drill-restored`, mounted **read-only** | **PASS** | `sha256sum -c MANIFEST.sha256` inside the restored volume → `OK_LINES=201`, `FAILED_LINES=0`; independent fingerprint `sha256(MANIFEST.sha256)` read back as `9609c60a8bbfbef3dfb9a93ed53935ab68c6d4062be705c1f72b0569136e3a33`, byte-identical to what the writer pod printed before the backup existed | backup 8 s (86 MB stored, lz4); restore + verify 2 m 18 s (17:10:31Z → 17:12:49Z) | The drill could not start until a real defect was fixed — see below. Two follow-ups opened (§8). |
+
+**What this row proves, and what it does not.** It proves the whole chain —
+snapshot → NFS upload → BackupVolume → restore into a new volume → PV/PVC →
+mounted filesystem — moves bytes correctly and losslessly, and that the §4a
+procedure as written is executable. It does **not** prove any *production*
+volume has ever been restored: the source was a scratch volume built for the
+drill. The next drill should use a real `game-hub` volume.
+
+**Blocker found and fixed on the way in.** `BackupTarget/default` still read
+`available=false` and *zero* `backups.longhorn.io` existed, even after the
+`${TRUENAS_HOST}` placeholder fix — so §0's table was accurate about the
+symptom but the diagnosis was incomplete. Cause:
+`longhorn-system/airgap-baseline` permitted egress only to
+`cluster/host/remote-node/kube-apiserver` plus DNS, so the NAS — an external
+host — was denied. Measured from inside a `longhorn-manager` pod before the fix:
+`10.1.0.135:111` and `:2049` both timed out. That file's own header had
+predicted this exact requirement on 2026-06-29; the note sat unactioned for 39
+days. Fixed by a `toCIDR: [10.1.0.135/32]` egress on 2049+111 (commit
+`71371b3`), after which `available=true` on the first resync.
+
+The router was investigated and **not** changed: `productie` and `Homelab`
+share the UniFi `Internal` zone, whose intra-zone policy is allow-all, and a pod
+in `infraweaver-console` reached `10.1.0.135:2049` at the same moment a
+`longhorn-manager` pod could not. A firewall rule created during diagnosis was
+proved to change nothing and was deleted; the perimeter is unchanged.
+
+This is precisely the "a control can read as present and be absent" failure this
+platform keeps hitting. It was caught by *trying to use* the control, not by
+reading its configuration.
 
 ### Drill template — Longhorn volume (do this one first)
 
@@ -346,8 +384,10 @@ serving no backup — that alone should be resolved either way.
 
 | # | Item | Why it matters |
 |---|---|---|
-| 1 | **Run the first restore drill** (§7) | Everything here is unverified without it |
-| 2 | Verify `available=true` and ≥1 `backups.longhorn.io` after merge + the 01:00 window | The changes are inert until a human merges to `main` |
+| ~~1~~ | ~~**Run the first restore drill** (§7)~~ — **DONE 2026-08-07**, PASS | Superseded by: drill a *production* volume next; §4b/§4c/§5 remain unproven |
+| ~~2~~ | ~~Verify `available=true` and ≥1 `backups.longhorn.io`~~ — **DONE 2026-08-07** | `available=true` reached only after the `airgap-baseline` egress fix (`71371b3`); a backup was created, restored, verified and cleaned up |
+| 2a | **Confirm the 01:00 recurring run actually produces backups** | All 21 volumes carry a `recurring-job` group label and the jobs include group `default`, so the enrolment gap is closed *on paper*. The first unattended nightly run is the proof. Check the morning after `71371b3` landed. |
+| 2b | **7 orphaned backups (~1.4 GB) sit on the NAS from a previous cluster** | Once the target became readable, 7 `backups.longhorn.io` from 2026-05-08…05-18 appeared, for volumes (`pvc-ebc6736d…`, `pvc-3b784d59…`, `pvc-55cdbec9…`) that no longer exist. No retention job will ever prune them — recurring-job retention only prunes volumes it manages. Decide: delete, or keep and count them in the capacity plan (item 8). |
 | 3 | `TRUENAS_HOST=10.1.0.5` in the CMP substitutions is wrong (no NFS/SMB there; the NAS is `10.1.0.135`) | Also consumed by the console and Authentik LDAP outpost — check what else it has silently broken |
 | 4 | Authentik Postgres/Redis on `local-path` have **no backup** | SSO for every admin surface; single-node disk |
 | 5 | No alert on etcd-snapshot cron failure | The Longhorn verifier alert has no etcd counterpart |
