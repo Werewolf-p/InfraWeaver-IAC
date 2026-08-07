@@ -19,11 +19,10 @@
 #                      setting back to the repo intent (`priorityClass: platform-standard`
 #                      in core/longhorn/values.yaml). IMs then settled (APIVersion 6) and
 #                      this baseline applied with zero policy drops.
-#                      NOTE: backup-target is currently empty (no active NFS backup). When
-#                      Longhorn backupTarget is pointed at nfs://${TRUENAS_HOST}/..., add a
-#                      `toCIDR: [<truenas-ip>/32]` egress (port 2049 TCP/UDP) here, because
-#                      the instance-manager engine — selected by this policy — performs the
-#                      NFS backup IO to an external (non-cluster, non-node) host.
+#                      RESOLVED 2026-08-07: the backup-target egress this note asked for is
+#                      now present below (toCIDR 10.1.0.135/32, 2049+111). Until then the
+#                      target was configured and unreachable, and no backup had ever been
+#                      taken. The note was right; it just sat unactioned for 39 days.
 ---
 # registry (zot): nodes (host/remote-node) pull images directly from zot:5000; Traefik
 # fronts the external hostname; monitoring scrapes. zot makes no external egress.
@@ -88,3 +87,27 @@ spec:
     - toEntities: [cluster, host, remote-node, kube-apiserver]
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
       toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]}]
+    # TrueNAS NFS backup target — the egress this file's header has predicted
+    # since 2026-06-29. Without it the backupTarget is configured and
+    # permanently unreachable: BackupTarget/default read `available=false` with
+    # "timeout executing: longhorn backup ls", and ZERO backups.longhorn.io had
+    # ever existed. Measured 2026-08-07 from inside a longhorn-manager pod
+    # before this rule:
+    #   10.1.0.135:111  -> timeout
+    #   10.1.0.135:2049 -> timeout
+    #
+    # The router was NOT the cause and was NOT changed: productie and Homelab
+    # share the UniFi `Internal` zone, whose intra-zone policy is allow-all, and
+    # a pod in infraweaver-console reached 10.1.0.135:2049 at the same moment
+    # this one could not. The only thing between Longhorn and its backup target
+    # was this policy. (The node's own host namespace still cannot reach that
+    # subnet — irrelevant here, because the NFS IO is done by the engine pod.)
+    #
+    # Scoped to the NAS's single /32. 2049 is the NFSv4 data port and is what
+    # Longhorn actually uses; 111 is kept for a v3 rpcbind fallback so a version
+    # downgrade fails loudly at the mount rather than silently at the firewall.
+    # 20048 (mountd) is deliberately absent — it is ConnectionRefused on this
+    # NAS even from its own subnet, so opening it would be cargo cult.
+    - toCIDR: ["10.1.0.135/32"]
+      toPorts: [{ports: [{port: "2049", protocol: TCP}, {port: "2049", protocol: UDP},
+                         {port: "111", protocol: TCP}, {port: "111", protocol: UDP}]}]
