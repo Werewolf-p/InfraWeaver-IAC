@@ -187,6 +187,16 @@ catalog:
     - infraweaver-console
     - infraweaver-api
     - infraweaver-node
+    # The client-facing WordPress portal at portal.${BASE_DOMAIN}. Distinct from
+    # infraweaver-console, which is the operator surface and is admins-only:
+    # every active user may reach the portal, and it shows each of them only the
+    # sites in (their groups) INTERSECT (fleet) MINUS (hidden), together with the
+    # rights they hold on each.
+    #
+    # This entry is load-bearing beyond the ApplicationSet: sync-catalog.sh
+    # DELETES any kubernetes/bootstrap/catalog-*.yaml whose app is not listed
+    # here, so omitting it would silently remove the Application on its next run.
+    - infraweaver-foyer
     - registry
     - plex
 
