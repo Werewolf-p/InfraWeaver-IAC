@@ -319,7 +319,8 @@ above is kept as the measured record of what existed; live state is now:
 | --- | --- |
 | `recovery-admin` | **deleted 2026-08-07** |
 | `manual-recovery-admin` | **deleted 2026-08-07** |
-| `iw-admin-token` | **kept — see below** |
+| `iw-admin-token` | **rotated, then deleted 2026-08-07** — see below |
+| `iw-console-api-token` | **new 2026-08-07** — the console's credential. Owned by `svc-infraweaver-console`, **expires 2027-08-07** |
 | `ak-outpost-…-api` | kept; required by the embedded outpost |
 
 Deleting them did **not** remove the ability to recover. That was checked
@@ -332,16 +333,53 @@ before acting, not after:
   displaced.
 - The break-glass account (§3) lands with this branch, dormant until armed.
 
-**`iw-admin-token` was deliberately NOT deleted.** It is not merely an admin
-token: `sha256(token.key)` is byte-identical to
-`infraweaver-console-secret/authentik-token`, so it IS the console's Authentik
-credential. Deleting it breaks user provisioning, invitations, group sync, RBAC
-assignment, and every WordPress per-site access grant. It remains a permanent
-MFA bypass for the entire API surface, and the correct fix is rotation onto a
-dedicated service account with an expiry — not deletion. Sequence: create the
-service account and its token, reseed OpenBao, redeploy the console, verify a
-grant/revoke round-trip, then revoke the old token. Until that is done this is
-an accepted and recorded risk, not an oversight.
+### Resolved 2026-08-07 — `iw-admin-token` ROTATED and deleted
+
+`iw-admin-token` could not simply be deleted: `sha256(token.key)` was
+byte-identical to `infraweaver-console-secret/authentik-token`
+(`810dbee98572e45e…`, verified again immediately before the rotation), so it
+**was** the console's Authentik credential. Deleting it would have broken user
+provisioning, invitations, group sync, RBAC assignment and every WordPress
+per-site access grant. The prescribed fix — rotation onto a dedicated service
+account with an expiry — was carried out in full:
+
+1. Created service account `svc-infraweaver-console`
+   (`type=service_account`, member of `authentik Admins`) and token
+   `iw-console-api-token`, `intent=api`, **`expiring=True`, expires
+   2027-08-07**.
+2. Wrote it to OpenBao `secret/platform/infraweaver-console`
+   (property `authentik-token`, version 25), preserving all 27 existing keys.
+   Note the console's own OpenBao token has `["list","read"]` on that path and
+   **cannot** rewrite its own credentials — deliberate, and correct; the write
+   needs the root token per `OPENBAO-OPERATIONS.md`.
+3. Forced the ExternalSecret to resync and confirmed the Kubernetes Secret
+   carried the new value (`b667ca9364a303e1…`), then restarted the console.
+4. **Verified a grant/revoke round-trip from inside a running console pod,
+   using its live `AUTHENTIK_TOKEN`** — whoami → `svc-infraweaver-console`;
+   list users 200; list groups 200; create group 201; add user 204; remove
+   user 204; delete group 204.
+5. Deleted `iw-admin-token`. Re-checked afterwards: the console's Authentik
+   calls still return 200, the portal returns 200, all Applications are
+   Synced/Healthy and all 28 ExternalSecrets are Ready.
+
+What this bought: the permanent, never-expiring MFA bypass on `admin`'s own
+identity is gone. A second-order win — the console's credential is no longer
+owned by a human. The offboard route deletes tokens whose `token.user` matches
+the user being offboarded, so offboarding `admin` would previously have
+decapitated the console; it no longer can.
+
+**Two things this did NOT fix — do not read it as more than it is:**
+
+- **The service account is still a superuser** (member of `authentik Admins`).
+  Scoping it to the exact permission set the console needs is the remaining
+  least-privilege work; it was not attempted here because under-granting
+  silently breaks provisioning, and that trade needs a deliberate enumeration
+  of every Authentik call the console makes.
+- **The token expires 2027-08-07 and nothing watches that date.** There is no
+  rotation automation and no alert. When it lapses, user provisioning, group
+  sync and WordPress access grants stop — probably quietly. Put the date on the
+  calendar, or add an alert, before trusting the expiry as an improvement
+  rather than a scheduled outage.
 
 ```bash
 kubectl exec -i -n authentik deploy/authentik-server -c server -- ak shell <<'PY'
