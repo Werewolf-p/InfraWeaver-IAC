@@ -202,23 +202,108 @@ cleanupJobs:
       registry: registry.k8s.io
       repository: kubectl
       tag: "v1.35.4"
+    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
+    # defaults to (which baked in USER 1001). The chart's securityContext sets
+    # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
+    # with "container has runAsNonRoot and image will run as root" (measured
+    # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
+    # restate the chart's own hardening, because setting this key REPLACES it.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      privileged: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
   clusterAdmissionReports:
     image:
       registry: registry.k8s.io
       repository: kubectl
       tag: "v1.35.4"
+    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
+    # defaults to (which baked in USER 1001). The chart's securityContext sets
+    # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
+    # with "container has runAsNonRoot and image will run as root" (measured
+    # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
+    # restate the chart's own hardening, because setting this key REPLACES it.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      privileged: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
   ephemeralReports:
     image:
       registry: registry.k8s.io
       repository: kubectl
       tag: "v1.35.4"
+    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
+    # defaults to (which baked in USER 1001). The chart's securityContext sets
+    # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
+    # with "container has runAsNonRoot and image will run as root" (measured
+    # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
+    # restate the chart's own hardening, because setting this key REPLACES it.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      privileged: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
   clusterEphemeralReports:
     image:
       registry: registry.k8s.io
       repository: kubectl
       tag: "v1.35.4"
+    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
+    # defaults to (which baked in USER 1001). The chart's securityContext sets
+    # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
+    # with "container has runAsNonRoot and image will run as root" (measured
+    # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
+    # restate the chart's own hardening, because setting this key REPLACES it.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      privileged: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
   updateRequests:
     image:
       registry: registry.k8s.io
       repository: kubectl
       tag: "v1.35.4"
+    # registry.k8s.io/kubectl has USER root, unlike the bitnami image the chart
+    # defaults to (which baked in USER 1001). The chart's securityContext sets
+    # runAsNonRoot: true with no runAsUser, so kubelet refused every cleanup pod
+    # with "container has runAsNonRoot and image will run as root" (measured
+    # 2026-08-07, CreateContainerConfigError x22). Pin the UID explicitly and
+    # restate the chart's own hardening, because setting this key REPLACES it.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      privileged: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
