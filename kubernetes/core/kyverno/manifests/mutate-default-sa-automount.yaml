@@ -2,10 +2,19 @@
 # =============================================================================
 # `default` ServiceAccount token automount — CIS 5.1.5 / 5.1.6
 # =============================================================================
-# THIS FILE IS AT ITS AUDIT STAGE. IT REPORTS; IT DOES NOT YET MUTATE.
-# The filename keeps the name the work package assigned it so the eventual
-# mutation lands here and nowhere else. The mutate rule is written out verbatim
-# at the bottom of this file, inactive, with the exact gate it is waiting on.
+# STATUS 2026-08-07: BOTH STAGES ARE ACTIVE. This file audits AND mutates.
+# (The header used to say "audit stage, does not yet mutate" — that stopped
+# being true when stage 2 was enabled the same day, and a header that
+# contradicts the manifest below it is how the next reader gets misled.)
+#
+#   stage 1  audit-default-sa-automount   — reports SAs and Pods (validate)
+#   stage 2  mutate-default-sa-automount  — rule 1 patches the `default`
+#            ServiceAccount; rule 2 (added later the same day) patches the Pod.
+#
+# Rule 2 exists because stage 1's Pod rule was otherwise unsatisfiable — see
+# the long note above that rule. Kubernetes does not copy
+# automountServiceAccountToken from the ServiceAccount onto the Pod, so the
+# workload half reported failures no restart could ever clear.
 #
 # WHY NOT SIMPLY SHIP THE MUTATION IN "AUDIT MODE":
 # there is no such thing. `validationFailureAction` governs validate rules only.
