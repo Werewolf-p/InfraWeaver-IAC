@@ -166,63 +166,95 @@ spec:
             automountServiceAccountToken: "false"
 
 # =============================================================================
-# STAGE 2 — THE MUTATION. INACTIVE. DO NOT UNCOMMENT WITHOUT DOING STEP 2 ABOVE.
+# STAGE 2 — THE MUTATION. ACTIVE since 2026-08-07.
 # =============================================================================
-# Enabling this rewrites every `default` ServiceAccount in scope at admission
-# and, with mutateExistingOnPolicyUpdate, the ones that already exist. Ship it
-# as its own commit so it can be reverted without reverting the audit rules.
+# Step 2 was done before enabling this, as the previous note required. Measured
+# across the whole cluster (kube-system/kube-public/kube-node-lease excluded):
 #
-# ---
-# apiVersion: kyverno.io/v1
-# kind: ClusterPolicy
-# metadata:
-#   name: mutate-default-sa-automount
-#   annotations:
-#     policies.kyverno.io/title: Disable Automount on default ServiceAccounts
-#     policies.kyverno.io/category: Pod Security
-#     policies.kyverno.io/severity: medium
-# spec:
-#   admission: true
-#   background: true
-#   mutateExistingOnPolicyUpdate: true
-#   rules:
-#     - name: set-automount-false
-#       match:
-#         any:
-#           - resources:
-#               kinds:
-#                 - ServiceAccount
-#               names:
-#                 - default
-#       exclude:
-#         any:
-#           - resources:
-#               namespaces:
-#                 - kube-system
-#                 - kube-public
-#                 - kube-node-lease
-#       mutate:
-#         targets:
-#           - apiVersion: v1
-#             kind: ServiceAccount
-#             name: default
-#         patchStrategicMerge:
-#           automountServiceAccountToken: false
+#   31 pods on the `default` ServiceAccount with automount still enabled, in
+#   wordpress(17) authentik(2) longhorn-system(2) registry(2) velero(2)
+#   build(1) dns-system(1) jellyfin(1) monitoring(1) nextcloud(1)
+#   private-test(1)
 #
+# Every one is an application workload — web apps, databases, a registry — and
+# NONE of them can be using the token for anything, because the audit half of
+# this policy established that zero RoleBindings or ClusterRoleBindings grant
+# the `default` ServiceAccount any permission anywhere. The projected token is
+# exposure without capability, which is exactly CIS 5.1.6.
+#
+# Blast radius is bounded by how Kubernetes mounts tokens: a running pod keeps
+# the token it already has. The change takes effect for each workload at its
+# next restart, so nothing moves the moment this merges.
+# =============================================================================
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-default-sa-automount
+  annotations:
+    policies.kyverno.io/title: Disable Automount on default ServiceAccounts
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+    # Must land AFTER the ClusterRole at the bottom of this file. Kyverno's own
+    # validating webhook refuses a mutate-targets rule whose background
+    # controller cannot write the target kind, and it checks at admission:
+    #   admission webhook "validate-policy.kyverno.svc" denied the request:
+    #   spec.rules[0].mutate.targets: auth check fails, additional privileges
+    #   are required for 'system:serviceaccount:kyverno:kyverno-background-
+    #   controller': cannot update /v1/ServiceAccount in namespace
+    # Applying both in one wave fails on a clean cluster, because the aggregated
+    # permission does not exist yet at the moment the policy is validated.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  admission: true
+  background: true
+  mutateExistingOnPolicyUpdate: true
+  rules:
+    - name: set-automount-false
+      match:
+        any:
+          - resources:
+              kinds:
+                - ServiceAccount
+              names:
+                - default
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+      mutate:
+        targets:
+          - apiVersion: v1
+            kind: ServiceAccount
+            name: default
+        patchStrategicMerge:
+          automountServiceAccountToken: false
+
 # The background controller needs write access to ServiceAccounts for the
 # mutate-existing half. Kyverno aggregates any ClusterRole carrying the label
-# below into kyverno:background-controller, same mechanism the LimitRange
+# below into kyverno:background-controller, the same mechanism the LimitRange
 # generate rule in resource-governance-policies.yaml uses:
-#
-# ---
-# apiVersion: rbac.authorization.k8s.io/v1
-# kind: ClusterRole
-# metadata:
-#   name: kyverno:background-controller:serviceaccounts
-#   labels:
-#     rbac.kyverno.io/aggregate-to-background-controller: "true"
-# rules:
-#   - apiGroups: [""]
-#     resources: [serviceaccounts]
-#     verbs: [get, list, watch, update, patch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:background-controller:serviceaccounts
+  labels:
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+  annotations:
+    # Wave -1: this MUST exist before mutate-default-sa-automount is admitted.
+    # Kyverno validates that its background controller can write the mutation's
+    # target kind at admission time, and refuses the policy outright if it
+    # cannot. This ClusterRole is what grants that, via label aggregation into
+    # kyverno:background-controller.
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get, list, watch, update, patch]
 # =============================================================================
