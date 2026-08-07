@@ -4,6 +4,7 @@ kind: Kustomization
 # Tunable params (image tag, replicas) live in overlays/prod/kustomization.yaml.
 resources:
   - deployment.yaml
+  - proxmox-ca-configmap.yaml
   - backup-pvc.yaml
   - backup-deployment.yaml
   - backup-service.yaml

@@ -1,0 +1,67 @@
+---
+# Proxmox VE cluster CA — the trust anchor for the /infrastructure surface.
+#
+# The Proxmox API serves a certificate signed by the cluster's own CA, not a
+# public one, so Node rejected every request with:
+#
+#   UNABLE_TO_VERIFY_LEAF_SIGNATURE
+#
+# Trusting this CA is the correct fix. The alternative — NODE_TLS_REJECT_
+# UNAUTHORIZED=0 — would disable verification for EVERY outbound TLS
+# connection the console makes, including Authentik, GitHub and the mailer,
+# to solve a problem with one host. That is not a trade worth making on the
+# surface that can destroy VMs.
+#
+# This is a PUBLIC certificate, not a secret: it verifies the hypervisor's
+# identity and grants nothing. The API tokens live in OpenBao.
+#
+#   subject: CN = Proxmox Virtual Environment,
+#            O = PVE Cluster Manager CA
+#   expires: 2034-09-15
+#
+# Both registered hypervisors are members of one PVE cluster and therefore
+# share this CA. Rotating it (pvecm updatecerts) means updating this file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxmox-cluster-ca
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-console
+    infraweaver.io/component: proxmox
+data:
+  pve-root-ca.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIFzTCCA7WgAwIBAgIUFash8rIWECYr9kPZqHDdUs2ofkowDQYJKoZIhvcNAQEL
+    BQAwdjEkMCIGA1UEAwwbUHJveG1veCBWaXJ0dWFsIEVudmlyb25tZW50MS0wKwYD
+    VQQLDCRiYWU0OGIyYy1mZDU2LTQyOTgtYWM5OS00N2ZhNGVlZDVmYjQxHzAdBgNV
+    BAoMFlBWRSBDbHVzdGVyIE1hbmFnZXIgQ0EwHhcNMjQwOTE3MTQwMDAwWhcNMzQw
+    OTE1MTQwMDAwWjB2MSQwIgYDVQQDDBtQcm94bW94IFZpcnR1YWwgRW52aXJvbm1l
+    bnQxLTArBgNVBAsMJGJhZTQ4YjJjLWZkNTYtNDI5OC1hYzk5LTQ3ZmE0ZWVkNWZi
+    NDEfMB0GA1UECgwWUFZFIENsdXN0ZXIgTWFuYWdlciBDQTCCAiIwDQYJKoZIhvcN
+    AQEBBQADggIPADCCAgoCggIBAIXC/BzHyr41HZqMTeiE6CK2taWr16KTR44Amtob
+    Lz+LMPTFWRZaKoP4o4bPL3Ruw48dpFjIW4eiXyloSjUKbLXjqdabIItSTWw2pi9d
+    soATNClWW3DY7vB5g4UmiJq/nj2sG2no35wGjcDGK3Qk7O+wq1z95hdRMMWDoUDD
+    CpdDDZq3DUiVal8AV3toPDhcEFoIm8UsfvyXViseQKYgZyClv6rPgJC/+JLFXAu6
+    uQ7pzZNGEOWsHUUefE8gRdVkXFB8uzb4R/z+K33HwZLOoXL/hKlpLRIW4p3vJQ6j
+    WCH/xwBzfYdX9GgZOoMgHQ29HjjcGNqIODARTJ1BERBCbApne9PvjNOq4rMZpvPq
+    r6i8gO/qhE4f+Rug5x1TjwC+dkNIs7kvkTqv5P/UxjfMgGd9LC6lDtStMaNR7qkq
+    ugLqlt7qjeBieosQRqspAAMVaN5JdV4g+u5iEzrt5bZeUsRccdNn6wOtYwvzn8HN
+    3B41IcF2uNQukdVKIw4r6h340J/k+QdNJIVsrhilgkKGJsBApPR6A26qedduNnhx
+    7TgYGJwGFqGdNQYu7Y0aL5AxScm8ItB4McYmvjWBr5wApOqADJ1kiqa/kj4q73bY
+    ccNf4EKzZ5+kYSAqAJAimZTbuC0hFbbF+Im9Q8Eo/+RgUuScdmd91tJMhU/rWmpc
+    x8URAgMBAAGjUzBRMB0GA1UdDgQWBBQdUQfmNElb/tOgHcYmLZVqI5g4WDAfBgNV
+    HSMEGDAWgBQdUQfmNElb/tOgHcYmLZVqI5g4WDAPBgNVHRMBAf8EBTADAQH/MA0G
+    CSqGSIb3DQEBCwUAA4ICAQBuDuuFnMVG5inH3zVF7Ft7F1fax41ae6yB428B24wJ
+    mfljwoTkQ8h6t7pzojMwc2erm8sPE6cgD7ng4ldmYnY9bp4p8/6oXc790Ljkmrkl
+    fnwBCsVOA2J8E2Y38hrU/SuFQXlUUTqa3wGYykj3AZ9u+e3CeGzSGtXue5fncKM8
+    NVOrycezetmFfzP9hNLwDei8UwCwfI44JzuFISOBcy8et8vFdR8NX7OZd12bWeOz
+    tsWDz5x6f4Dm6Gkm95LarQ/f9/XNaNDJi8mtNh3WaFNqnIvFYclJZUNyQPePJD1Y
+    OU9O9fRMyo16jYuiovow2hIV4W+p9mVYKMKjl7+jgdijKv/zlaCEuYEJToGppuU2
+    3Pi9glaq6EEBQegTIyZ5GbpVwixssTB2ZYmfHwiJ66mUKL10GL1Ah7G9XAB3/LyQ
+    kGEUerFZ4RmCzk4Bx9R2ngWe1FRf3selh5iTUDigE2/Bk1i8ZTii3YTxgQlbeKzF
+    pz0KJbBC2d7sjkmeOL9VR+EUdB7MRq8xkCN0K3+PAbQ43qWF5pHJcU9tkwC7Apn2
+    3dcPts4/25MLs3Ydmw/Ho3QtI/wlF4DSAD0zHq60bGC1vwaBbUhY5L2FhXI47DlE
+    NlJqBBPtCm47ZFW7SM8PajDCGqWs7MweiMRC0Gf75yp0xLQJkP0aicn0ZzBJsJxH
+    Qw==
+    -----END CERTIFICATE-----

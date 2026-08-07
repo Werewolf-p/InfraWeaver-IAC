@@ -140,6 +140,16 @@ spec:
         # rather than an empty table, and every write refuses.
         - name: INFRA_NODE_OPS_ENABLED
           value: "1"
+        # Trust the Proxmox cluster CA mounted above, IN ADDITION to the system
+        # store — NODE_EXTRA_CA_CERTS appends, it does not replace. Without it
+        # every hypervisor call fails UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+        #
+        # Deliberately NOT NODE_TLS_REJECT_UNAUTHORIZED=0: that would disable
+        # certificate verification for EVERY outbound TLS connection the console
+        # makes — Authentik, GitHub, the mailer, the WordPress fleet — to solve a
+        # problem with one host. Trusting one extra CA is the narrow fix.
+        - name: NODE_EXTRA_CA_CERTS
+          value: /etc/ssl/proxmox/pve-root-ca.pem
         # ── Game Hub platform switches (2026-08-01 wave) ─────────────────────
         # Each feature reads its own switch and, when it is absent, answers with
         # an operator sentence rather than an error — so these are what make the
@@ -667,6 +677,12 @@ spec:
             exec:
               command: ["sh", "-c", "sleep 10"]
         volumeMounts:
+        # Proxmox cluster CA, read-only. Node must trust it or every call to the
+        # hypervisor API fails UNABLE_TO_VERIFY_LEAF_SIGNATURE — the API serves a
+        # cert signed by the PVE cluster's own CA, not a public one.
+        - name: proxmox-ca
+          mountPath: /etc/ssl/proxmox
+          readOnly: true
         # Next.js needs a writable cache dir at runtime (readOnlyRootFilesystem prevents direct writes)
         - name: nextjs-cache
           mountPath: /app/.next/cache
@@ -685,6 +701,9 @@ spec:
           seccompProfile:
             type: RuntimeDefault
       volumes:
+      - name: proxmox-ca
+        configMap:
+          name: proxmox-cluster-ca
       - name: nextjs-cache
         emptyDir: {}
       - name: git-cache
