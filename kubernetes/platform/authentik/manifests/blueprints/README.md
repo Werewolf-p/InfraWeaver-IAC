@@ -214,3 +214,35 @@ u = [a.slug for a in Application.objects.all().order_by("slug")
 print(len(u), u)
 PY
 ```
+
+## Foyer provider — `grant_types` is not optional (2026-08-07)
+
+The Portal's OAuth2 provider was created with an empty `grant_types`, and every
+login failed. The symptom is misleading: the browser lands on
+`/api/auth/signin?error=OAuthCallbackError`, which reads like a callback or
+network fault. Authentik's own log gives the real answer:
+
+```
+"event": "Invalid grant_type for provider", "grant_type": "authorization_code"
+"event": "The request is otherwise malformed"
+```
+
+and it answers the authorize request with
+`?error=invalid_request&error_description=The%20request%20is%20otherwise%20malformed`
+before ever showing a login page — so Authentik records no authorize or login
+event, and the failure looks like it never reached the IdP at all.
+
+Fixed by mirroring the working console provider rather than guessing:
+
+```
+grant_types = ["authorization_code", "refresh_token"]
+```
+
+Any blueprint that declares an OAuth2Provider must set this explicitly. A
+provider with correct client id, secret, redirect URI, scopes, signing key and
+flows is still completely non-functional without it, and nothing about the
+configuration *looks* wrong.
+
+Verified after the fix with a real headless-Chrome login: the portal rendered
+exactly the two sites the test account was entitled to, out of seven in the
+fleet, with rights and per-site SSO affordances.
