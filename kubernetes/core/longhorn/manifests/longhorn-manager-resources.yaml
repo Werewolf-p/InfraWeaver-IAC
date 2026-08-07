@@ -1,0 +1,187 @@
+---
+# =============================================================================
+# longhorn-manager memory request — eviction-ranking fix
+# =============================================================================
+# INCIDENT (measured 2026-08-07): longhorn-manager was evicted from
+# talos-prod-cp3 three times in 25 minutes.
+#
+#   Warning Evicted pod/longhorn-manager-4t8w2
+#     The node was low on resource: memory.
+#     Threshold quantity: 800Mi, available: 758196Ki.
+#     Container longhorn-manager was using 224696Ki, request is 50Mi,
+#     has larger consumption of memory.
+#
+# ROOT CAUSE — the request, not the node.
+# The kubelet ranks pods for memory eviction with:
+#
+#   rankMemoryPressure = orderedBy(exceedMemoryRequests, priority, memory)
+#
+# where the FIRST pod in sort order is killed first, a pod that exceeds its
+# memory request sorts EARLIER, lower priority sorts EARLIER, and a larger
+# usage-above-request sorts EARLIER.
+#
+# longhorn-manager requested 50Mi and steadily used 236-247Mi. That put it in
+# the "exceeds request" tier, at the tier's lowest priority (platform-standard),
+# with the tier's largest excess. Measured tier-1 set on cp3 at incident time:
+#
+#   #  over(Mi)  priority                    pod
+#   1  123       platform-standard  (500k)   longhorn-manager-cfwd7  <-- FIRST
+#   2   19       platform-standard  (500k)   loki-promtail-np8fj
+#   3   13       platform-standard  (500k)   instance-manager-e5da9f50
+#   4   22       platform-critical  (1M)     cert-manager-webhook-hetzner
+#   5   13       platform-critical  (1M)     metallb-speaker-qxs86
+#   7 2827       system-cluster-critical     kube-apiserver-talos-prod-cp3
+#
+# longhorn-manager was literally rank #1 on the node's kill list, so memory
+# pressure landed on the storage control plane before anything else.
+#
+# THE FIX: request 320Mi >= observed peak 247Mi. That flips
+# exceedMemoryRequests from true to false and moves longhorn-manager out of
+# tier 1 entirely — behind every pod above, regardless of their priority.
+# The limit goes to 512Mi because the namespace LimitRange default of 256Mi
+# sat only 4% above the 247Mi steady state, i.e. this pod was equally close to
+# an OOMKill as it was to an eviction.
+#
+# WHY A KYVERNO MUTATION AND NOT HELM VALUES — this is the important part.
+# The longhorn chart pinned in ../application.yaml (1.7.*, resolving to 1.7.3)
+# EXPOSES NO RESOURCES KEY FOR longhorn-manager. templates/daemonset-sa.yaml
+# has no `resources:` block at all, and `longhornManager` accepts only
+# log/priorityClass/tolerations/nodeSelector/serviceAnnotations. Verified:
+#
+#   helm template longhorn ./longhorn --version 1.7.3 \
+#     -f values.yaml -f <(echo 'longhornManager: {resources: {requests: {memory: 320Mi}}}') \
+#     --show-only templates/daemonset-sa.yaml | grep -c resources
+#   -> 0
+#
+# So `longhornManager.resources` in values.yaml would be SILENTLY DISCARDED —
+# it would look fixed in git and change nothing on the cluster. Do not add it.
+#
+# A kustomize patch is the usual alternative, but it is not wireable here: the
+# chart is deployed by the multi-source Helm ApplicationSet in
+# kubernetes/bootstrap/appset-core.yaml, and this manifests/ directory is a
+# plain-YAML Application using the envsubst-v1.0 CMP. Neither renders kustomize.
+#
+# Raising the namespace LimitRange in ./instance-manager-limits.yaml cannot
+# work either: LimitRange has no per-workload selector, so a 320Mi
+# defaultRequest would hit all 10-16 longhorn-system containers per node
+# (+2700Mi on cp3, which has 6563Mi allocatable and 4888Mi already requested).
+# That would make the node unschedulable. Arithmetic rejected it.
+#
+# A targeted admission mutation on the Pod is therefore the only mechanism that
+# reaches this container from this directory.
+#
+# ORDERING: the in-tree LimitRanger admission plugin runs BEFORE mutating
+# webhooks, so by the time Kyverno sees the pod the resources are already
+# populated with the LimitRange defaults (50Mi/256Mi). This patch therefore
+# SETS values unconditionally rather than defaulting absent ones.
+#
+# WE MUTATE THE POD, NOT THE DAEMONSET, ON PURPOSE. ArgoCD owns the DaemonSet;
+# mutating it would show as permanent drift and selfHeal would revert it in a
+# fight loop. ArgoCD does not manage Pods, so this produces no drift.
+#
+# FAIL-OPEN, STATED PLAINLY: kyverno-resource-mutating-webhook-cfg has
+# failurePolicy: Ignore. If the Kyverno admission controller is down when a
+# longhorn-manager pod is created, this mutation is skipped and the pod falls
+# back to the LimitRange defaults. That is exactly today's behaviour, so the
+# failure mode degrades to the status quo and can never be worse than it — but
+# it does mean this is not a hard guarantee. Verified in scope: Kyverno's
+# resourceFilters exclude kyverno/kube-system/kube-public/kube-node-lease and
+# do NOT exclude longhorn-system, and the webhook covers v1/pods CREATE there.
+#
+# ROLLOUT: this does not restart anything by itself. Pod resources are
+# immutable, so running pods keep 50Mi until they are next recreated. On cp3
+# that is the next eviction, which breaks the loop on the spot. The
+# priorityClass change in ../values.yaml is what rolls the DaemonSet and
+# materialises this on cp1/cp2 too — note the chart sets
+# updateStrategy.rollingUpdate.maxUnavailable: "100%", so all three managers
+# restart together. Volume I/O is served by instance-manager/engine pods and is
+# not interrupted, but volume management (attach/detach/rebuild) pauses for the
+# restart window. Merge during a quiet window.
+#
+# MEASURED STEADY STATE (3 samples, 20s apart, per container):
+#   talos-prod-cp2  longhorn-manager-2n924  245 / 247 / 245 Mi
+#   talos-prod-cp1  longhorn-manager-6sln6  236 / 236 / 236 Mi
+#   talos-prod-cp3  longhorn-manager-cfwd7  197 / 197 / 199 Mi (fresh pod,
+#       restarted 3x by the eviction loop, still climbing toward steady state;
+#       its pre-eviction sample was 224696Ki = 219Mi)
+#   pre-pull-share-manager-image  0Mi on all three (it is `sleep infinity`)
+#
+# REQUEST BUDGET AFTER THIS CHANGE (delta is +270Mi/node: 320Mi - the 50Mi the
+# LimitRange gives today; longhorn-manager is a DaemonSet so all 3 nodes pay):
+#   talos-prod-cp1  19030 -> 19300 Mi of 20651 Mi   92.15% -> 93.46%
+#   talos-prod-cp2   8806 ->  9076 Mi of 20651 Mi   42.64% -> 43.95%
+#   talos-prod-cp3   4888 ->  5158 Mi of  6563 Mi   74.48% -> 78.59%
+# Nothing becomes unschedulable; cp3 stays well under the 90% ceiling. NOTE
+# that cp1, not cp3, is the tightest node in percentage terms and has only
+# ~1351Mi of request headroom left after this.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: longhorn-manager-memory-resources
+  labels:
+    infraweaver.io/governance: storage-eviction
+  annotations:
+    policies.kyverno.io/title: Longhorn Manager Memory Resources
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Sets an accurate memory request (320Mi) and limit (512Mi) on the
+      longhorn-manager container. The Longhorn 1.7 chart exposes no resources
+      key for this DaemonSet, so its containers otherwise inherit the
+      longhorn-system LimitRange defaults of 50Mi request / 256Mi limit while
+      actually using 236-247Mi. A request that far below real usage puts the
+      storage control plane at the top of the kubelet's memory-eviction
+      ranking, which is what evicted it from talos-prod-cp3 three times in 25
+      minutes on 2026-08-07.
+spec:
+  # Admission-time only. Pod resources are immutable, so a background scan
+  # could not patch a running pod even if it tried.
+  background: false
+  rules:
+    - name: set-longhorn-manager-memory
+      match:
+        any:
+          - resources:
+              # CREATE ONLY. This is not a tidiness detail — omitting it is what
+              # took the storage control plane down on 2026-08-07.
+              #
+              # Kyverno's default matches CREATE *and* UPDATE. longhorn-manager
+              # patches its OWN Pod during webhook leader election, so the
+              # mutation re-applied 50Mi->320Mi / 256Mi->512Mi into that update
+              # payload, and the API server rejected it:
+              #
+              #   Pod "longhorn-manager-..." is invalid: spec: Forbidden: pod
+              #   updates may not change fields other than
+              #   spec.containers[*].image, ... 
+              #
+              # The manager then died with level=fatal "Error starting webhooks"
+              # and entered CrashLoopBackOff on 2 of 3 nodes. Pod resources are
+              # immutable after admission anyway, so matching UPDATE could never
+              # have achieved anything except this failure.
+              operations:
+                - CREATE
+              kinds:
+                - Pod
+              namespaces:
+                - longhorn-system
+              selector:
+                matchLabels:
+                  app: longhorn-manager
+      mutate:
+        patchStrategicMerge:
+          spec:
+            containers:
+              # Conditional anchor: patch the longhorn-manager container if it
+              # is present, never append a new element to the list. The sibling
+              # `pre-pull-share-manager-image` container is deliberately left on
+              # the LimitRange defaults — it is a `sleep infinity` image holder
+              # measuring 0Mi.
+              - (name): "longhorn-manager"
+                resources:
+                  requests:
+                    memory: "320Mi"
+                  limits:
+                    memory: "512Mi"
