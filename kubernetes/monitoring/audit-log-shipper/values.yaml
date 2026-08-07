@@ -96,7 +96,22 @@ extraVolumes:
   - name: kube-audit
     hostPath:
       path: /var/log/audit/kube
-      type: Directory
+      # type is deliberately EMPTY — do not "tighten" this to Directory.
+      #
+      # Measured 2026-08-07: with `type: Directory` the kubelet refused the
+      # mount on all three nodes for 27 minutes —
+      #   MountVolume.SetUp failed for volume "kube-audit":
+      #   hostPath type check failed: /var/log/audit/kube is not a directory
+      # — and the DaemonSet never left ContainerCreating.
+      #
+      # The path IS readable (talosctl lists both the live and rotated logs),
+      # but on Talos the kubelet's type check does not agree. The authority
+      # here is the kube-apiserver static pod, which mounts this exact path
+      # successfully and writes to it; its volume is
+      #   hostPath: {path: /var/log/audit/kube, type: ""}
+      # Matching it is what makes the mount work. An empty type skips the
+      # check rather than asserting something that is not true on this OS.
+      type: ""
 
 extraVolumeMounts:
   - name: positions
