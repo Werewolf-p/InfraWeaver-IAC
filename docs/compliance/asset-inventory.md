@@ -97,7 +97,6 @@ Source: `envs/<env>/nodes.yaml` in the infrastructure repo. These entries under 
 |---|---|---|
 | argocd-image-updater | no | Automatic container image tag updates via GitOps |
 | authentik | yes | Identity provider and SSO gateway |
-| authentik-ldap-outpost | yes | LDAP directory server — needed for TrueNAS and apps that cannot use OIDC |
 | external-dns | yes | Automatic DNS record management via Cloudflare |
 | falco | no | Runtime security and threat detection |
 | grafana | no | Standalone Grafana for custom dashboards |

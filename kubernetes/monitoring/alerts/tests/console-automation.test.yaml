@@ -180,22 +180,43 @@ tests:
               summary: 'Console CronJob infraweaver-console/placement-rebalance has NEVER succeeded'
               description: 'CronJob placement-rebalance was created over 26 hours ago, is not suspended, and has no recorded successful run at all. The missed-success alerts cannot fire for it because the metric they subtract from does not exist yet. Check the job template, image tag, and RBAC.'
 
-  # ── Regression: the pre-existing cluster rule must be UNCHANGED ────────────
+  # ── Regression: the cluster-wide generic rule covers what the old allowlist
+  # rule covered, and still excludes this namespace ───────────────────────────
+  #
+  # `ClusterAutomationCronJobMissedSuccess` (the allowlist rule this block used
+  # to assert) was removed on 2026-08-07 — it was blind to a never-succeeded
+  # CronJob and covered 6 of 31 names. Its replacement is CronJobMissedSuccess in
+  # alerts/cronjob-health.yaml, which derives the threshold from the CronJob's
+  # own schedule: argocd-self-healer runs */5, so 2x300s clamps up to the 1h
+  # floor — tighter than the old fixed 2h.
+  #
+  # The roster-drift input stays deliberately: it proves the generic rule's
+  # infraweaver-console exclusion still holds (only the argocd alert may appear
+  # below), while the earlier tests in this file prove
+  # ConsoleAutomationCronJobMissedSuccess still owns roster-drift. Two rules
+  # selecting one CronJob would page twice and Alertmanager cannot inhibit
+  # across alertnames.
   - interval: 1m
-    name: cluster rule untouched by the console change
+    name: generic cluster rule covers the old allowlist member
     input_series:
       - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="roster-drift"}'
         values: '0+0x300'
       - series: 'kube_cronjob_status_last_successful_time{namespace="argocd",cronjob="argocd-self-healer"}'
         values: '0+0x300'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="argocd",cronjob="argocd-self-healer"}'
+        values: '0+0x300'
+      - series: 'kube_cronjob_next_schedule_time{namespace="argocd",cronjob="argocd-self-healer"}'
+        values: '300+0x300'
+      - series: 'kube_cronjob_spec_suspend{namespace="argocd",cronjob="argocd-self-healer"}'
+        values: '0+0x300'
     alert_rule_test:
       - eval_time: 4h
-        alertname: ClusterAutomationCronJobMissedSuccess
+        alertname: CronJobMissedSuccess
         exp_alerts:
           - exp_labels:
               severity: warning
               namespace: argocd
               cronjob: argocd-self-healer
             exp_annotations:
-              summary: 'Automation CronJob argocd/argocd-self-healer has not succeeded recently'
-              description: 'Cluster automation CronJob argocd-self-healer has not reported a successful run within the last 2 hours.'
+              summary: 'CronJob argocd/argocd-self-healer has not succeeded within 2x its schedule interval'
+              description: 'CronJob argocd-self-healer has gone more than twice its own schedule interval without a successful run — at least one whole cycle is missing. This is the shape that catches a silently dead job. Check: kubectl -n argocd get jobs --sort-by=.metadata.creationTimestamp | tail, then the newest pod''s logs.'

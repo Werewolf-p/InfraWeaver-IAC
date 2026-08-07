@@ -25,16 +25,8 @@ spec:
     matchLabels:
       app.kubernetes.io/component: worker
       app.kubernetes.io/name: authentik
----
-# PodDisruptionBudget for Authentik LDAP outpost
-# Ensures LDAP auth (TrueNAS etc.) stays available during node drains.
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: authentik-ldap-outpost-pdb
-  namespace: authentik
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: authentik-ldap-outpost
+# NOTE: `authentik-ldap-outpost-pdb` lived here until 2026-08-07. It selected
+# ZERO pods (the outpost Deployment had been 0/0 for 54 days) while advertising
+# minAvailable: 1 — a PDB that protected nothing and, worse, read as evidence
+# that LDAP auth was a live control. Removed with the rest of the dead outpost.
+# `apps-authentik-manifests` has prune: true, so the live PDB is pruned on sync.

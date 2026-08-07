@@ -88,8 +88,20 @@ defaultSettings:
   # Verified 2026-08-07 by MOUNTPROC3_EXPORT against 10.1.0.135:
   #   EXPORT /mnt/pool/k8s-longhorn-backups  clients=[10.0.0.0/24]
   # i.e. the export exists and is ACL'd to exactly the cluster node subnet.
-  # Do NOT "fix" this by editing TRUENAS_HOST in .env — the console and the
-  # authentik LDAP outpost consume that same parameter (out of WP2 scope).
+  # The literal stays a literal EVEN AFTER the parameter is corrected: Helm apps
+  # never pass through the CMP, so `${TRUENAS_HOST}` here would ship verbatim.
+  # Do not "simplify" this back to the placeholder.
+  #
+  # The parameter itself is being corrected separately (it is genuinely wrong —
+  # 10.1.0.5 is a live device answering HTTPS 404, not the NAS). Nothing depends
+  # on that correction for THIS file to work. The ordering is subtle enough to
+  # need a runbook: the substitutions ConfigMap is the only CMP-rendered consumer
+  # of ${TRUENAS_HOST}, i.e. it renders itself from the sidecar env that came from
+  # itself, so an imperative patch is reverted by selfHeal until the repo-server
+  # sidecar restarts. See docs/SECURITY-REMEDIATION-RUNBOOK.md §P2.4.
+  #
+  # An earlier revision of this comment said the authentik LDAP outpost consumed
+  # the same parameter. That outpost was deleted 2026-08-07 — it never worked.
   #
   # On fresh redeploy, scripts/restore-from-truenas.sh uses this target to
   # restore PVCs before apps deploy. Restore procedure:

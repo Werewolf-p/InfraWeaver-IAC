@@ -1,0 +1,164 @@
+---
+# Self-check: alerts whose INPUT SERIES do not exist are dead controls.
+#
+# Measured 2026-08-07 against the live Prometheus: all five families below were
+# EMPTY (`count(<series>)` returned no result) while their alert rules sat green
+# in platform-alerts and in the chart's own groups. A rule that can never fire is
+# worse than no rule — the compliance claim outlives the mechanism, which is the
+# same rationale audit-and-retention.yaml was written for, and the same shape as
+# the backup that was "configured" for 54 days without ever running.
+#
+# THESE FIVE FIRE IMMEDIATELY AND STAY FIRING until the exporter or scrape each
+# one names is deployed. That is the point: the gap becomes a page instead of a
+# paragraph in a plan. Do not silence them. Either build the scrape or delete the
+# dead rules they guard — both close the alert, and both are honest.
+#
+# Dead rules currently guarded, by family:
+#   cert-manager  → CertificateExpiringSoon, CertificateExpiringCritical
+#   Longhorn      → LonghornVolumesDegraded, LonghornVolumeDegraded,
+#                   LonghornVolumeFaulted, LonghornNodeStoragePressure
+#   OpenBao       → OpenBaoSealed, OpenBaoUnavailable
+#   ArgoCD        → ArgoCDAppDegraded, ArgoCDSyncFailed
+#   etcd          → EtcdHighCommitDuration, EtcdMemberDown, and the whole
+#                   kube-prometheus-stack etcd rule group
+#
+# There is no ServiceMonitor for Longhorn, ArgoCD, OpenBao, cert-manager or
+# Kyverno in this cluster. The kube-etcd ServiceMonitor DOES exist but produces
+# zero targets, which is the more dangerous variant: it looks configured.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: alert-pipeline-selfcheck
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # must match the prometheusRule selector label
+spec:
+  groups:
+    - name: alert.pipeline.selfcheck
+      rules:
+        - alert: AlertInputMissingLonghorn
+          expr: absent(longhorn_volume_robustness)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Longhorn metrics absent — 4 Longhorn volume alerts are dead"
+            description: >-
+              longhorn_volume_robustness has no series, so LonghornVolumesDegraded,
+              LonghornVolumeDegraded, LonghornVolumeFaulted and
+              LonghornNodeStoragePressure in platform-alerts can never fire.
+              Fix: a ServiceMonitor for longhorn-backend (longhorn-manager
+              exposes /metrics on :9500) in kubernetes/core/longhorn/manifests/.
+
+        - alert: AlertInputMissingOpenBao
+          expr: absent(vault_core_unsealed)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "OpenBao metrics absent — OpenBaoSealed can never fire"
+            description: >-
+              vault_core_unsealed has no series, so a sealed OpenBao (every
+              ExternalSecret frozen) would page NOTHING. Fix: enable OpenBao
+              telemetry + ServiceMonitor; do NOT restart OpenBao to do it — it
+              seals on restart.
+
+        - alert: AlertInputMissingArgoCD
+          expr: absent(argocd_app_info)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD metrics absent — ArgoCDAppDegraded/SyncFailed are dead"
+            description: >-
+              argocd_app_info has no series. Fix: argocd-metrics ServiceMonitor
+              (metrics service exists in the argocd chart; see
+              kubernetes/core/argocd/values.yaml).
+
+        - alert: AlertInputMissingCertManager
+          expr: absent(certmanager_certificate_expiration_timestamp_seconds)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "cert-manager metrics absent — certificate-expiry alerts are dead"
+            description: >-
+              certmanager_certificate_expiration_timestamp_seconds has no
+              series; CertificateExpiringSoon/Critical can never fire. Fix:
+              cert-manager prometheus.servicemonitor.enabled=true.
+
+        - alert: AlertInputMissingEtcd
+          expr: absent(up{job="kube-etcd"})
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "etcd scrape has zero targets — all etcd alerts are dead"
+            description: >-
+              The kube-etcd ServiceMonitor exists but produces no targets, so
+              EtcdMemberDown (the documented compensating control for the
+              silenced Talos control-plane alerts) can never fire. Talos exposes
+              etcd metrics on :2381 only if configured; needs machine-config
+              etcd extraArgs listen-metrics-urls plus reachable endpoints.
+
+    # ── Escalation transport (GAP-M4 Phase C) ────────────────────────────────
+    # Same principle one layer up: the ALERTS themselves are only as real as the
+    # transport that carries them, and today every path terminates at one
+    # Discord webhook inside this cluster. Measured 2026-08-07: the email leg
+    # that was supposed to be the independent second transport has failed 180 of
+    # 182 sends, and AlertmanagerFailedToSendAlerts{integration="email"} has been
+    # firing — into Discord.
+    #
+    # The fix is staged across two operator steps (OpenBao seeding, then the
+    # values.yaml receivers) because doing them out of order parks Alertmanager
+    # in ContainerCreating. These two rules exist so the half-finished state
+    # cannot sit unnoticed: a TODO comment is not a control.
+    #
+    # Both are `warning`, not `critical`, on purpose: a critical here would ride
+    # the very route that is being reported as incomplete.
+    - name: alert.pipeline.escalation
+      rules:
+        - alert: AlertEscalationSecretMissing
+          # kube_secret_info appears the moment a Secret exists, so its absence
+          # means the ExternalSecret has not synced — almost always because
+          # secret/platform/monitoring/alerting was never seeded in OpenBao.
+          expr: absent(kube_secret_info{namespace="monitoring",secret="alertmanager-escalation-urls"})
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "External alert escalation is not provisioned (step 1 of 2)"
+            description: >-
+              The Secret alertmanager-escalation-urls does not exist, so the
+              external ntfy push and the healthchecks.io dead-man endpoint
+              cannot be wired. Every alert on this platform, including every
+              critical, currently terminates at one Discord webhook inside this
+              cluster. Operator step and the exact `bao kv put` command are in
+              kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml.
+              This alert clearing proves the SECRET exists — not that the
+              receiver is wired; AlertEscalationReceiverNotWired covers that.
+
+        - alert: AlertEscalationReceiverNotWired
+          # Step 2 has no direct metric: Alertmanager exports no per-receiver
+          # series, and alertmanager_notifications_failed_total is labelled by
+          # integration, not by receiver. The receiver COUNT is the only
+          # available proxy. It is 4 today (null, discord, email-admin,
+          # deadmansswitch) and becomes 5 when critical-push is added.
+          # LIMITATION, stated rather than hidden: adding any unrelated receiver
+          # would also satisfy this. If the receiver set in values.yaml changes
+          # for any other reason, this threshold MUST be re-derived in the same
+          # commit or it silently stops guarding anything.
+          expr: max(alertmanager_receivers) < 5
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "External alert escalation receiver is not wired (step 2 of 2)"
+            description: >-
+              Alertmanager has fewer receivers than the escalation design
+              requires, so the critical-push (ntfy) receiver and the
+              healthchecks.io dead-man leg are not in the running config.
+              Critical alerts are still Discord-only. Enable the staged block in
+              kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only
+              after the alertmanager-escalation-urls Secret exists, or the
+              Alertmanager pod will hang in ContainerCreating.

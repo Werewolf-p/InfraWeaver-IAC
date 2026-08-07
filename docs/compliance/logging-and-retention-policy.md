@@ -134,11 +134,16 @@ retention operation and these are the platform's actual failure modes.
 
 ## 8. Monitoring the monitoring
 
-Retention is only useful if collection is running. The `platform-alerts`
-PrometheusRule covers CronJob-miss conditions
-(`ClusterAutomationCronJobMissedSuccess`,
-`ConsoleAutomationCronJobMissedSuccess`,
-`LonghornBackupVerifierMissedSuccess`).
+Retention is only useful if collection is running. CronJob-miss conditions are
+covered cluster-wide by `kubernetes/monitoring/alerts/cronjob-health.yaml`
+(`CronJobMissedSuccess`, `CronJobNeverSucceeded`, `CronJobLastRunFailed`,
+`CronJobSuspended`, `StandaloneJobFailed`, and the critical-severity
+`BackupCronJobMissedSuccess` for the backup chain), plus
+`ConsoleAutomationCronJobMissedSuccess` in the `platform-alerts` PrometheusRule
+for the `infraweaver-console` namespace, which keeps its own tighter cadence
+thresholds and is excluded from the generic rules so nothing pages twice.
+The allowlist-based `ClusterAutomationCronJobMissedSuccess` and the
+never-firing `LonghornBackupVerifierMissedSuccess` were removed on 2026-08-07.
 
 **Three known weaknesses in the delivery path**, all WP8. Verified against the
 live Alertmanager configuration on 2026-08-07:
@@ -168,3 +173,46 @@ kubectl get secret -n monitoring alertmanager-kube-prometheus-stack-alertmanager
    Even if a route were added today, mail would be addressed to a literal
    `${BASE_DOMAIN}` and fail. WP8 must fix the substitution, not just the
    routing.
+
+### Update 2026-08-07 — measured, and partially remediated
+
+Weaknesses 1 and 2 were addressed by the earlier GAP-M4 routing work: Watchdog
+now routes to a real `deadmansswitch` receiver, and `severity=critical` fans out
+over a `continue: true` chain to two receivers. Weakness 3 is **confirmed still
+open, and worse than written**:
+
+- `alertmanager_notifications_total{integration="email"}` = 182,
+  `alertmanager_notifications_failed_total{integration="email"}` = 180. The
+  email transport has effectively never delivered.
+- `AlertmanagerFailedToSendAlerts{integration="email"}` is **firing**, and it
+  routes to Discord — the channel email was meant to back up.
+- Consequence: "critical fans out over two transports" is Discord-only in
+  practice, and both the critical route and the dead-man's switch terminate
+  inside the cluster they are supposed to be watching.
+
+Remediation is staged in two operator steps, deliberately not auto-applied
+because doing them out of order parks Alertmanager in `ContainerCreating`:
+
+1. Seed `secret/platform/monitoring/alerting` in OpenBao with `ntfy-url` and
+   `healthchecks-url`; the ExternalSecret is already deployed
+   (`kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml`,
+   which carries the exact command).
+2. Enable the staged receiver/route block in
+   `kubernetes/monitoring/kube-prometheus-stack/values.yaml`.
+
+Both endpoints are consumed via Alertmanager's `webhook_configs.url_file`, so no
+real URL is ever written into this repository (it is mirrored publicly) and no
+`${...}` substitution is required (this values file bypasses the CMP). The
+healthchecks.io leg on `deadmansswitch` is the first alerting termination
+*outside* this cluster: when the cluster, Prometheus, Alertmanager or the
+Discord bridge dies, the pings stop and healthchecks.io alarms.
+
+Until both steps are done, `AlertEscalationSecretMissing` and
+`AlertEscalationReceiverNotWired`
+(`kubernetes/monitoring/alerts/alert-pipeline-selfcheck.yaml`) fire
+continuously. The gap is a page, not a paragraph.
+
+The `email` recipient itself stays broken: Alertmanager has no `to_file`
+equivalent for `smtp_*`'s `to:` field, so it remains a literal `${ADMIN_EMAIL}`
+until the values pipeline substitutes. Once ntfy is live, email is no longer
+load-bearing as the second transport.

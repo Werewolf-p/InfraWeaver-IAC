@@ -150,6 +150,163 @@ recognize. Performed by the feedback dispatch (`/approve`) and reversible
 
 ---
 
+## 7.1 Server-Side Apply hazards
+
+**Read this before adding `ServerSideApply=true`, `RespectIgnoreDifferences=true`,
+or any `ignoreDifferences` entry to an Application.**
+
+Four SSA traps have bitten this platform. Three of them fail *loudly*. The
+fourth reports **success**, and it is the reason this section exists.
+
+### The four variants
+
+| # | Hazard | How it shows |
+|---|--------|--------------|
+| 1 | `--force` cannot be combined with `--server-side` | **Loud.** Sync fails outright once `ServerSideApply=true` + `RespectIgnoreDifferences` + a real diff coincide |
+| 2 | Namespace tracking-id "SSA ownership ping-pong" | **Loud-ish.** Perpetual OutOfSync / churn on Namespaces |
+| 3 | **In-list `ignoreDifferences` silently drops the list from the SSA payload** | **SILENT. Reports `serverside-applied` and `Synced`.** |
+| 4 | Stale `last-applied-configuration` left by a client-side apply | Churn, and the object drifts out of ArgoCD's ownership |
+
+**(1) `--force` + `--server-side`.** When an Application sets
+`ServerSideApply=true` *and* `RespectIgnoreDifferences=true` *and* there is a
+real diff, ArgoCD's apply can reach for `--force`, which the API server refuses
+alongside `--server-side`. First hit on `catalog-game-hub-servers` (2026-07-05).
+Fix used: opt the specific resource out with the per-resource annotation
+`argocd.argoproj.io/sync-options: ServerSideApply=false`. Note this trap is
+*dormant until a real diff exists* — it detonates on an unrelated later sync.
+
+**(2) Namespace tracking-id ping-pong.** See the note at
+`kubernetes/core/argocd/values.yaml` (~line 271) and the fieldset-ownership
+comment in `kubernetes/core/psa/namespace-labels.yaml` (~line 60).
+
+### (3) The silent one — an SSA apply that reports success and writes nothing
+
+**Incident, 2026-08-07, `core-kyverno-policies` /
+`ClusterPolicy/mutate-default-sa-automount`:**
+
+- 17:33:31 commit `2ac5e87` adds a second rule to `spec.rules`.
+- 17:35:29–33 the automated sync of that revision runs. `phase: Succeeded`.
+  syncResult message: `serverside-applied`. App: `Synced`.
+- The live object did not have the new rule. An operator landed it by hand at
+  17:37:12 with a plain `kubectl apply`.
+
+**The diagnostic that proved it — use this one, it generalizes.** Compare the
+object's `managedFields` entry for `argocd-controller` against the sync's
+`operationState.finishedAt`:
+
+```bash
+kubectl get <kind> <name> -o json --show-managed-fields \
+  | jq '[.metadata.managedFields[] | {manager, operation, time, spec: (.fieldsV1["f:spec"] | keys)}]'
+kubectl -n argocd get application <app> -o jsonpath='{.status.operationState.finishedAt}'
+```
+
+On the incident object, `argocd-controller`'s fieldset was last changed at
+**14:56:55Z** — 2h38m *before* the 17:35 sync that claimed to apply it — and
+contained **no `f:rules`**. An apply that "succeeded" without moving the fieldset
+of the fields it was supposed to change **did not send them**. (Had the payload
+carried `spec.rules` at all, even unchanged, ArgoCD would have gained `f:rules`.
+Had it conflicted with another owner, the sync would have failed loudly.)
+
+**Prime suspect (not yet proven** — discriminate it with
+[`SSA-IGNOREDIFFERENCES-REPRO-RUNBOOK.md`](./SSA-IGNOREDIFFERENCES-REPRO-RUNBOOK.md)
+*before* changing any `ignoreDifferences`**).** The app's `ignoreDifferences` includes
+`.spec.rules[].skipBackgroundRequests` — a path reaching *inside* an atomic
+list. `ClusterPolicy.spec.rules` has no `x-kubernetes-list-type: map` (measured:
+the CRD's `spec.rules` schema declares only `description`, `items`, `type`), so
+it is atomic and cannot be surgically edited. Under `RespectIgnoreDifferences`,
+removing an ignored path from inside an atomic list plausibly drops the entire
+list from the payload. This trap has existed since the repo's first commit; it
+only detonates when a *real* rules change is pending — the worst possible
+failure shape, because it engages exactly when it matters.
+
+**`argocd app diff` IS NOT A DETECTOR FOR THIS. Do not let anyone verify a fix
+with it.** With or without `--server-side-generate`, it applies the app's
+`ignoreDifferences` normalization to both sides before comparing — the same
+normalization that built the bad payload. It reads clean exactly when the app
+reads Synced, and both are wrong for the same reason. `selfHeal` is blind for
+the same reason: git and live look equal to the thing that made them unequal.
+
+**What detects it:** ask the API server who owns the field. Shipped as the
+hourly CronJob `kyverno-ssa-ownership-detector` in
+`kubernetes/core/kyverno/manifests/ssa-ownership-detector.yaml`; the same check
+by hand is in that file's header.
+
+**Escape hatch after any rules change to a policy:** verify the rule names
+landed, and if they did not, re-apply *keeping ArgoCD's ownership*:
+
+```bash
+kubectl get cpol <name> -o json | jq '[.spec.rules[].name]'   # vs git
+kubectl apply --server-side --field-manager=argocd-controller -f <file>
+```
+
+Use that field manager, not a plain `kubectl apply` — a plain apply is what
+created variant (4) on this object.
+
+**(4) Stale client-side residue.** A plain `kubectl apply` writes
+`kubectl.kubernetes.io/last-applied-configuration` and takes the field with a
+`kubectl-client-side-apply`/`Update` entry. Once ArgoCD owns the field again,
+strip the residue:
+
+```bash
+kubectl annotate <kind> <name> kubectl.kubernetes.io/last-applied-configuration-
+```
+
+Do **not** delete-and-recreate a live mutating policy to clean this up — that
+opens an admission-mutation gap, however brief.
+
+### The same hazardous combo is on 25 of 63 Applications
+
+Measured 2026-08-07 — Applications pairing `RespectIgnoreDifferences=true` with
+an `ignoreDifferences` jqPathExpression that indexes *into a list*:
+
+```bash
+kubectl -n argocd get applications -o json | jq -r '
+  .items[]
+  | select((.spec.syncPolicy.syncOptions//[]) | index("RespectIgnoreDifferences=true"))
+  | . as $a
+  | [$a.spec.ignoreDifferences[]?.jqPathExpressions[]? | select(contains("[]"))] as $j
+  | select(($j|length) > 0)
+  | .metadata.name + "  ::  " + ($j|join(" "))'
+```
+
+- **1 app** — `core-kyverno-policies`, on `.spec.rules[].skipBackgroundRequests`.
+  This is the one that detonated.
+- **24 apps** — every ExternalSecret-managing app, on
+  `.spec.data[].remoteRef.{conversionStrategy,decodingStrategy,metadataPolicy}`
+  (`catalog-infraweaver-console-manifests` additionally on
+  `.spec.data[].match.remoteRef.*`). Sources: the four ApplicationSets in
+  `kubernetes/bootstrap/appset-*.yaml` + `applicationset-root.yaml`, and the
+  per-app files `catalog-gatus-manifests`, `catalog-infraweaver-{api,console,foyer}-manifests`,
+  `catalog-jellyfin`, `catalog-nas-shares`, `catalog-nextcloud`.
+
+`ExternalSecret.spec.data` is **also an atomic list** — measured, its CRD schema
+declares only `description`, `items`, `type`, with no `x-kubernetes-list-type`.
+**So a future change to `spec.data` on an ExternalSecret may silently not
+apply, while the Application reports Synced.** The consequence is a Secret that
+keeps serving its old value: exactly the failure mode that is hardest to
+attribute, because nothing anywhere reports an error.
+
+The detector's ownership logic extends to these directly — same query, with
+`f:data` on `externalsecrets` instead of `f:rules` on `clusterpolicies`. Whether
+that gets its own backlog entry is an operator decision.
+
+### Rule of thumb
+
+> An `ignoreDifferences` path that contains `[]` is reaching into a list. If
+> that list is atomic (no `x-kubernetes-list-type: map` in the CRD), assume the
+> whole list can vanish from an SSA payload without any error being reported.
+> Prefer pinning the defaulted field explicitly in git over ignoring it.
+
+Check before adding one:
+
+```bash
+kubectl get crd <crd> -o json \
+  | jq '.spec.versions[] | select(.name=="<ver>") | .schema.openAPIV3Schema.properties.spec.properties.<list> | keys'
+# no "x-kubernetes-list-type" -> atomic -> hazardous
+```
+
+---
+
 ## 8. Migration plan (status)
 
 | # | Item | Status |

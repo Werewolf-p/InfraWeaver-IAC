@@ -114,3 +114,54 @@ nightly Longhorn job logged `Found 0 volumes` and exited `0` for 54 days.
    both etcd *and* a current machine config. Adding
    `talosctl -n <node> get mc -o yaml` to the same schedule is the natural next
    step and is tracked in the runbook.
+4. **Nothing observes this schedule.** Measured on the ops host (10.1.0.108) on
+   2026-08-07: no user or root crontab entry, no `/etc/cron.d` entry, no systemd
+   timer, and no `/var/backups/etcd` directory. The control is designed and
+   documented; it is **not installed**. Prometheus also scrapes nothing on the
+   ops host, so even once installed there would be no in-cluster signal. See the
+   verifier design below.
+
+---
+
+## Observability: the `etcd-snapshot-verifier` fold-in
+
+The alerting side is pre-wired and costs nothing on the day this ships. The name
+**`etcd-snapshot-verifier` is already reserved** in the backup-chain selectors of
+`kubernetes/monitoring/alerts/cronjob-health.yaml`, where it matches nothing
+today and is therefore silent. The moment a CronJob by that name exists in
+namespace `monitoring` (or `longhorn-system`), all of
+`BackupCronJobMissedSuccess`, `BackupCronJobNeverSucceeded` and
+`BackupCronJobSuspended` cover it at **critical** severity with zero rule
+changes.
+
+Design, to be built alongside the prerequisites in items 2 and 4 above:
+
+- **Shape:** a Kubernetes CronJob in namespace `monitoring`, schedule
+  `10 4 * * *` — after the 03:40 snapshot, and clear of both the 00–02 window
+  this README's assertion protects and the Longhorn backup window.
+- **What it asserts (the OUTCOME, not the mechanism):** list
+  `//10.1.0.135/infraweaver/etcd-snapshots/`; the newest `etcd-*Z.db.gz` must be
+  younger than 26h, larger than 10 MiB, and accompanied by its `.sha256`
+  sidecar. Exit non-zero otherwise. This is the same reason
+  `longhorn-backup-verifier` exists: a control is proven by a fresh restorable
+  artifact off-box, never by the fact that a schedule is configured.
+- **Pod shape:** mirror `longhorn-backup-verifier` in
+  `kubernetes/core/longhorn/manifests/automation-jobs.yaml` — `runAsNonRoot`,
+  `activeDeadlineSeconds: 900`, `failedJobsHistoryLimit: 1`,
+  `successfulJobsHistoryLimit: 2`, alpine + smbclient.
+- **Credential:** a **read-only** SMB credential scoped to `etcd-snapshots`,
+  minted at the same time as the write credential in item 2. This does not put
+  `os:admin` in the cluster — the red line this whole design exists to hold. A
+  read-only listing credential is an acceptable exposure; a snapshot-taking
+  credential is not.
+- **NetworkPolicy:** egress from the verifier pod to `10.1.0.135:445`. This is
+  the exact shape that silently killed Longhorn backups for 54 days — the
+  `airgap-baseline` policy denied the NAS while everything looked configured.
+  Test from inside the pod on first deploy; do not infer it from the manifest.
+- **THE ONE RULE CHANGE, and it must be in the SAME commit as the CronJob:** add
+  `or absent(kube_cronjob_spec_suspend{namespace="monitoring",cronjob="etcd-snapshot-verifier"})`
+  to `BackupCronJobAbsent`. Adding it any earlier fires a permanent false
+  critical; adding it later leaves a deleted verifier undetectable.
+
+Until that lands, etcd snapshots are **uninstalled and unmonitored**, and this
+paragraph is the honest record of it.

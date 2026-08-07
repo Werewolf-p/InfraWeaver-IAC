@@ -205,6 +205,21 @@ prometheus:
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
 
+# ── Chart default-rule overrides ─────────────────────────────────────────────
+# KubeJobFailed (kube_job_failed > 0, for: 15m) is replaced by
+# alerts/cronjob-health.yaml. Two measured defects: (1) it can NEVER fire for a
+# CronJob faster than 15m with failedJobsHistoryLimit<=1 — each failed Job is a
+# new series that is deleted before the `for:` elapses (the four kyverno cleanup
+# jobs failed every 10 minutes for hours, silently); (2) it fires and STAYS
+# firing for stale failed Jobs retained by failedJobsHistoryLimit=3 long after
+# later successes — 23 simultaneous firings measured on 2026-08-07, which is the
+# noise that taught the operator to ignore Discord. CronJobLastRunFailed +
+# StandaloneJobFailed + CronJobNeverSucceeded cover strictly more, accurately.
+# KubeJobNotCompleted (stuck >12h) is intentionally kept.
+defaultRules:
+  disabled:
+    KubeJobFailed: true
+
 # ── AlertManager ─────────────────────────────────────────────────────────────
 alertmanager:
   enabled: true
@@ -217,6 +232,15 @@ alertmanager:
           resources:
             requests:
               storage: 2Gi
+    # ── Escalation transport, step 2 of 2 — DO NOT UNCOMMENT YET ─────────────
+    # Enabling this line while the Secret does not exist leaves the Alertmanager
+    # pod in ContainerCreating forever, i.e. NO alerting at all. That is a worse
+    # outage than the missing escalation leg it fixes, so the order is not
+    # negotiable. See the "Escalation transport" block further down for the full
+    # two-step procedure and the alerts that page until it is finished.
+    #
+    # secrets:
+    #   - alertmanager-escalation-urls
   # ── Alerting delivery (GAP-M4, SOC 2 CC7.3-7.5) ────────────────────────────
   # BEFORE: every route that delivered anything at all ended at ONE Discord
   # webhook (the `all` receiver was Discord too, despite its name), `email-admin`
@@ -360,6 +384,13 @@ alertmanager:
       # becomes the independent transport as soon as the two gaps in `global`
       # above are closed. send_resolved is off on both: Watchdog never resolves,
       # so a "resolved" notification could only ever mean the pipeline died.
+      #
+      # MEASURED 2026-08-07: the email leg has never delivered. 180 of 182 email
+      # notifications FAILED and AlertmanagerFailedToSendAlerts{integration="email"}
+      # is firing right now — into Discord, the channel it was supposed to back
+      # up. Both legs of this receiver are therefore effectively one leg, inside
+      # one cluster. The real fix is the healthchecks.io leg in the escalation
+      # block below.
       - name: "deadmansswitch"
         webhook_configs:
           - url: "http://alertmanager-discord.monitoring.svc.cluster.local:9094"
@@ -367,6 +398,106 @@ alertmanager:
         email_configs:
           - to: "${ADMIN_EMAIL}"
             send_resolved: false
+
+    # ══ ESCALATION TRANSPORT (GAP-M4 Phase C) — STAGED, NOT YET ACTIVE ═══════
+    #
+    # THE PROBLEM, measured not assumed (2026-08-07):
+    #   - Every route above terminates at ONE Discord webhook, inside this
+    #     cluster. The `severity=critical` fan-out to two transports is
+    #     Discord-only in practice because email is dead (180/182 sends failed).
+    #   - Gatus alerts to the same Discord webhook. It is a second watcher, not
+    #     a second failure domain.
+    #   - The Watchdog dead-man's switch also terminates in-cluster, so cluster
+    #     death, Prometheus death and webhook death are indistinguishable from
+    #     "all quiet".
+    #
+    # WHY url_file AND NOT A PLAIN url: `${...}` is NOT substituted in this file
+    # (the platform-monitoring ApplicationSet consumes it as a Helm `$values`
+    # file, bypassing the CMP — that is exactly why ${ADMIN_EMAIL} is a literal
+    # string in the live Alertmanager secret), and this repo is mirrored to a
+    # public remote, so a real ntfy topic or healthchecks UUID must never be
+    # written here. `url_file` reads the URL from a mounted Secret at send time,
+    # which dodges both problems with no new machinery.
+    #
+    # ── TWO OPERATOR STEPS, IN THIS ORDER ────────────────────────────────────
+    # STEP 1 (already merged, safe): the ExternalSecret
+    #   `alertmanager-escalation-urls` in manifests/externalsecret.yaml. Seed
+    #   OpenBao — the exact `bao kv put` command and what each URL must be are
+    #   documented in that file — then CONFIRM the Kubernetes Secret exists:
+    #     kubectl -n monitoring get secret alertmanager-escalation-urls
+    #
+    # STEP 2 (this block + the `secrets:` line in alertmanagerSpec above): only
+    #   after STEP 1's Secret is confirmed present. Uncomment
+    #   `alertmanagerSpec.secrets`, uncomment the `critical-push` receiver and
+    #   the two route/receiver additions below, and add the healthchecks leg to
+    #   `deadmansswitch`. Doing STEP 2 first parks Alertmanager in
+    #   ContainerCreating — no alerting at all.
+    #
+    # ── WHY THIS IS STAGED RATHER THAN SHIPPED LIVE ─────────────────────────
+    # Shipping the receivers now, before the Secret is mounted, would make
+    # url_file point at a nonexistent path. Alertmanager would load the config
+    # fine and fail at send time, which sounds like the desired loud failure —
+    # but `alertmanager_notifications_failed_total` is labelled by INTEGRATION,
+    # not by receiver. A permanently-failing webhook would poison the one signal
+    # that can currently tell us the Discord webhook broke
+    # (integration="webhook" is at 0 failures today). Trading a working alarm
+    # for a louder TODO is the wrong trade.
+    #
+    # ── HOW THE GAP PAGES INSTEAD OF ROTTING ────────────────────────────────
+    # alerts/alert-pipeline-selfcheck.yaml carries two rules that fire until
+    # both steps are complete: AlertEscalationSecretMissing (step 1) and
+    # AlertEscalationReceiverNotWired (step 2). Neither can be satisfied by
+    # writing a comment.
+    #
+    # ── THE EXACT BLOCK TO ENABLE IN STEP 2 ─────────────────────────────────
+    # In `receivers:` above, add:
+    #
+    #   - name: "critical-push"
+    #     webhook_configs:
+    #       - url_file: /etc/alertmanager/secrets/alertmanager-escalation-urls/ntfy-url
+    #         send_resolved: true
+    #
+    # On the existing `deadmansswitch` receiver, add a SECOND webhook entry —
+    # this is the external termination the LIMITATION note above reserved a slot
+    # for:
+    #
+    #       - url_file: /etc/alertmanager/secrets/alertmanager-escalation-urls/healthchecks-url
+    #         send_resolved: false
+    #
+    # In `route.routes:` above, change the LAST critical leg
+    # (`receiver: "email-admin"`) to `continue: true` and append a third leg
+    # after it:
+    #
+    #   - matchers: ['severity = "critical"']
+    #     receiver: "critical-push"
+    #     repeat_interval: 1h
+    #     continue: false
+    #
+    # ── BEFORE MERGING STEP 2: VERIFY EGRESS, DO NOT ASSUME IT ───────────────
+    # The Alertmanager pod must reach ntfy.sh:443 and hc-ping.com:443. The
+    # monitoring NetworkPolicies in manifests/networkpolicy.yaml are
+    # ingress-only, but the cluster-wide airgap-baseline policy — the one that
+    # silently blocked Longhorn from reaching the NAS for 54 days — lives
+    # elsewhere. Check it, then test from the pod:
+    #     kubectl get ccnp,cnp -A | grep -i airgap
+    #     kubectl -n monitoring exec sts/alertmanager-kube-prometheus-stack-alertmanager \
+    #       -c alertmanager -- wget -qO- --timeout=5 https://hc-ping.com/ >/dev/null && echo reachable
+    # If it is enforced, add an allowlist entry in
+    # kubernetes/core/network-policies/manifests/allowlists.yaml (follow the
+    # gatus/console entries there).
+    #
+    # ── WHAT THIS DOES NOT FIX ──────────────────────────────────────────────
+    # Email stays dead. The SMTP *password* could move to
+    # `smtp_auth_password_file` via the same secret-mount trick, but the
+    # recipient (`to:`) has NO `_file` variant in Alertmanager — it stays a
+    # literal `${ADMIN_EMAIL}` until the values pipeline substitutes. Stated
+    # plainly rather than pretended away. Once ntfy is live, email is redundant
+    # as the second transport anyway.
+    #
+    # ── ROLLBACK ORDER (the reverse, and it matters) ─────────────────────────
+    # Remove the receiver/route legs FIRST, let Alertmanager reload, and only
+    # then remove the `secrets:` mount. The other order reloads Alertmanager
+    # with a dangling url_file.
     inhibit_rules:
       - source_matchers: ['severity = "critical"']
         target_matchers: ['severity = "warning"']

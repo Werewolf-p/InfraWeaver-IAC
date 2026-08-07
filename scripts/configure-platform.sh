@@ -44,7 +44,6 @@ ENABLE_LONGHORN=$(_env_val ENABLE_LONGHORN "true")
 ENABLE_KYVERNO=$(_env_val ENABLE_KYVERNO "true")
 ENABLE_GRAFANA=$(_env_val ENABLE_GRAFANA "false")
 ENABLE_LOKI=$(_env_val ENABLE_LOKI "true")
-ENABLE_AUTHENTIK_LDAP=$(_env_val ENABLE_AUTHENTIK_LDAP "false")
 # MONITORING_STACK: which Prometheus-compatible stack to use when ENABLE_MONITORING=true
 #   kube-prometheus-stack  — default, full-featured, ~600Mi RAM
 #   victoria-metrics       — lightweight PromQL-compatible alternative, ~280Mi RAM
@@ -60,7 +59,6 @@ echo "    ENABLE_LONGHORN=${ENABLE_LONGHORN}"
 echo "    ENABLE_KYVERNO=${ENABLE_KYVERNO}"
 echo "    ENABLE_GRAFANA=${ENABLE_GRAFANA}"
 echo "    ENABLE_LOKI=${ENABLE_LOKI}"
-echo "    ENABLE_AUTHENTIK_LDAP=${ENABLE_AUTHENTIK_LDAP}"
 
 # ── Helper: update a platform.yaml value using Python ───────────────────────
 _set_platform_flag() {
@@ -263,9 +261,10 @@ _toggle_platform_app() {
 _set_platform_flag "groups.core-platform.apps.grafana.enabled" "$ENABLE_GRAFANA"
 _toggle_platform_app "grafana" "$ENABLE_GRAFANA"
 
-# Authentik LDAP outpost — managed as bootstrap companion, not AppSet
-_set_platform_flag "groups.core-platform.apps.authentik-ldap-outpost.enabled" "$ENABLE_AUTHENTIK_LDAP"
-_toggle_bootstrap_companion "app-authentik-ldap.yaml" "$ENABLE_AUTHENTIK_LDAP"
+# NOTE: the Authentik LDAP outpost toggle used to live here. Removed 2026-08-07
+# together with its manifests, bootstrap companion and platform.yaml entry — the
+# outpost was dead end-to-end (no provider, no outpost object, no token, VIP
+# never assigned, Deployment 0/0 for 54 days). See docs/BREAK-GLASS.md §10.
 
 # ── 6b. Monitoring stack selection (kube-prometheus-stack vs victoria-metrics) ─
 # Toggle which monitoring application.yaml is active under kubernetes/monitoring/.

@@ -1,0 +1,286 @@
+---
+# Cluster-wide CronJob and Job failure alerting (P2.8).
+#
+# WHY: four Kyverno report-cleanup CronJobs failed every 10 minutes for hours and
+# nothing paged; the Longhorn backup target sat dead for 54 days and nothing said
+# so. The chart's KubeJobFailed alert cannot catch a fast CronJob with
+# failedJobsHistoryLimit=1: each failed Job is a NEW series that lives one
+# schedule interval (~10m), so its `for: 15m` clock resets forever. And every
+# time()-last_successful_time rule is structurally blind to a CronJob that has
+# NEVER succeeded, because the series it subtracts does not exist — measured on
+# the live cluster: longhorn-backup-verifier had zero successes in 54 days while
+# its "MissedSuccess" alert sat green.
+#
+# Shapes, in order of what they catch:
+#   1. MissedSuccess    — the silently-dead job. Threshold is derived from the
+#                         CronJob's own schedule (next−last schedule time == the
+#                         interval, verified for all 31 live CronJobs), so one
+#                         rule spans */5-minute to weekly without an allowlist.
+#                         A CronJob added tomorrow is covered by default.
+#   2. NeverSucceeded   — the case (1) cannot see. Grace from kube_cronjob_created,
+#                         not from a long `for:` (single-replica Prometheus with an
+#                         OOM history resets pending alerts on restart).
+#   3. LastRunFailed    — fast signal (~20-30 min): newest failed Job started
+#                         AFTER the owning CronJob's last success. Self-resolves
+#                         on the next success; does NOT fire for a stale failed
+#                         Job retained by failedJobsHistoryLimit after later
+#                         successes (the 23 sticky KubeJobFailed alerts measured
+#                         on 2026-08-07). Replaces the chart's KubeJobFailed,
+#                         which is disabled in kube-prometheus-stack values.
+#   4. StandaloneJobFailed — Jobs with no CronJob owner (e.g. velero/minio-create-bucket,
+#                         failed and unwatched when this file was written).
+#
+# The infraweaver-console namespace is EXCLUDED from 1/2 and the suspend rule:
+# console.automation.health (manifests/prometheus-rules.yaml) and
+# alerts/openbao-token.yaml already own it with tighter cadence thresholds, and a
+# second selection double-pages un-inhibitably (inhibition keys on alertname).
+# LastRunFailed deliberately DOES include it — a different, faster condition no
+# console rule expresses.
+#
+# The backup chain (Longhorn recurring jobs, the backup verifier, and the future
+# etcd-snapshot-verifier) gets CRITICAL copies of every shape in its own group
+# below, and is excluded from the generic warning rules so severity is right and
+# nothing fires twice. Data-loss controls ride the critical route, which fans out
+# to two transports (values.yaml).
+#
+# Suspended CronJobs are excluded from staleness rules everywhere:
+# last_successful_time freezes during suspension, so time()-lst grows without
+# bound and the alert would fire forever on a deliberate operator pause.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cronjob-health-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # must match the prometheusRule selector label
+spec:
+  groups:
+
+    - name: cronjob.health
+      rules:
+        - alert: CronJobMissedSuccess
+          # 2x its own schedule interval without a success = at least one whole
+          # missed cycle, clamped to >=1h (a */5 job should not page on a single
+          # hiccup) and <=8d (a weekly job missing one run pages ~1 day after the
+          # miss, not after two more weeks).
+          expr: |
+            (
+              time()
+              - max by (namespace, cronjob) (
+                  kube_cronjob_status_last_successful_time{namespace!="infraweaver-console",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                )
+            )
+            >
+            clamp(
+              2 * max by (namespace, cronjob) (
+                    kube_cronjob_next_schedule_time{namespace!="infraweaver-console",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                  - kube_cronjob_status_last_schedule_time{namespace!="infraweaver-console",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                  ),
+              3600, 691200
+            )
+            unless on (namespace, cronjob)
+              max by (namespace, cronjob) (kube_cronjob_spec_suspend) == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not succeeded within 2x its schedule interval"
+            description: >-
+              CronJob {{ $labels.cronjob }} has gone more than twice its own
+              schedule interval without a successful run — at least one whole
+              cycle is missing. This is the shape that catches a silently dead
+              job. Check: kubectl -n {{ $labels.namespace }} get jobs
+              --sort-by=.metadata.creationTimestamp | tail, then the newest pod's
+              logs.
+
+        - alert: CronJobNeverSucceeded
+          # The gap MissedSuccess structurally cannot see: no
+          # last_successful_time series exists, so time()-<absent> returns
+          # nothing. Measured live: longhorn-backup-verifier and both game-hub
+          # scale jobs were in exactly this state, unalerted, for 54/33 days.
+          expr: |
+            max by (namespace, cronjob) (
+              kube_cronjob_spec_suspend{namespace!="infraweaver-console",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"} == 0
+            )
+            unless on (namespace, cronjob)
+              max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
+            and on (namespace, cronjob)
+              (time() - max by (namespace, cronjob) (kube_cronjob_created) > 93600)
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has NEVER succeeded"
+            description: >-
+              CronJob {{ $labels.cronjob }} was created over 26 hours ago, is not
+              suspended, and has no recorded successful run at all. The
+              missed-success alert cannot fire for it because the metric it
+              subtracts from does not exist yet. Check the job template, image,
+              RBAC, and NetworkPolicies.
+
+        - alert: CronJobLastRunFailed
+          # Newest failed Job started AFTER the last success => the most recent
+          # completed state is failure. Per-CronJob aggregation makes this immune
+          # to job-name churn (the KubeJobFailed blindness), and the comparison
+          # to last success makes it self-resolve instead of firing for stale
+          # failed Jobs kept by failedJobsHistoryLimit=3.
+          # NOTE: does NOT cover argocd-self-healer (failedJobsHistoryLimit: 0 —
+          # failed Jobs are deleted before kube-state-metrics can export them);
+          # MissedSuccess covers that CronJob.
+          expr: |
+            max by (namespace, cronjob) (
+              label_replace(
+                (
+                  kube_job_status_start_time
+                  * on (namespace, job_name) group_left (owner_name)
+                    max by (namespace, job_name, owner_name) (kube_job_owner{owner_kind="CronJob"})
+                )
+                and on (namespace, job_name)
+                  (max by (namespace, job_name) (kube_job_status_failed) > 0),
+                "cronjob", "$1", "owner_name", "(.+)"
+              )
+            )
+            > on (namespace, cronjob)
+              max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronJob {{ $labels.namespace }}/{{ $labels.cronjob }}: most recent run failed"
+            description: >-
+              The newest Job of CronJob {{ $labels.cronjob }} started after its
+              last recorded success and has failed pods (BackoffLimitExceeded,
+              DeadlineExceeded, or still retrying). This resolves on the next
+              successful run. Check: kubectl -n {{ $labels.namespace }} logs
+              job/$(kubectl -n {{ $labels.namespace }} get jobs
+              --sort-by=.metadata.creationTimestamp -o name | tail -1 | cut -d/ -f2)
+
+        - alert: CronJobSuspended
+          expr: |
+            max by (namespace, cronjob) (
+              kube_cronjob_spec_suspend{namespace!="infraweaver-console",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+            ) == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} is suspended"
+            description: >-
+              CronJob {{ $labels.cronjob }} is suspended and will not run until
+              resumed: kubectl -n {{ $labels.namespace }} patch cronjob
+              {{ $labels.cronjob }} -p '{"spec":{"suspend":false}}'
+
+        - alert: StandaloneJobFailed
+          # Jobs with no CronJob owner have no last_successful_time to compare
+          # against; a failed one is an incident until deleted or fixed.
+          # kube_job_status_failed carries a verified `reason` label
+          # (BackoffLimitExceeded / DeadlineExceeded / Evicted) for triage.
+          expr: |
+            max by (namespace, job_name) (kube_job_status_failed) > 0
+            unless on (namespace, job_name)
+              max by (namespace, job_name) (kube_job_owner{owner_kind="CronJob"})
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Job {{ $labels.namespace }}/{{ $labels.job_name }} (no CronJob owner) has failed"
+            description: >-
+              Standalone Job {{ $labels.job_name }} has failed pods and no
+              CronJob owner, so no schedule will retry it. Investigate, then fix
+              or delete the Job (deleting clears this alert).
+
+    # ── Backup chain: same shapes, CRITICAL, absent-guarded ──────────────────
+    # truenas-backup-daily/-weekly and local-snapshot-daily move the data;
+    # longhorn-backup-verifier proves the OUTCOME (fresh backup on the target) —
+    # per the standing rule, verify a control SUCCEEDED, not that it is
+    # configured. etcd-snapshot-verifier is reserved in the regex for the P2.5
+    # fold-in (it matches nothing until that CronJob exists — deliberately
+    # silent, NOT an absent-guard, so this file can merge before P2.5 lands).
+    - name: cronjob.backup.chain
+      rules:
+        - alert: BackupCronJobMissedSuccess
+          expr: |
+            (
+              time()
+              - max by (namespace, cronjob) (
+                  kube_cronjob_status_last_successful_time{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                )
+            )
+            >
+            clamp(
+              2 * max by (namespace, cronjob) (
+                    kube_cronjob_next_schedule_time{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                  - kube_cronjob_status_last_schedule_time{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                  ),
+              3600, 691200
+            )
+            unless on (namespace, cronjob)
+              max by (namespace, cronjob) (kube_cronjob_spec_suspend) == 1
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "BACKUP CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not succeeded within 2x its schedule"
+            description: >-
+              {{ $labels.cronjob }} is part of the backup chain and has gone more
+              than twice its schedule interval without success. The last time
+              this failure mode went unwatched it lasted 54 days. Runbook:
+              docs/BACKUP-AND-RESTORE-RUNBOOK.md.
+
+        - alert: BackupCronJobNeverSucceeded
+          expr: |
+            max by (namespace, cronjob) (
+              kube_cronjob_spec_suspend{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"} == 0
+            )
+            unless on (namespace, cronjob)
+              max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
+            and on (namespace, cronjob)
+              (time() - max by (namespace, cronjob) (kube_cronjob_created) > 93600)
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "BACKUP CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has NEVER succeeded"
+            description: >-
+              Backup-chain CronJob {{ $labels.cronjob }} has no successful run at
+              all and is older than 26h. A backup control that has never
+              succeeded is a hypothesis, not a control. (This alert fired on
+              deploy day for longhorn-backup-verifier — that was correct.)
+
+        - alert: BackupCronJobSuspended
+          expr: |
+            max by (namespace, cronjob) (
+              kube_cronjob_spec_suspend{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+            ) == 1
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "BACKUP CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} is suspended"
+            description: >-
+              A backup-chain CronJob is suspended. The staleness alerts exclude
+              suspended jobs, so while this persists NOTHING else watches this
+              control. Resume it or accept in writing that backups are off.
+
+        - alert: BackupCronJobAbsent
+          # A deleted or ArgoCD-pruned backup CronJob produces NO series, which
+          # silently disarms every rule above. kube_cronjob_spec_suspend exists
+          # from the moment a CronJob is created, so its absence means the object
+          # is gone. One absent() per name — absent() cannot be aggregated.
+          # When P2.5 deploys etcd-snapshot-verifier, add its absent() line here
+          # in the SAME commit (adding it earlier fires a permanent critical).
+          expr: |
+            absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-daily"})
+            or absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"})
+            or absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"})
+            or absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"})
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "A backup-chain CronJob no longer exists"
+            description: >-
+              kube-state-metrics reports no CronJob object for
+              {{ $labels.namespace }}/{{ $labels.cronjob }}. It was deleted or
+              pruned; every other backup alert is now blind to it. Check the
+              longhorn / monitoring-alerts ArgoCD applications and git history.

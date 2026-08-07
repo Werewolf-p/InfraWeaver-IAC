@@ -75,6 +75,23 @@ spec:
     - metadata:
         name: redis-data
         annotations:
+          # ⚠️ INERT — BACKS NOTHING UP, AND NOTHING IS MEANT TO BACK IT UP.
+          # Measured 2026-08-07: this PVC is `local-path`, pinned by PV
+          # nodeAffinity to talos-prod-cp3's disk, so no Longhorn RecurringJob
+          # can see it; and PVC annotations never propagate to a Longhorn Volume
+          # CR in any case (see kubernetes/core/longhorn/manifests/backup-jobs.yaml).
+          #
+          # DECIDED 2026-08-07: Authentik Redis is ACCEPTED LOSS. It holds
+          # sessions, cache and the task queue — no system of record. Losing cp3
+          # means every user re-authenticates and in-flight tasks retry. There is
+          # deliberately no backup and none is planned; the SSO *database* is
+          # covered by manifests/pg-backup.yaml instead.
+          #
+          # Left in place rather than deleted because it renders into
+          # `volumeClaimTemplates`, which Kubernetes forbids updating — removing
+          # it would fail every apps-authentik-manifests sync on an
+          # immutable-field rejection. It goes when this StatefulSet is next
+          # recreated.
           recurring-job-group.longhorn.io/truenas-backup: "enabled"
       spec:
         accessModes: [ReadWriteOnce]

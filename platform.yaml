@@ -105,9 +105,12 @@ groups:
       authentik:
         description: "Identity provider and SSO gateway"
         replicas: 1       # Set 2 for HA (PostgreSQL handles state)
-      authentik-ldap-outpost:
-        description: "LDAP directory server — needed for TrueNAS and apps that cannot use OIDC"
-        replicas: 1
+      # NOTE: `authentik-ldap-outpost` was listed here as REQUIRED until
+      # 2026-08-07. It was removed, not disabled: the label was contradicted by
+      # 54 days of the Deployment sitting at 0/0 with zero user-visible impact,
+      # and by Authentik holding no LDAP provider, no LDAP outpost object and no
+      # token. TrueNAS — the one named consumer — authenticates through the
+      # EMBEDDED outpost's forward-auth provider (`route-truenas`), not LDAP.
 
       # ── OPTIONAL — set enabled: true to deploy ─────────────────────────────
       velero:

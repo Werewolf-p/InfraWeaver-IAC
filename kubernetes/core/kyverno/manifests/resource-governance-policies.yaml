@@ -33,6 +33,21 @@
 #     kubectl get clusterpolicyreport -o wide
 #     kubectl get clusterpolicy <name> -o jsonpath='{.status}'
 # returns Ready with no unexpected failures.
+#
+# OPEN FINDING, 2026-08-07 — require-memory-request-and-limit (bottom of this
+# file) fails on TWO openbao subjects, and the fix is split across two events:
+#   StatefulSet/openbao  -> FIXED IN GIT. kubernetes/core/openbao/values.yaml had
+#     `resources` and `priorityClassName` at the TOP level, where the chart never
+#     read them; they now sit under `server.*` plus new resources on the
+#     autounseal sidecar. The StatefulSet has `updateStrategy: OnDelete`, so this
+#     commit changes the template and recreates NO pod — the StatefulSet finding
+#     clears at the next Kyverno background scan with nothing restarted.
+#   Pod/openbao-0        -> STAYS OPEN until openbao-0 is deliberately recreated.
+#     That is HUMAN-GATED and scheduled separately: OpenBao comes back SEALED
+#     every restart, is reopened only by the autounseal sidecar's 30s loop, and
+#     the `OpenBaoSealed` alert cannot fire (docs/OPENBAO-OPERATIONS.md §0.1), so
+#     ~3-5 minutes of sealed OpenBao pass unmonitored. Never delete this pod to
+#     tidy a policy report. Procedure: docs/OPENBAO-OPERATIONS.md §1.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -285,14 +300,41 @@ spec:
 #
 # Kyverno's background controller can only generate resource kinds it has been
 # granted. LimitRange is not in its default permission set, so without this the
-# generate rule above fails silently. Kyverno aggregates any ClusterRole
-# carrying the label below into kyverno:background-controller.
+# generate rule above fails silently.
+#
+# AGGREGATION SELECTS ON THE THREE app.kubernetes.io LABELS BELOW — measured
+# live 2026-08-07, do not copy this from documentation:
+#   kubectl get clusterrole kyverno:background-controller -o jsonpath='{.aggregationRule}'
+#   -> matchLabels: app.kubernetes.io/component=background-controller,
+#                   app.kubernetes.io/instance=kyverno,
+#                   app.kubernetes.io/part-of=kyverno
+#
+# `rbac.kyverno.io/aggregate-to-background-controller: "true"` does NOT match
+# that selector. Until 2026-08-07 this role carried ONLY that label and was
+# therefore INERT — measured:
+#   kubectl get clusterrole -l app.kubernetes.io/component=background-controller\
+# ,app.kubernetes.io/instance=kyverno,app.kubernetes.io/part-of=kyverno -o name
+#   -> :core and :serviceaccounts only; :limitranges ABSENT.
+# Nobody noticed because the chart's own :core role already aggregates
+# limitranges create/update/patch/delete, which is everything the generate rule
+# needed — so the grant read present in git, was absent live, and worked anyway.
+#
+# PROOF THAT THIS FIX TOOK EFFECT (the get/list/watch below are NOT supplied by
+# :core — its limitranges rule is create/update/patch/delete only, measured
+# 2026-08-07 — so their appearance in the aggregate proves THIS role fed it):
+#   kubectl get clusterrole kyverno:background-controller -o json \
+#     | jq '[.rules[] | select((.resources // []) | index("limitranges"))]'
+# The `rbac.kyverno.io/...` label is retained: harmless, and it is the label
+# Kyverno's own docs use, so removing it would invite someone to "restore" it.
 # -----------------------------------------------------------------------------
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: kyverno:background-controller:limitranges
   labels:
+    app.kubernetes.io/component: background-controller
+    app.kubernetes.io/instance: kyverno
+    app.kubernetes.io/part-of: kyverno
     rbac.kyverno.io/aggregate-to-background-controller: "true"
 rules:
   - apiGroups: [""]

@@ -150,6 +150,15 @@ blueprints:
     # access is preserved; the other six users lose access they should never
     # have had.
     - authentik-blueprint-app-access-backfill
+    # ── P1.4 stage 1 (manifests/blueprints/60-…) ─────────────────────────────
+    # Creates role-infraweaver-console + the non-superuser group
+    # svc-infraweaver-console-scope and puts the console's service account in it.
+    # Listed because it is ADDITIVE and safe: while the account is still in
+    # `authentik Admins` its effective rights do not change at all. The step that
+    # actually lowers privilege is removing it from `authentik Admins`, which is
+    # an attended operator action, NOT a line in this list — see
+    # docs/SECURITY-REMEDIATION-RUNBOOK.md §P1.4.
+    - authentik-blueprint-console-scope
     # NOT listed, deliberately — these are the MFA enforcement flips, and they
     # can lock the sole administrator out of every admin surface at once.
     # Adding a name here is the second of two gates a human must open, and
@@ -170,6 +179,29 @@ postgresql:
     priorityClassName: platform-high
     persistence:
       annotations:
+        # ⚠️ THIS ANNOTATION IS INERT. IT BACKS NOTHING UP. Do not read it as
+        # protection. It is doubly ineffective, both parts measured 2026-08-07:
+        #   1. This PVC is `local-path`, not a Longhorn volume, so no Longhorn
+        #      RecurringJob can ever see it. The PV is pinned by nodeAffinity to
+        #      talos-prod-cp2's disk.
+        #   2. Even on a Longhorn volume it would do nothing: PVC annotations do
+        #      not propagate to the Longhorn Volume CR — only a StorageClass
+        #      `recurringJobSelector` or a label on the Volume itself enrols a
+        #      volume. See the long note in
+        #      kubernetes/core/longhorn/manifests/backup-jobs.yaml.
+        #
+        # WHY IT IS STILL HERE rather than deleted: this key renders into the
+        # StatefulSet's `volumeClaimTemplates`, and Kubernetes forbids updating
+        # any StatefulSet spec field other than replicas/ordinals/template/
+        # updateStrategy/persistentVolumeClaimRetentionPolicy/minReadySeconds.
+        # Removing it would make every ArgoCD sync of platform-authentik fail on
+        # an immutable-field rejection — trading a misleading comment for a
+        # broken deploy. It comes out in the same maintenance window that
+        # recreates the StatefulSet (see the Longhorn-migration option in
+        # docs/BACKUP-AND-RESTORE-RUNBOOK.md §1).
+        #
+        # THE ACTUAL BACKUP for this database is the nightly logical dump in
+        # manifests/pg-backup.yaml → Longhorn PVC → 01:00 NAS backup.
         recurring-job-group.longhorn.io/truenas-backup: "enabled"
       storageClass: local-path   # local-path: stable with 2 nodes/cp3 offline
       size: 2Gi

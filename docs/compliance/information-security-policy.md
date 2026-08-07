@@ -39,7 +39,7 @@ that way are marked as gaps, not as controls.
 | Compute | `talos-prod-cp1/2/3` (Talos v1.13.0, Kubernetes v1.35.4), converged control-plane |
 | Virtualisation | Proxmox hosts `10.1.0.3` (productie) and `10.1.0.4` (microserver/ontwikkel) and their VMs |
 | Source of truth | `InfraWeaver-infra` (GitOps manifests), `InfraWeaver-platform` (application monorepo), `InfraWeaver-base` (Terraform/OpenTofu for Proxmox) |
-| Identity | Authentik (OIDC + LDAP outpost), `users.yaml` access register, ArgoCD RBAC, Kubernetes RBAC |
+| Identity | Authentik (OIDC + Traefik forward-auth), `users.yaml` access register, ArgoCD RBAC, Kubernetes RBAC |
 | Secrets | OpenBao + External Secrets Operator; SOPS/age for Terraform variables |
 | Data | All PersistentVolumeClaims enumerated in `asset-inventory.md` §7, plus TrueNAS and Synology NAS shares |
 | Edge | Traefik ingress, Cloudflare DNS, Let's Encrypt certificates, all published hostnames |

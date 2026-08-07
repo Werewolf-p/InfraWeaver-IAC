@@ -1,0 +1,279 @@
+---
+# =============================================================================
+# ArgoCD SSA ownership detector — "Synced" is not evidence that anything was written
+# =============================================================================
+# WHAT THIS EXISTS FOR (incident, 2026-08-07):
+#
+#   17:33:31  commit 2ac5e87 adds rule 2 `set-pod-automount-false` to
+#             ClusterPolicy/mutate-default-sa-automount
+#   17:35:29  core-kyverno-policies auto-syncs revision 2ac5e874.
+#             operationState.phase = Succeeded. syncResult message for the
+#             policy: "clusterpolicy.kyverno.io/mutate-default-sa-automount
+#             serverside-applied". App reports Synced.
+#   ...       and the live object did not have rule 2.
+#   17:37:12  the operator lands it with a plain `kubectl apply`.
+#
+# PROOF THE APPLY NEVER CARRIED THE RULES, reconstructed from managedFields:
+# the `argocd-controller` fieldset on that object was last CHANGED at
+# 14:56:55Z — a full 2h38m before the 17:35 sync that claimed to apply it — and
+# it contains NO `f:rules` at all. Had the SSA payload contained spec.rules
+# (same value or different) argocd-controller would have gained `f:rules` and
+# that timestamp would have moved. Had it conflicted with another field owner,
+# the sync would have failed loudly. Neither happened. The payload did not
+# contain spec.rules, and ArgoCD reported success for sending it.
+#
+# The shared-field-manager-across-Applications explanation is EXCLUDED: the
+# tracking-id on the live object names exactly one Application
+# (core-kyverno-policies).
+#
+# selfHeal never corrected it because diff normalization runs the SAME
+# ignoreDifferences pipeline that built the payload — git and live look equal
+# to the thing that made them unequal.
+#
+# -----------------------------------------------------------------------------
+# WHY `argocd app diff --server-side-generate` CANNOT DETECT THIS
+# -----------------------------------------------------------------------------
+# READ THIS BEFORE REACHING FOR IT. `argocd app diff` — with or without
+# --server-side-generate — runs the same desired-state normalization that
+# produced the lie: it applies the app's `ignoreDifferences` to both sides
+# before comparing. If the normalization is what dropped `spec.rules` from the
+# payload, it drops `spec.rules` from the diff too. The diff reads CLEAN exactly
+# when the app reads Synced, and both are wrong for the same reason.
+#
+# A detector for this class MUST bypass ArgoCD's diff pipeline entirely. That is
+# what this job does: it asks the API server who actually owns the field, which
+# no amount of ArgoCD-side normalization can influence.
+#
+# -----------------------------------------------------------------------------
+# THE INVARIANT
+# -----------------------------------------------------------------------------
+#   Every ClusterPolicy's `spec.rules` is owned by manager `argocd-controller`,
+#   operation `Apply`.
+#
+# Measured 2026-08-07 (`kubectl get clusterpolicies -o json --show-managed-fields`):
+#   ["argocd-controller/Apply"]        x22
+#   ["kubectl-client-side-apply/Update"] x1   <- mutate-default-sa-automount
+#                                                THE INCIDENT ARTIFACT ITSELF
+#
+# So this is not a policy that flags everything: it flags exactly the object the
+# incident damaged, and nothing else. It fires on both halves of the failure
+# class — an ArgoCD apply that silently dropped the rules (ArgoCD stops owning
+# them), and a human `kubectl apply` that took ownership away from ArgoCD (which
+# is what the emergency fix on 2026-08-07 did, and which leaves the object
+# outside GitOps control until someone notices).
+#
+# An empty owner list also violates the invariant, deliberately: a ClusterPolicy
+# whose rules nobody owns is a stranger object.
+#
+# -----------------------------------------------------------------------------
+# THIS JOB WILL BE RED ON ITS FIRST RUN. THAT IS CORRECT.
+# -----------------------------------------------------------------------------
+# The incident artifact is still live: `mutate-default-sa-automount` is still
+# owned by `kubectl-client-side-apply/Update`, because the operator's emergency
+# fix on 2026-08-07 was a plain `kubectl apply` and nothing has re-established
+# ArgoCD's ownership since. Verified by running this exact script against the
+# live cluster before committing it: exit 1, 23 checked, that one flagged.
+#
+# A detector that ships green because nothing is wrong yet has proven nothing.
+# This one ships red against a real, known, still-open defect — which is also
+# the only honest way to demonstrate it works.
+#
+# It goes green when ArgoCD owns those rules again. Two routes:
+#   - the H1 fix (remove the in-list ignore + pin the defaulted field), after
+#     the repro verdict — docs/SSA-IGNOREDIFFERENCES-REPRO-RUNBOOK.md; or
+#   - the escape hatch, which keeps ownership where it belongs:
+#       kubectl apply --server-side --field-manager=argocd-controller \
+#         -f kubernetes/core/kyverno/manifests/mutate-default-sa-automount.yaml
+#       kubectl annotate clusterpolicy mutate-default-sa-automount \
+#         kubectl.kubernetes.io/last-applied-configuration-
+# Do NOT silence the detector instead. Do NOT delete and recreate the policy —
+# that opens an admission-mutation gap.
+#
+# -----------------------------------------------------------------------------
+# ALERTING — HANDOFF TO P2.8, NOT DONE HERE
+# -----------------------------------------------------------------------------
+# This job currently signals only by failing (non-zero exit → failed Job). The
+# existing automation alerts in kubernetes/monitoring/alerts/manifests/
+# prometheus-rules.yaml use hardcoded namespace+cronjob allowlists
+# (`namespace=~"argocd|longhorn-system"`), so nothing watches the `kyverno`
+# namespace and this would otherwise be another unalerted CronJob — the exact
+# "configured therefore working" trap this file exists to break.
+#
+# P2.8 owns cluster-wide CronJob-failure alerting. Until that lands, the
+# one-line stopgap is to extend the existing rule's selector:
+#   namespace=~"argocd|longhorn-system|kyverno"
+#   cronjob=~"...|kyverno-ssa-ownership-detector"
+# Do that in the monitoring app, not here.
+#
+# Manual run of the same check, any time, from a laptop:
+#   kubectl get clusterpolicies -o json --show-managed-fields \
+#     | jq -r '.items[] | {n:.metadata.name, o:[.metadata.managedFields[]
+#         | select((.fieldsV1["f:spec"]["f:rules"]?) != null)
+#         | .manager + "/" + .operation]}
+#       | select(.o != ["argocd-controller/Apply"]) | .n + "  " + (.o|tostring)'
+#   (empty output == healthy)
+#
+# EXTENSIBLE: the same ownership question applies to ExternalSecret `spec.data`
+# on the 24 apps that pair RespectIgnoreDifferences with an in-list
+# ignoreDifferences path — see docs/gitops-operating-model.md §7.1.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kyverno-ssa-ownership-detector
+  namespace: kyverno
+  labels:
+    app.kubernetes.io/name: kyverno-ssa-ownership-detector
+    app.kubernetes.io/part-of: infraweaver-platform
+---
+# Read-only, and only ClusterPolicies. managedFields ride along with a normal
+# GET — there is no separate permission for them, so this grants nothing beyond
+# reading policy objects the whole cluster's admission behaviour is public about.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:ssa-ownership-detector
+  labels:
+    app.kubernetes.io/name: kyverno-ssa-ownership-detector
+    app.kubernetes.io/part-of: infraweaver-platform
+rules:
+  - apiGroups: [kyverno.io]
+    resources: [clusterpolicies]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kyverno:ssa-ownership-detector
+  labels:
+    app.kubernetes.io/name: kyverno-ssa-ownership-detector
+    app.kubernetes.io/part-of: infraweaver-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kyverno:ssa-ownership-detector
+subjects:
+  - kind: ServiceAccount
+    name: kyverno-ssa-ownership-detector
+    namespace: kyverno
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kyverno-ssa-ownership-detector
+  namespace: kyverno
+  labels:
+    app.kubernetes.io/name: kyverno-ssa-ownership-detector
+    app.kubernetes.io/part-of: infraweaver-platform
+  annotations:
+    infraweaver.io/purpose: >-
+      Detects ArgoCD server-side-apply payloads that silently omitted
+      spec.rules, and manual kubectl applies that took ownership away from
+      ArgoCD. See the header of this file for the 2026-08-07 incident.
+spec:
+  # Hourly. The failure it detects is silent and open-ended — the 2026-08-07
+  # artifact would have been caught within the hour instead of by eye.
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  # Keep the last 3 failures: the whole value of this job is the log of WHICH
+  # policy drifted and WHO owns its rules now.
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: kyverno-ssa-ownership-detector
+        spec:
+          serviceAccountName: kyverno-ssa-ownership-detector
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: detector
+              # Same image the kyverno cleanup jobs use (kubernetes/core/kyverno/
+              # values.yaml): docker.io/alpine/k8s ships kubectl AND a shell AND
+              # jq, and publishes pinned version tags. Do NOT swap this for
+              # registry.k8s.io/kubectl — it is distroless, has no shell, and
+              # that exact swap broke all four cleanup CronJobs on 2026-08-07
+              # (commit 09bc144). Bump in step with the cluster version.
+              image: docker.io/alpine/k8s:1.35.4
+              imagePullPolicy: IfNotPresent
+              command: [/bin/sh, -c]
+              args:
+                - |
+                  set -u
+
+                  RAW="$(kubectl get clusterpolicies -o json --show-managed-fields)" || {
+                    echo "FATAL: could not list ClusterPolicies — this is not a clean result."
+                    exit 2
+                  }
+
+                  TOTAL="$(printf '%s' "$RAW" | jq '.items | length')"
+
+                  # Ask the API server who owns spec.rules. This deliberately
+                  # bypasses ArgoCD entirely: `argocd app diff` runs the same
+                  # normalization that caused the incident and reads clean.
+                  VIOLATIONS="$(printf '%s' "$RAW" | jq -r '
+                    .items[]
+                    | { name: .metadata.name,
+                        owners: [ .metadata.managedFields[]
+                                  | select((.fieldsV1["f:spec"]["f:rules"]?) != null)
+                                  | .manager + "/" + .operation ] }
+                    | select(.owners != ["argocd-controller/Apply"])
+                    | "  " + .name + "  ->  spec.rules owned by " + (.owners | tostring)')"
+
+                  if [ -z "$VIOLATIONS" ]; then
+                    echo "OK: spec.rules on all ${TOTAL} ClusterPolicies is owned by argocd-controller/Apply."
+                    exit 0
+                  fi
+
+                  echo "DRIFT: ArgoCD does not own spec.rules on these ClusterPolicies (${TOTAL} checked):"
+                  echo "${VIOLATIONS}"
+                  echo ""
+                  echo "This means ONE of:"
+                  echo "  (a) an ArgoCD sync reported serverside-applied while omitting spec.rules"
+                  echo "      from the payload — the object may be missing a rules change that git"
+                  echo "      has and the app still reports Synced; or"
+                  echo "  (b) someone ran a plain 'kubectl apply' and took ownership from ArgoCD,"
+                  echo "      which leaves the object outside GitOps reconciliation."
+                  echo ""
+                  echo "Do NOT verify with 'argocd app diff' — it runs the same normalization and"
+                  echo "will read clean. Compare git rule names against the live object by hand:"
+                  echo "  kubectl get cpol <name> -o json | jq '[.spec.rules[].name]'"
+                  echo "Then re-apply keeping ownership with ArgoCD's field manager:"
+                  echo "  kubectl apply --server-side --field-manager=argocd-controller -f <file>"
+                  echo "See kubernetes/core/kyverno/manifests/ssa-ownership-detector.yaml and"
+                  echo "docs/gitops-operating-model.md section 7.1."
+                  exit 1
+              env:
+                # kubectl writes a discovery cache under $HOME; the root
+                # filesystem is read-only, so point it at the emptyDir.
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi   # 4x request, inside limit-memory-burst-ratio's 8x
+              volumeMounts:
+                - name: cache
+                  mountPath: /tmp
+          volumes:
+            - name: cache
+              emptyDir:
+                sizeLimit: 32Mi

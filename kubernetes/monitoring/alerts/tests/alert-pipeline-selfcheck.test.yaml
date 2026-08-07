@@ -1,0 +1,174 @@
+# promtool unit tests for alert.pipeline.selfcheck
+#
+# Run by: scripts/validate-iac.sh (gate 5/5). Do not run promtool against this
+# file directly from the repo — `rules.yaml` below does not exist here; the gate
+# extracts it from the PrometheusRule custom resources. See
+# console-automation.test.yaml's header for the mechanics.
+#
+# Two directions, both necessary:
+#   1. series missing  -> the alert fires (it is a real guard, not decoration)
+#   2. series present  -> the alert is silent (it self-clears once the scrape is
+#      built, so nobody has to remember to delete it)
+#
+# A dummy `up{job="selfcheck-fixture"}` series exists only to give promtool a
+# time range to evaluate over; it deliberately does NOT match job="kube-etcd".
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── Direction 1: all five input series absent -> all five fire after 1h ────
+  - interval: 1m
+    name: missing input series page after one hour
+    input_series:
+      - series: 'up{job="selfcheck-fixture"}'
+        values: '1+0x120'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: AlertInputMissingLonghorn
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: AlertInputMissingLonghorn
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Longhorn metrics absent — 4 Longhorn volume alerts are dead'
+              description: 'longhorn_volume_robustness has no series, so LonghornVolumesDegraded, LonghornVolumeDegraded, LonghornVolumeFaulted and LonghornNodeStoragePressure in platform-alerts can never fire. Fix: a ServiceMonitor for longhorn-backend (longhorn-manager exposes /metrics on :9500) in kubernetes/core/longhorn/manifests/.'
+      - eval_time: 65m
+        alertname: AlertInputMissingOpenBao
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'OpenBao metrics absent — OpenBaoSealed can never fire'
+              description: 'vault_core_unsealed has no series, so a sealed OpenBao (every ExternalSecret frozen) would page NOTHING. Fix: enable OpenBao telemetry + ServiceMonitor; do NOT restart OpenBao to do it — it seals on restart.'
+      - eval_time: 65m
+        alertname: AlertInputMissingArgoCD
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'ArgoCD metrics absent — ArgoCDAppDegraded/SyncFailed are dead'
+              description: 'argocd_app_info has no series. Fix: argocd-metrics ServiceMonitor (metrics service exists in the argocd chart; see kubernetes/core/argocd/values.yaml).'
+      - eval_time: 65m
+        alertname: AlertInputMissingCertManager
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'cert-manager metrics absent — certificate-expiry alerts are dead'
+              description: 'certmanager_certificate_expiration_timestamp_seconds has no series; CertificateExpiringSoon/Critical can never fire. Fix: cert-manager prometheus.servicemonitor.enabled=true.'
+      # absent() synthesises the equality matchers as labels, so the etcd alert
+      # carries job="kube-etcd" — proof the guard is scoped to that scrape job
+      # and not to `up` in general.
+      - eval_time: 65m
+        alertname: AlertInputMissingEtcd
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kube-etcd
+            exp_annotations:
+              summary: 'etcd scrape has zero targets — all etcd alerts are dead'
+              description: 'The kube-etcd ServiceMonitor exists but produces no targets, so EtcdMemberDown (the documented compensating control for the silenced Talos control-plane alerts) can never fire. Talos exposes etcd metrics on :2381 only if configured; needs machine-config etcd extraArgs listen-metrics-urls plus reachable endpoints.'
+
+  # ── Direction 2: once each scrape exists, its guard goes quiet on its own ──
+  - interval: 1m
+    name: present input series silence their guards
+    input_series:
+      - series: 'longhorn_volume_robustness{volume="pvc-abc"}'
+        values: '2+0x120'
+      - series: 'vault_core_unsealed{instance="openbao-0"}'
+        values: '1+0x120'
+      - series: 'argocd_app_info{name="monitoring-alerts"}'
+        values: '1+0x120'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{name="wildcard"}'
+        values: '9999999999+0x120'
+      - series: 'up{job="kube-etcd",instance="10.0.0.90:2381"}'
+        values: '1+0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AlertInputMissingLonghorn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: AlertInputMissingOpenBao
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: AlertInputMissingArgoCD
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: AlertInputMissingCertManager
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: AlertInputMissingEtcd
+        exp_alerts: []
+
+  # ── Escalation transport, step 1: the Secret is missing -> page ───────────
+  - interval: 1m
+    name: escalation secret missing pages
+    input_series:
+      - series: 'kube_secret_info{namespace="monitoring",secret="grafana-admin-secret"}'
+        values: '1+0x120'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: AlertEscalationSecretMissing
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: AlertEscalationSecretMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              secret: alertmanager-escalation-urls
+            exp_annotations:
+              summary: 'External alert escalation is not provisioned (step 1 of 2)'
+              description: 'The Secret alertmanager-escalation-urls does not exist, so the external ntfy push and the healthchecks.io dead-man endpoint cannot be wired. Every alert on this platform, including every critical, currently terminates at one Discord webhook inside this cluster. Operator step and the exact `bao kv put` command are in kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml. This alert clearing proves the SECRET exists — not that the receiver is wired; AlertEscalationReceiverNotWired covers that.'
+
+  # ── Escalation step 1 done: the guard clears on its own ───────────────────
+  # A neighbouring Secret in the same namespace must NOT satisfy it — that is
+  # the whole difference between "a secret exists" and "this secret exists".
+  - interval: 1m
+    name: escalation secret present clears the guard
+    input_series:
+      - series: 'kube_secret_info{namespace="monitoring",secret="alertmanager-escalation-urls"}'
+        values: '1+0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AlertEscalationSecretMissing
+        exp_alerts: []
+
+  # ── Escalation transport, step 2: receiver count still at today's 4 -> page,
+  # and reaching 5 (critical-push added) clears it ──────────────────────────
+  - interval: 1m
+    name: escalation receiver not wired pages until the fifth receiver exists
+    input_series:
+      - series: 'alertmanager_receivers{namespace="monitoring",pod="alertmanager-kube-prometheus-stack-alertmanager-0"}'
+        values: '4+0x89 5+0x60'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: AlertEscalationReceiverNotWired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'External alert escalation receiver is not wired (step 2 of 2)'
+              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the alertmanager-escalation-urls Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
+      # receiver count goes to 5 at t=90m -> guard clears immediately
+      - eval_time: 95m
+        alertname: AlertEscalationReceiverNotWired
+        exp_alerts: []
+
+  # ── REGRESSION: a DOWN etcd target must not silence the guard's neighbours,
+  # and must not be confused with "no target at all". `up == 0` still means the
+  # series exists, so AlertInputMissingEtcd is correctly silent — the chart's
+  # own EtcdMemberDown/TargetDown owns that condition once the scrape works. ──
+  - interval: 1m
+    name: etcd target present but down does not fire the absent guard
+    input_series:
+      - series: 'up{job="kube-etcd",instance="10.0.0.90:2381"}'
+        values: '0+0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AlertInputMissingEtcd
+        exp_alerts: []

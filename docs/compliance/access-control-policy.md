@@ -20,13 +20,24 @@ ServiceAccounts, CI credentials, and the Terraform/Proxmox automation identity.
 ## 2. Identity model
 
 There is exactly one authoritative identity provider for humans: **Authentik**.
-Applications either federate to it via OIDC/LDAP, or sit behind Traefik
+Applications either federate to it via OIDC, or sit behind Traefik
 `forward-auth`, which requires an Authentik session before the request reaches
 the backend.
 
+LDAP is **not** an authentication path on this platform, and — despite earlier
+revisions of this document listing it — never was one. An `authentik-ldap-outpost`
+Deployment was declared and deployed, but it never carried traffic: Authentik held
+no LDAP provider and no LDAP outpost object, no outpost token was ever issued, the
+Service's LoadBalancer VIP was never assigned, and the Deployment sat at 0/0 for 54
+days. TrueNAS, the only system ever named as an LDAP consumer, has its LDAP config
+`enable: false` and authenticates through the embedded outpost's forward-auth
+provider. The manifests were removed 2026-08-07. This is recorded as a **correction
+to the inventory, not the retirement of a control** — there was no operating
+control to retire.
+
 | Layer | Authority | Where it is declared |
 |---|---|---|
-| Human identity | Authentik (OIDC + LDAP outpost) | Authentik database; **not currently in git** — see RISK-07 / WP11 |
+| Human identity | Authentik (OIDC + Traefik forward-auth) | Authentik database; **not currently in git** — see RISK-07 / WP11 |
 | Human authorisation register | `users.yaml` | Repository root, reviewed in git |
 | Console authorisation | `platform.yaml` → `console.rbac` (group → role → permissions) | Repository root |
 | ArgoCD authorisation | `argocd-rbac-cm` `policy.csv` | `kubernetes/core/argocd/` |

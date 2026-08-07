@@ -1,0 +1,196 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Nightly logical backup of the Authentik (SSO) Postgres database
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS
+# ---------------
+# `authentik/data-authentik-postgresql-0` is a `local-path` PVC pinned to ONE
+# node's disk (measured 2026-08-07: PV nodeAffinity → `talos-prod-cp2`). It had
+# no backup of any kind — runbook §1 "Known uncovered gap", §8 item 4. Authentik
+# is the identity provider for every admin surface on this platform (ArgoCD,
+# console, Grafana, Longhorn UI, OpenBao UI), so losing cp2's disk lost the SSO
+# with nothing to restore from.
+#
+# HOW THE DUMP REACHES OFF-BOX STORAGE
+# ------------------------------------
+#   00:00  local-snapshot-daily     (Longhorn, retain 3)
+#   00:15  THIS JOB  → pg_dump -Fc onto the Longhorn PVC below
+#   01:00  truenas-backup-daily     (Longhorn → nfs://10.1.0.135:/mnt/pool/k8s-longhorn-backups)
+#
+# The 45-minute gap is deliberate: every nightly NAS backup therefore contains a
+# dump that is at most ~45 minutes older than the volume image around it.
+# RPO ≈ 24h. Restore shape = fresh postgres + `pg_restore` (see §4d of the
+# runbook), which is also the only restore that works into a *rebuilt* cluster —
+# strictly more useful than a block image of a node-pinned local-path directory.
+#
+# WHY NO `recurring-job-group.longhorn.io/*` ANNOTATION ON THE PVC BELOW
+# ----------------------------------------------------------------------
+# PVC annotations do not propagate to the Longhorn Volume CR — only a
+# StorageClass `recurringJobSelector` or a label written directly onto the Volume
+# does (measured, and recorded at length in
+# `kubernetes/core/longhorn/manifests/backup-jobs.yaml`). Longhorn auto-labels
+# every volume that has no recurring job of its own into the group `default`,
+# and all three RecurringJobs target `[default, truenas-backup]`. So this volume
+# is enrolled by *being a Longhorn volume*, and an annotation here would only
+# repeat the inert decoration that already misleads on the two local-path PVCs.
+#
+# VERIFY ENROLMENT AFTER THE FIRST SYNC — do not assume it:
+#   V=$(kubectl -n authentik get pvc authentik-pg-dumps -o jsonpath='{.spec.volumeName}')
+#   kubectl -n longhorn-system get volumes.longhorn.io "$V" --show-labels
+#   # WANT: recurring-job-group.longhorn.io/default=enabled
+#
+# NOTE FOR THE NIGHT THIS MERGES: this adds the 20th Longhorn volume. Any check
+# that expects "19 volumes / 19 backups" must expect 20 from the first night
+# after this lands.
+#
+# WHAT IS *NOT* CLOSED BY THIS FILE
+# ---------------------------------
+# Availability. If cp2 dies, the SSO is down until postgres is redeployed and
+# this dump is restored — hours, not minutes. That residual is accepted and
+# recorded in runbook §1. The availability fix is migrating the PVC to Longhorn,
+# which costs an SSO outage and is an operator-scheduled maintenance window, not
+# a side effect of a backup change. Authentik **Redis** is deliberately NOT
+# backed up: sessions/cache/task queue only — accepted loss, users re-login.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authentik-pg-dumps
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik-pg-dump
+    infraweaver.io/automation: backup
+spec:
+  accessModes: [ReadWriteOnce]
+  # longhorn-retain: reclaimPolicy Retain, so `git revert`-ing this file releases
+  # the PV instead of destroying accumulated dumps.
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      # 14 retained dumps. The live DB is 2Gi provisioned; a -Fc dump of it is
+      # ~single-digit MB. 5Gi is headroom, not a forecast.
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: authentik-pg-dump
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik-pg-dump
+    infraweaver.io/automation: backup
+spec:
+  schedule: "15 0 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: authentik-pg-dump
+            infraweaver.io/automation: backup
+        spec:
+          restartPolicy: OnFailure
+          priorityClassName: platform-standard
+          # Set on the POD, not the ServiceAccount: Kubernetes never copies
+          # automountServiceAccountToken down from the SA to the pod, so an
+          # SA-level setting would be inert here (the same trap that makes the
+          # Kyverno default-SA rule unsatisfiable by restarting pods).
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            # The Longhorn volume is formatted root:root on first attach; fsGroup
+            # is what makes /dumps writable for UID 1001. Without it the very
+            # first run fails on "Permission denied" at 00:15 with nobody watching.
+            fsGroup: 1001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              # EXACT server image (measured live:
+              # sts/authentik-postgresql .spec.template.spec.containers[0].image).
+              # pg_dump refuses to dump a server newer than itself, so this must
+              # be bumped in lockstep with the chart's image override in
+              # ../values.yaml — a skew here fails loudly, which is the point.
+              image: docker.io/library/postgres:17.10-bookworm
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits:   {cpu: 500m, memory: 512Mi}
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: authentik-secrets
+                      key: postgresql-password
+                # UID 1001 has no passwd entry in this image; give libpq and bash
+                # a writable HOME so neither falls back to an unwritable path.
+                - name: HOME
+                  value: /tmp
+                - name: PGCONNECT_TIMEOUT
+                  value: "30"
+              command:
+                - bash
+                - -ec
+                - |
+                  set -o pipefail
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  OUT="/dumps/authentik-${STAMP}.dump"
+
+                  pg_dump -h authentik-postgresql -p 5432 -U authentik -d authentik \
+                          -Fc --no-password -f "${OUT}"
+
+                  # A dump that cannot be listed is not a backup. pg_restore --list
+                  # parses the whole custom-format archive, so a truncated or
+                  # half-written file fails HERE rather than during an incident.
+                  pg_restore --list "${OUT}" > /dev/null
+
+                  sha256sum "${OUT}" > "${OUT}.sha256"
+
+                  # Retention: newest 14 dumps. Longhorn keeps 7 daily + 4 weekly
+                  # images of the whole PVC on top of this, on the NAS.
+                  ls -1t /dumps/authentik-*.dump 2>/dev/null | tail -n +15 \
+                    | while read -r f; do rm -f "$f" "$f.sha256"; done
+
+                  echo "OK ${OUT} $(stat -c%s "${OUT}") bytes; $(ls -1 /dumps/authentik-*.dump | wc -l) dumps retained"
+              volumeMounts:
+                - {name: dumps, mountPath: /dumps}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: dumps
+              persistentVolumeClaim:
+                claimName: authentik-pg-dumps
+            - name: tmp
+              emptyDir: {}
+# ═══════════════════════════════════════════════════════════════════════════
+# NETWORK POLICY: no change is required, and that was measured, not assumed.
+#   manifests/networkpolicy.yaml
+#     allow-egress-postgresql   podSelector: {}  → postgres:5432   (covers this pod)
+#     allow-egress-dns          podSelector: {}  → kube-system:53   (covers this pod)
+#     allow-intra-namespace     ingress from podSelector: {}        (postgres accepts)
+#   Cilium surface checked too: the only CNPs in this namespace are
+#   `allow-egress-apiserver` (endpointSelector {} , toEntities kube-apiserver)
+#   and `authentik-server-ingress-allowlist` (selects app=authentik-server only).
+#   Cilium unions k8s NetworkPolicy and CNP allows, so neither narrows this pod.
+#
+# ADMISSION: authentik's namespace is PSA enforce=baseline / warn=restricted, and
+#   the Kyverno Enforce policies (require-non-root, require-seccomp-profile,
+#   require-drop-all-capabilities, disallow-privilege-escalation) match only
+#   namespaces labelled `infraweaver.io/type: catalog-app` — which `authentik` is
+#   not. The pod above is written restricted-compliant regardless, so it neither
+#   trips the `warn` level nor depends on that label never being added.
+# ═══════════════════════════════════════════════════════════════════════════

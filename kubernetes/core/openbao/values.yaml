@@ -1,4 +1,28 @@
 server:
+  # Self-healing: ensure OpenBao (secrets engine) is never evicted.
+  priorityClassName: platform-critical
+
+  # Memory limit: OpenBao uses ~56Mi at rest, 256Mi gives 4.5x headroom.
+  # limit/request = 256/64 = 4x, inside the limit-memory-burst-ratio policy's 8x.
+  #
+  # THESE TWO KEYS LIVED AT THE TOP LEVEL OF THIS FILE UNTIL 2026-08-07, WHERE
+  # THE CHART NEVER READ THEM. openbao-helm (a vault-helm fork) consumes both
+  # under server.*. Measured live before the move:
+  #   kubectl get sts openbao -n openbao -o json | jq '{u:.spec.updateStrategy,
+  #     pc:.spec.template.spec.priorityClassName,
+  #     c:[.spec.template.spec.containers[]|{name,resources}]}'
+  #   -> priorityClassName: null, both containers resources: {}
+  # So the "never evicted" comment and the resource block were both lies, and
+  # Kyverno's require-memory-request-and-limit failed on StatefulSet/openbao and
+  # Pod/openbao-0 for exactly that reason.
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 25m
+    limits:
+      memory: 256Mi
+      cpu: 500m
+
   # Probe tuning: OpenBao takes 2-3 minutes to start and unseal.
   # - readinessProbe: 10s timeout, 60s initial delay, 5 failures tolerated
   # - livenessProbe: disabled — autounseal sidecar handles recovery; HTTP liveness
@@ -117,6 +141,16 @@ server:
       env:
         - name: BAO_ADDR
           value: "http://127.0.0.1:8200"
+      # require-memory-request-and-limit uses `name: "*"`, so EVERY container
+      # needs requests.cpu + requests.memory + limits.memory or the StatefulSet
+      # still fails. This is a `sleep 30` shell loop; the budget is generous.
+      # 64Mi limit / 16Mi request = 4x, inside limit-memory-burst-ratio's 8x.
+      resources:
+        requests:
+          memory: 16Mi
+          cpu: 10m
+        limits:
+          memory: 64Mi
       volumeMounts:
         - name: userconfig-openbao-unseal
           mountPath: /etc/openbao-unseal
@@ -134,14 +168,7 @@ ui:
   enabled: true
   serviceType: ClusterIP
 
-# Self-healing: ensure OpenBao (secrets engine) is never evicted
-priorityClassName: platform-critical
-
-# Memory limit: OpenBao uses ~56Mi at rest, 256Mi gives 4.5x headroom
-resources:
-  requests:
-    memory: 64Mi
-    cpu: 25m
-  limits:
-    memory: 256Mi
-    cpu: 500m
+# NOTE: `priorityClassName` and `resources` used to sit HERE, at the top level,
+# where the chart never read them. They now live under `server:` at the top of
+# this file. Do not re-add them here — a top-level key that the chart ignores
+# renders as a control that is present in git and absent in the cluster.

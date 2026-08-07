@@ -9,10 +9,8 @@ set -euo pipefail
 
 # Cleanup on exit
 SETUP_PF_PID=""
-AK_PF_PID=""
 cleanup() {
   [[ -n "${SETUP_PF_PID:-}" ]] && kill "$SETUP_PF_PID" 2>/dev/null || true
-  [[ -n "${AK_PF_PID:-}" ]] && kill "$AK_PF_PID" 2>/dev/null || true
   rm -f /tmp/ak_groups.py /tmp/authentik-pf-setup.log /tmp/users.yaml /tmp/ak_token.py
 }
 trap cleanup EXIT
@@ -161,137 +159,27 @@ while IFS=$'\t' read -r _tag _username _key; do
 done <<< "$_RECOVERY_OUT"
 kill $SETUP_PF_PID 2>/dev/null || true
 
-
-# ── LDAP Outpost Setup ───────────────────────────────────────────────────────
-# Creates the LDAP provider + outpost in Authentik, then stores the outpost
-# API token in OpenBao so the ExternalSecret can sync it into the cluster.
-echo "==> Setting up Authentik LDAP outpost..."
-
-# Re-establish port-forward (SETUP_PF_PID may have been killed above)
-$KT port-forward svc/authentik-server -n authentik 8089:80 > /tmp/authentik-pf-setup.log 2>&1 &
-AK_PF_PID=$!
-sleep 4
-
-if [ -z "${AUTHENTIK_ADMIN_TOKEN:-}" ]; then
-  echo "  ⚠️ No Authentik token available, skipping LDAP setup"
-else
-  LDAP_RESULT=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-    "http://localhost:8089/api/v3/providers/ldap/?name=InfraWeaver+LDAP" 2>/dev/null || echo "")
-  LDAP_PROVIDER_PK=$(echo "$LDAP_RESULT" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-r=d.get('results',[])
-print(r[0]['pk'] if r else '')
-" 2>/dev/null || echo "")
-
-  if [ -z "$LDAP_PROVIDER_PK" ]; then
-    # Get authentication flow
-    AUTH_FLOW=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      "http://localhost:8089/api/v3/flows/instances/?designation=authentication&slug=default-authentication-flow" \
-      2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-    AUTHZ_FLOW=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      "http://localhost:8089/api/v3/flows/instances/?designation=authorization" \
-      2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-    INVAL_FLOW=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      "http://localhost:8089/api/v3/flows/instances/?designation=invalidation" \
-      2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-
-    LDAP_PROVIDER_PK=$(curl -sf -X POST \
-      -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      -H "Content-Type: application/json" \
-      "http://localhost:8089/api/v3/providers/ldap/" \
-      -d "{\"name\":\"InfraWeaver LDAP\",\"base_dn\":\"dc=infraweaver,dc=local\",\"authentication_flow\":\"${AUTH_FLOW}\",\"authorization_flow\":\"${AUTHZ_FLOW}\",\"invalidation_flow\":\"${INVAL_FLOW}\"}" \
-      2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('pk',''))" 2>/dev/null || echo "")
-    echo "  ✅ Created LDAP provider PK: $LDAP_PROVIDER_PK"
-  else
-    echo "  ℹ️ LDAP provider already exists: PK=$LDAP_PROVIDER_PK"
-    # Ensure authentication_flow is set
-    AUTH_FLOW=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      "http://localhost:8089/api/v3/flows/instances/?designation=authentication&slug=default-authentication-flow" \
-      2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-    curl -sf -X PATCH -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      -H "Content-Type: application/json" \
-      "http://localhost:8089/api/v3/providers/ldap/${LDAP_PROVIDER_PK}/" \
-      -d "{\"authentication_flow\":\"${AUTH_FLOW}\"}" > /dev/null 2>/dev/null || true
-  fi
-
-  if [ -n "$LDAP_PROVIDER_PK" ]; then
-    # Create Application linked to LDAP provider (required: outposts/ldap/ only serves providers with an application)
-    LDAP_APP_RESULT=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      "http://localhost:8089/api/v3/providers/ldap/${LDAP_PROVIDER_PK}/" 2>/dev/null || echo "")
-    LDAP_APP_SLUG=$(echo "$LDAP_APP_RESULT" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-print(d.get('assigned_application_name') or '')
-" 2>/dev/null || echo "")
-    if [ -z "$LDAP_APP_SLUG" ]; then
-      LDAP_APP_BODY="{\"name\":\"InfraWeaver LDAP\",\"slug\":\"infraweaver-ldap\",\"provider\":${LDAP_PROVIDER_PK},\"meta_description\":\"InfraWeaver LDAP directory service\"}"
-      curl -sf -X POST \
-        -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-        -H "Content-Type: application/json" \
-        "http://localhost:8089/api/v3/core/applications/" \
-        -d "$LDAP_APP_BODY" \
-        > /dev/null 2>/dev/null && echo "  ✅ Created LDAP Application" || echo "  ⚠️ Failed to create LDAP Application"
-    else
-      echo "  ℹ️ LDAP Application already exists: $LDAP_APP_SLUG"
-    fi
-
-    # Create or find outpost
-    OUTPOST_RESULT=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-      "http://localhost:8089/api/v3/outposts/instances/?type=ldap&name=authentik-ldap-outpost" 2>/dev/null || echo "")
-    OUTPOST_TOKEN_ID=$(echo "$OUTPOST_RESULT" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-r=[x for x in d.get('results',[]) if x.get('type')=='ldap']
-print(r[0]['token_identifier'] if r else '')
-" 2>/dev/null || echo "")
-
-    if [ -z "$OUTPOST_TOKEN_ID" ]; then
-      # Get k8s service connection
-      K8S_SVC_CONN=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-        "http://localhost:8089/api/v3/outposts/service_connections/all/" \
-        2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-r=[x for x in d.get('results',[]) if 'kubernetes' in x.get('meta_model_name','').lower()]
-print(r[0]['pk'] if r else '')
-" 2>/dev/null || echo "")
-
-      OUTPOST_JSON=$(curl -sf -X POST \
-        -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-        -H "Content-Type: application/json" \
-        "http://localhost:8089/api/v3/outposts/instances/" \
-        -d "{\"name\":\"authentik-ldap-outpost\",\"type\":\"ldap\",\"providers\":[${LDAP_PROVIDER_PK}],\"service_connection\":\"${K8S_SVC_CONN}\",\"config\":{\"log_level\":\"info\",\"authentik_host\":\"http://authentik-server.authentik.svc.cluster.local\",\"authentik_host_insecure\":true,\"kubernetes_replicas\":0,\"kubernetes_namespace\":\"authentik\",\"kubernetes_disabled_components\":[\"deployment\",\"secret\"]}}" \
-        2>/dev/null || echo "")
-      OUTPOST_TOKEN_ID=$(echo "$OUTPOST_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token_identifier',''))" 2>/dev/null || echo "")
-      echo "  ✅ Created LDAP outpost, token_id: $OUTPOST_TOKEN_ID"
-    else
-      echo "  ℹ️ LDAP outpost already exists"
-    fi
-
-    if [ -n "$OUTPOST_TOKEN_ID" ]; then
-      OUTPOST_TOKEN=$(curl -sf -H "Authorization: Bearer $AUTHENTIK_ADMIN_TOKEN" \
-        "http://localhost:8089/api/v3/core/tokens/${OUTPOST_TOKEN_ID}/view_key/" \
-        2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('key',''))" 2>/dev/null || echo "")
-
-      if [ -n "$OUTPOST_TOKEN" ]; then
-        # Store in OpenBao
-        BAO_POD=$($KT get pod -n openbao -l app.kubernetes.io/name=openbao -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-        BAO_ROOT_TOKEN=$($KT get secret openbao-unseal -n openbao -o jsonpath='{.data.root_token}' 2>/dev/null | base64 -d || echo "")
-        if [ -n "$BAO_POD" ] && [ -n "$BAO_ROOT_TOKEN" ]; then
-          $KT exec -n openbao "$BAO_POD" -c openbao -- \
-            sh -c "VAULT_TOKEN='${BAO_ROOT_TOKEN}' VAULT_ADDR='http://127.0.0.1:8200' bao kv put secret/platform/authentik-ldap-outpost token='${OUTPOST_TOKEN}'" \
-            > /dev/null 2>&1
-          echo "  ✅ LDAP outpost token stored in OpenBao"
-          # Force ExternalSecret refresh
-          $KT annotate externalsecret authentik-ldap-token -n authentik \
-            force-sync="$(date +%s)" --overwrite > /dev/null 2>&1 || true
-        else
-          echo "  ⚠️ Could not store token in OpenBao (pod/token not available)"
-        fi
-      fi
-    fi
-  fi
-fi
-kill $AK_PF_PID 2>/dev/null || true
-echo "✅ LDAP outpost setup complete"
+# ── LDAP outpost setup: REMOVED 2026-08-07 ───────────────────────────────────
+# This script used to create an Authentik LDAP provider, application and outpost
+# here, and seed secret/platform/authentik-ldap-outpost in OpenBao.
+#
+# It was removed because the outpost was dead end-to-end, measured:
+#   * Authentik held ZERO LDAP providers and no LDAP outpost object.
+#   * The k8s Secret, the ExternalSecret and the OpenBao path did not exist.
+#     (The backlog's "empty token" reading was an artefact — `kubectl get` wrote
+#     NotFound to stderr, and sha256 of empty stdin is the empty-string hash.)
+#   * The Service VIP stayed <pending> forever: outpost.yaml asked for
+#     ${METALLB_LDAP_VIP}, which was never in the CMP allowlist, so the
+#     placeholder could never be substituted.
+#   * The Deployment sat at 0/0 for 54 days with no user-visible impact.
+#   * TrueNAS — the one named consumer — has LDAP `"enable": false`, pointing at
+#     the VIP that was never assigned, with a binddn for a user that does not
+#     exist. TrueNAS actually authenticates through the EMBEDDED outpost's
+#     forward-auth provider (`route-truenas`), which is untouched.
+#
+# Leaving this block would have re-created the whole dead apparatus on the next
+# DR rebuild. If LDAP is ever genuinely needed, it needs more than this script:
+# a real provider + outpost + token, the OpenBao path seeded, METALLB_LDAP_VIP
+# added to the CMP allowlist AND scripts/emit-cmp-substitutions.sh AND the live
+# ConfigMap, a MetalLB pool covering the VIP, and TrueNAS pointed at it with
+# `enable: true`. See docs/BREAK-GLASS.md §10.

@@ -505,8 +505,21 @@ spec:
               name: infraweaver-console-secret
               key: synology-password
               optional: true
+        # NOT a CMP placeholder — this path is rendered by KUSTOMIZE ONLY.
+        # App `catalog-infraweaver-console-manifests` renders overlays/prod with
+        # no `plugin:` stanza, so the envsubst CMP never touches this file and a
+        # `${TRUENAS_HOST}` here would reach the pod as the literal 8 characters.
+        # It read `${TRUENAS_HOST}` until 2026-08-07 and only worked because
+        # overlays/prod/kustomization.yaml patches it; any overlay that forgot the
+        # patch shipped the placeholder string into the container. Resolved
+        # literal + the overlay patch, so a missed patch degrades to the correct
+        # host instead of to nonsense.
+        # 10.1.0.135 is the NAS (TrueNAS API answers there). 10.1.0.5 — the
+        # value the live CMP substitutions ConfigMap still carries — is a
+        # different device with no NAS services. See SECURITY-REMEDIATION-RUNBOOK
+        # §P2.4.
         - name: TRUENAS_HOST
-          value: "${TRUENAS_HOST}"
+          value: "10.1.0.135"
         - name: TRUENAS_API_KEY
           valueFrom:
             secretKeyRef:

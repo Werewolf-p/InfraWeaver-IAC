@@ -78,6 +78,42 @@
 # recreated; the change materialises workload by workload at the next rollout.
 # That is also why it must not be enabled and forgotten -- the breakage, if any,
 # would surface at an unrelated future restart.
+#
+# -----------------------------------------------------------------------------
+# DELIBERATE DEFERRALS, 2026-08-07 — these findings stay open ON PURPOSE
+# -----------------------------------------------------------------------------
+# Everything below is DOCUMENTATION. No pod is restarted to clear a finding.
+# `kubectl get polr -A` shows these as `fail` and that is the correct state.
+#
+# WHY WAITING IS NOW CORRECT (it was not before rule 2 landed): Kubernetes does
+# NOT copy automountServiceAccountToken from the ServiceAccount down to the Pod,
+# so before rule 2 `set-pod-automount-false` existed, no number of restarts
+# could ever have cleared a Pod finding. Rule 2 sets the field ON THE POD at
+# admission, so any recreated pod now both loses the token and satisfies the
+# audit pattern. Verified live: both rules present in the live policy
+# (`set-automount-false`, `set-pod-automount-false`).
+#
+#   Finding                          | Why deferred                                     | Clears exactly when
+#   ---------------------------------|--------------------------------------------------|--------------------
+#   Pod/authentik-redis-master-0     | StatefulSet, 1 replica, no surge — a restart is  | Next recreation of that pod from ANY natural
+#                                    | an SSO session-store outage                      | cause (chart upgrade, node drain, eviction)
+#   Pod/jellyfin-*                   | Deployment strategy `Recreate` — a restart is    | Next natural rollout of jellyfin (image bump,
+#                                    | real user-facing downtime                        | node event)
+#   Pod/nextcloud-*                  | same                                             | Next natural rollout of nextcloud
+#   Pod/zot-* (ns registry)          | same, and a zot outage blocks image pulls        | Next natural rollout of zot
+#                                    | platform-wide                                    |
+#   17 x wordpress Pods              | Customer workloads. There is no reason to        | Each site's next natural restart (core-update
+#                                    | restart a customer's site for a report row       | blue/green slot cycle, scaling, node events)
+#
+# Clearing any of these "quickly" is a deliberate SSO or user-facing outage
+# decision and belongs to the human operator, not to a policy-report cleanup.
+# `tradesphere` stays 0/0. Success for each row is observed opportunistically at
+# its natural restart — it is never forced.
+#
+# Confirm the set has not grown beyond the table:
+#   kubectl get polr -A -o json | jq -r '.items[] | select([.results[]?
+#     | select(.result=="fail" and (.policy|startswith("audit-default-sa")))]
+#     | length > 0) | .scope.kind + "/" + .scope.name + "  (ns " + .scope.namespace + ")"'
 # =============================================================================
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
@@ -342,10 +378,12 @@ metadata:
     #
     # `rbac.kyverno.io/aggregate-to-background-controller: "true"` does NOT
     # match it. The sibling kyverno:background-controller:limitranges in
-    # resource-governance-policies.yaml carries only that label and is
-    # therefore INERT — its limitranges permission is aggregated from the
-    # chart's own :core role, which is why nobody noticed. Worth fixing there
-    # too; it is not this file's to change.
+    # resource-governance-policies.yaml carried only that label and WAS inert
+    # for exactly that reason — its limitranges permission arrived from the
+    # chart's own :core role, which is why nobody noticed. Fixed 2026-08-07 in
+    # the same commit that reworded this paragraph: that role now carries these
+    # same three labels. If you are reading this before that commit has synced,
+    # re-measure rather than trusting either comment.
     app.kubernetes.io/component: background-controller
     app.kubernetes.io/instance: kyverno
     app.kubernetes.io/part-of: kyverno

@@ -177,6 +177,79 @@ debugging.
 
 ---
 
+### 1.1 Deliberate recreation of `openbao-0` — human-gated, attended
+
+There is exactly one legitimate reason to recreate this pod: to pick up a
+StatefulSet pod-template change. `updateStrategy` is `OnDelete` (measured
+2026-08-07, and it is also the chart default), so a template change syncs into
+the StatefulSet object and recreates **no pod** until someone deletes it. The
+commit and the restart are physically separable — keep them separate.
+
+**Do not bundle this with a deploy, and do not do it to clear a policy report.**
+Per §0.1 no alert will fire either way, so the sealed window is invisible to
+monitoring: only the manual checks below will tell you what is happening.
+
+Currently pending: the `require-memory-request-and-limit` finding on
+`Pod/openbao-0`. The StatefulSet half of that finding is already fixed in git
+(`kubernetes/core/openbao/values.yaml`, resources moved under `server.*`) and
+cleared without any restart.
+
+**1. Pre-checks — all must pass before you touch anything.**
+
+```bash
+# §1 steps 1-3, all healthy: sealed:false, sidecar logging normally, key present
+kubectl exec -n openbao openbao-0 -c openbao -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 bao status -format=json | jq '{sealed,initialized,t,n}'
+kubectl logs -n openbao openbao-0 -c autounseal --tail=50
+kubectl exec -n openbao openbao-0 -c autounseal -- sh -c 'wc -c < /etc/openbao-unseal/unseal_key'
+kubectl get externalsecret -A --no-headers | grep -v True     # expect: empty
+```
+
+Also required: no other platform operation in flight — in particular nothing
+that will need a *fresh* secret in the next ~10 minutes — and you have §1 open
+in front of you, because if the sidecar fails you will be running its step 4.
+
+**2. Recreate.**
+
+```bash
+kubectl delete pod openbao-0 -n openbao
+```
+
+**3. Expect ~3-5 minutes of SEALED OpenBao.** The pod starts sealed → readiness
+gate (60s initial delay, 2-3 min typical startup) → the sidecar's 30s loop
+unseals it. During the window ExternalSecrets do not refresh; already-synced
+Secrets persist, so there is no immediate app impact. Watch it by hand:
+
+```bash
+kubectl logs -n openbao openbao-0 -c autounseal -f   # "OpenBao sealed - unsealing..." then "Unseal OK"
+kubectl exec -n openbao openbao-0 -c openbao -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 bao status -format=json | jq '.sealed'
+```
+
+**4. If it is still sealed past ~6 minutes**, run §1 step 2 (ask the sidecar
+why), then §1 step 4 (manual unseal). If step 4 returns "unseal key does not
+match" — **stop**, go to §0.2 for the offline copy, escalate. Do not improvise.
+
+**5. Post-checks.**
+
+```bash
+kubectl exec -n openbao openbao-0 -c openbao -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 bao status -format=json | jq '.sealed'   # false
+kubectl get externalsecret -A --no-headers | grep -v True                        # empty
+kubectl get pod openbao-0 -n openbao -o json | jq '[.spec.containers[]|{name,resources}]'
+kubectl get polr -n openbao -o json | jq -r '.items[] | select([.results[]?
+  | select(.result=="fail")] | length > 0) | .scope.kind + "/" + .scope.name'
+```
+
+The last one goes empty at the next background scan, not instantly.
+
+**Rollback:** revert the values commit — the StatefulSet template reverts, again
+with no pod restart. An already-recreated pod keeps running with resources,
+which is harmless and still policy-compliant. **No scenario requires a second
+restart to roll back.**
+
+---
+
 ## 2. Populating a key (the runbook for a failing ExternalSecret)
 
 An `ExternalSecret` in `SecretSyncedError` is one of exactly three things.

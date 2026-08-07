@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document ID** | ISMS-SOA-001 |
-| **Version** | 1.0 |
+| **Version** | 1.1 |
 | **Status** | Active |
 | **Effective** | 2026-08-07 |
 | **Owner / Approver** | Platform Owner (self-approved — see `risk-register.md` risk-owner caveat) |
@@ -22,7 +22,9 @@ that evidences it or the risk-register entry that accepts its absence.
 **This SoA deliberately contains a large number of open items.** Sixty-seven of
 the eighty-three applicable controls are partially or not implemented. That is
 the honest position of a platform whose ISMS artifacts did not exist until
-2026-08-07 and whose backup system has never successfully run.
+2026-08-07 and whose backup system produced and passed its first verified
+restore on that same day — after 54 days of silent failure — and has yet to
+demonstrate a single unattended scheduled backup.
 
 An SoA with open items is auditable — an auditor can see exactly what is missing,
 who owns it, and when it is due. An SoA that claims 93 green controls on this
@@ -49,33 +51,39 @@ platform would be false, and a false SoA is worse than no certification.
 | **Applicable** | **83** |
 | **Not applicable** | **10** |
 | — Implemented | **16** |
-| — Partial | **52** |
-| — Not implemented | **15** |
+| — Partial | **53** |
+| — Not implemented | **14** |
 | **Open items (Partial + Not implemented)** | **67** |
 
 By control family:
 
 | Family | Total | N/A | Implemented | Partial | Not implemented |
 |---|---|---|---|---|---|
-| A.5 Organizational | 37 | 1 | 9 | 20 | 7 |
+| A.5 Organizational | 37 | 1 | 9 | 21 | 6 |
 | A.6 People | 8 | 5 | 0 | 3 | 0 |
 | A.7 Physical | 14 | 2 | 0 | 9 | 3 |
 | A.8 Technological | 34 | 2 | 7 | 20 | 5 |
-| **Total** | **93** | **10** | **16** | **52** | **15** |
+| **Total** | **93** | **10** | **16** | **53** | **14** |
 
-**The 15 not-implemented controls**, so they are impossible to miss:
+**The 14 not-implemented controls**, so they are impossible to miss:
 A.5.3 (segregation of duties), A.5.6 (special interest groups),
 A.5.7 (threat intelligence), A.5.13 (labelling), A.5.20 (supplier agreements),
-A.5.30 (ICT readiness for business continuity), A.5.35 (independent review),
+A.5.35 (independent review),
 A.7.4 (physical security monitoring), A.7.12 (cabling security),
 A.7.14 (secure disposal), A.8.1 (user endpoint devices),
 A.8.5 (secure authentication — **MFA**), A.8.7 (protection against malware),
 A.8.12 (data leakage prevention), A.8.13 (information backup).
+A.5.30 (ICT readiness for business continuity) moved to Partial on 2026-08-07
+after the first executed restore drill; see its row.
 
-The three that materially threaten the platform are **A.8.13** (no working
-backup), **A.8.5** (no MFA anywhere), and **A.5.30** (no restore capability).
-The rest are either scale-appropriate omissions or physical-environment controls
-that a residential deployment cannot meet.
+The two that materially threaten the platform are **A.8.13** (backup chain
+proven end to end exactly once, on a scratch volume; no unattended scheduled
+backup has ever run) and **A.8.5** (no MFA anywhere — zero enrolled second
+factors, re-verified 2026-08-07). **A.5.30** moved to Partial on 2026-08-07:
+one restore drill has now been executed and verified, but restore of a
+production volume, destructive restore, full rebuild and etcd recovery all
+remain unproven. The rest are either scale-appropriate omissions or
+physical-environment controls that a residential deployment cannot meet.
 
 ---
 
@@ -97,9 +105,9 @@ that a residential deployment cannot meet.
 | A.5.12 | Classification of information | Yes | **Implemented** | Three classes (Secret / Personal / Operational) in `information-security-policy.md` §6, applied in `asset-inventory.md` §Classification |
 | A.5.13 | Labelling of information | Yes | **Not implemented** | No labelling scheme. Classification is enforced by *location* (secrets only in OpenBao/SOPS) rather than by label. Accepted: labels add no protection when the storage boundary is the control |
 | A.5.14 | Information transfer | Yes | Partial | TLS on every published endpoint (Let's Encrypt, TLS 1.2+/1.3); SMTP with `smtp_require_tls: true`. No formal transfer agreements; no encryption-in-transit requirement for NAS SMB/NFS on the internal LAN |
-| A.5.15 | Access control | Yes | Partial | `access-control-policy.md`; RBAC across Kubernetes, ArgoCD, console and Authentik; default-deny defaults. **Gap:** 6 live Authentik applications have no access policy binding, including the Proxmox UI (F-01) |
+| A.5.15 | Access control | Yes | Partial | `access-control-policy.md`; RBAC across Kubernetes, ArgoCD, console and Authentik; default-deny defaults. **Gap (F-01), partly remediated:** the `50-unbound-application-policies` blueprint is armed and applied (BlueprintInstance `successful`) and unbound Authentik applications fell from 13 to 7; five of F-01's six live applications — `proxmox`, `grafana`, `tradesphere`, `route-truenas`, `infraweaver-console` — now carry bindings (measured 2026-08-07 evening). `vaultwarden` remains unbound, possibly by design (see A.8.21). **Binding existence was measured; enforcement was not** — F-01 stays open until a live challenge test on `proxmox`, the highest-value surface, has been run |
 | A.5.16 | Identity management | Yes | **Implemented** | Authentik is the single identity provider. `users.yaml` is the register of record with full `grantedBy`/`grantedAt` provenance. The 2026-Q3 review verified **exact 1:1 correspondence** between the register and active Authentik accounts, in both directions |
-| A.5.17 | Authentication information | Yes | Partial | SSO everywhere, forward-auth on admin surfaces, 8h console JWT lifetime, built-in ArgoCD admin disabled, secrets in OpenBao. **Not met:** no MFA (RISK-07, and see A.8.5) and no password policy declared as code |
+| A.5.17 | Authentication information | Yes | Partial | SSO everywhere, forward-auth on admin surfaces, 8h console JWT lifetime, built-in ArgoCD admin disabled, secrets in OpenBao. **Closed 2026-08-07:** the three permanent Authentik credentials — `iw-admin-token` (never-expiring API token owned by the sole superuser; bypassed the login flow and therefore every MFA control) and the permanent recovery tokens `recovery-admin` / `manual-recovery-admin` — were deleted. The console now authenticates as service account `svc-infraweaver-console` with a token expiring 2027-08-07; verified live post-deletion (grant/revoke round-trip from a running console pod), and re-verified 2026-08-07 evening that only the outpost token and `iw-console-api-token` remain (`docs/BREAK-GLASS.md` §10). **Not met:** no MFA (RISK-07, and see A.8.5); no password policy declared as code; the replacement token's expiry is unwatched and its service account is still a superuser (backlog P1.1, P1.4) |
 | A.5.18 | Access rights | Yes | Partial | Provisioning/modification/deprovisioning defined (`access-control-policy.md` §3); quarterly review procedure defined and **first review executed** (`access-review-2026-Q3.md`). **Open:** 10 findings from that review, including register drift in both directions (F-02, F-03) |
 | A.5.19 | Information security in supplier relationships | Yes | Partial | `vendor-register.md` records every supplier, the data it can see, criticality and exit path. **No security requirements are agreed with any supplier** — all are on standard free/consumer terms with no negotiating position |
 | A.5.20 | Addressing information security within supplier agreements | Yes | **Not implemented** | No bespoke supplier agreements exist. Standard published terms accepted as-is. `vendor-register.md` §1 and §4 state this plainly rather than implying otherwise |
@@ -111,8 +119,8 @@ that a residential deployment cannot meet.
 | A.5.26 | Response to information security incidents | Yes | Partial | Documented (`incident-response-plan.md` §4, §7) but **never exercised**. First tabletop due 2026-11-07 |
 | A.5.27 | Learning from information security incidents | Yes | Partial | Mechanism defined — post-mortem template, mandatory new detection per incident (§4 Phase 5). Never used, because no incident has been formally recorded |
 | A.5.28 | Collection of evidence | Yes | Partial | Kubernetes API audit log at Metadata level for all requests; git history; PolicyReports. **Weak:** audit logs are on-node only with 30-day rotation and share a failure domain with the node they record; Loki retention is undefined in practice. RISK-12, WP8 |
-| A.5.29 | Information security during disruption | Yes | Partial | `business-continuity-plan.md` defines tiers, scenarios and objectives. **The capabilities it depends on do not work** — see A.5.30 and A.8.13. RISK-03 |
-| A.5.30 | ICT readiness for business continuity | Yes | **Not implemented** | No functioning volume backup, no etcd snapshot, no restore drill ever performed. `business-continuity-plan.md` §0 and §7 state this without softening. RISK-03, WP2. **This is the platform's most serious control failure** |
+| A.5.29 | Information security during disruption | Yes | Partial | `business-continuity-plan.md` defines tiers, scenarios and objectives. **Most of the capabilities it depends on remain unproven:** a single Longhorn volume restore was executed and checksum-verified on 2026-08-07 (`docs/BACKUP-AND-RESTORE-RUNBOOK.md` §7), but routine unattended backups, production-volume restore, full rebuild and etcd recovery have not been demonstrated — see A.5.30 and A.8.13. RISK-03 |
+| A.5.30 | ICT readiness for business continuity | Yes | Partial | First restore drill executed 2026-08-07 and **PASSED**: a Longhorn backup was restored to a new volume, mounted read-only, and checksum-verified 201/201 files (`docs/BACKUP-AND-RESTORE-RUNBOOK.md` §7 drill row; §4a is now a proven procedure — and the drill itself surfaced and fixed the egress defect that had silently blocked all backups for 54 days). **Not proven:** restore of any *production* volume (the drill source was a purpose-built scratch volume — backlog P1.5; the production drill is now *written* and blocked on the first unattended backup run), destructive restore over a live volume (§4b), full cluster rebuild (§4c), and etcd/control-plane restore (§5 — **etcd remains at zero: never snapshotted, never restored, never tabletopped**; backlog P2.5). An SSO-database dump chain now exists in git but is unproven live. RISK-03, WP2 |
 | A.5.31 | Legal, statutory, regulatory and contractual requirements | Yes | Partial | GDPR identified as the binding obligation (personal data of five users plus hosted site data); notification path documented. No comprehensive register of legal obligations; no contractual obligations exist |
 | A.5.32 | Intellectual property rights | Yes | Partial | Open-source components used under their licences; the public template mirror is published deliberately through a sanitising pipeline. No formal IP or licence-compliance register |
 | A.5.33 | Protection of records | Yes | Partial | Git history, access grants, review records and incident records are retained indefinitely (`logging-and-retention-policy.md` §3). **Weak:** operational logs and metrics are retained for days, not months; nothing is tamper-evident, and cluster-admin can alter logs (RISK-09) |
@@ -178,24 +186,24 @@ disposal of a disk holding user data is a genuine unaddressed risk.
 |---|---|---|---|---|
 | A.8.1 | User endpoint devices | Yes | **Not implemented** | No MDM, no endpoint protection, no device inventory, no disk-encryption verification for the machines used to administer the platform. Declared as a scope exclusion in `information-security-policy.md` §2 rather than claimed. Compounds A.7.9 |
 | A.8.2 | Privileged access rights | Yes | Partial | Privileged access defined and bounded (`access-control-policy.md` §6); short-lived tokens are the stated norm. **Not met:** `claude-platform-owner` holds cluster-admin via a binding that is not in git with a 39-day-old non-expiring static token (RISK-09, F-05, WP3), and a second static token exists (F-06) |
-| A.8.3 | Information access restriction | Yes | Partial | Scoped role assignments in `users.yaml` (path-scoped), console RBAC by group, ArgoCD `policy.default: role:readonly`, Kubernetes RBAC. **Gaps:** 6 unbound Authentik applications (F-01); 44 pods on automounted `default` ServiceAccount tokens (GAP-H3, WP4) |
+| A.8.3 | Information access restriction | Yes | Partial | Scoped role assignments in `users.yaml` (path-scoped), console RBAC by group, ArgoCD `policy.default: role:readonly`, Kubernetes RBAC. **Gaps:** unbound Authentik applications are now 7, down from 13, after the `50-unbound-application-policies` backfill landed — five of F-01's six live applications are bound, `vaultwarden` is not (measured 2026-08-07 evening; enforcement untested, so F-01 remains open — see A.5.15); 44 pods on automounted `default` ServiceAccount tokens (GAP-H3, WP4) |
 | A.8.4 | Access to source code | Yes | Partial | Three private repositories, single owner, no additional collaborators. Public mirror is sanitised through a gated pipeline with a `pre-push` hook blocking direct pushes. **Not met:** branch protection is unavailable (HTTP 403, free plan) so repository authorisation is account-level only. RISK-02, WP1 |
-| A.8.5 | Secure authentication | Yes | **Not implemented** | SSO and forward-auth are in place, but the control's core requirement is not: **zero enrolled second factors of any type across every account**, and no authenticator-validation stage bound to the authentication flow. Measured directly against the Authentik database on 2026-08-07 (`access-review-2026-Q3.md` §2.3). RISK-07, F-09, WP11 |
+| A.8.5 | Secure authentication | Yes | **Not implemented** | SSO and forward-auth are in place, but the control's core requirement is not: **zero enrolled second factors of any type across every account** (re-verified live 2026-08-07 evening), and the one authenticator-validation stage bound to the authentication flow carries `not_configured_action: skip`, so it challenges nobody — present in shape, absent in effect (`kubernetes/platform/authentik/manifests/blueprints/10-authentication-current-state.yaml`). Groundwork laid 2026-08-07: the permanent MFA-bypass API token was deleted (see A.5.17) and the enforcement blueprints are written, reviewed and deliberately deferred behind the break-glass gate (WP11 stages 2–4). RISK-07, F-09, WP11 |
 | A.8.6 | Capacity management | Yes | Partial | Monitored (Prometheus node alerts, `node-memory-rebalancer`) and documented (`business-continuity-plan.md` §8). **Not met:** capacity is genuinely exhausted — **cp3 was under `MemoryPressure=True` with a live `NoSchedule` taint at 2026-08-07 10:45**, on a host with no spare RAM, and 21 workloads violate the memory request/limit policy. RISK-05 (escalated to Critical on this evidence), GAP-M10 |
 | A.8.7 | Protection against malware | Yes | **Not implemented** | No anti-malware, no runtime detection, no host behavioural monitoring. Falco is disabled (`app-falco-manifests.yaml.disabled`; the `falco` namespace has no pods). Cilium Hubble provides network flow visibility only. RISK-11, WP8 must either deploy Falco or formally accept Hubble + audit logs as the compensating surface |
 | A.8.8 | Management of technical vulnerabilities | Yes | Partial | **Covered:** IaC (Checkov fail-on-HIGH, tfsec fail-on-CRITICAL/HIGH), manifests (kubeconform, Kyverno, netpol-port gate), shell/Python (shellcheck, ruff). **Not covered:** container images (no Trivy/Grype anywhere) and application dependencies. RISK-15 |
-| A.8.9 | Configuration management | Yes | Partial | GitOps is the configuration management system: 61 ArgoCD Applications, 60 auto-sync, self-heal reverts drift. **Gaps:** the PSA label file declares itself the single source of truth but covers 17 of 37 namespaces with a duplicate entry (GAP-M3); 5 applications are persistently Degraded/OutOfSync, which weakens the "git is truth" claim |
+| A.8.9 | Configuration management | Yes | Partial | GitOps is the configuration management system: 61 ArgoCD Applications, 60 auto-sync, self-heal reverts drift. **Gaps:** the PSA label file declares itself the single source of truth but covers 17 of 37 namespaces with a duplicate entry (GAP-M3); 5 applications are persistently Degraded/OutOfSync, which weakens the "git is truth" claim; **four Authentik BlueprintInstances sit in `error`** — `ArgoCD and OpenBao OAuth2 Setup`, `Platform Users Setup`, `Forward-Auth (auto-generated)` and `authentik Bootstrap`, measured 2026-08-07 evening, cause not yet diagnosed — declared identity configuration that the live system has not applied, and a pre-existing baseline that will mask the next blueprint failure until it is cleared |
 | A.8.10 | Information deletion | Yes | Partial | Retention and deletion defined (`logging-and-retention-policy.md` §6). **Two recorded collateral-damage incidents** shape the procedure: deleting a root-domain WordPress site removed the domain's MX and SPF records, and deleting a site orphaned its backups permanently because the sweep prunes by the current site list. Mitigations are documented; automation is not |
 | A.8.11 | Data masking | **No** | N/A | No use case exists. Production personal data is never copied into test or analytics environments — test sites use synthetic content (`secure-development-policy.md` §7) — so there is no dataset requiring masking |
 | A.8.12 | Data leakage prevention | Yes | **Not implemented** | No DLP tooling or egress content inspection. **Partial compensations exist and are real:** the CI secret-leak gate (ratcheting, baseline currently empty) prevents secrets entering git and therefore the public mirror; airgap-baseline egress policies restrict outbound traffic in 25 namespaces. Accepted (GAP-L5) — full DLP is disproportionate here |
-| A.8.13 | Information backup | Yes | **Not implemented** | Longhorn BackupTarget URL is empty with `available=false`; **zero** `backups.longhorn.io` resources have ever existed; the backup verifier has **never** recorded a success; Velero is not deployed; no etcd snapshot schedule exists anywhere. The only working path is the WordPress fleet's separate signed datastore. RISK-03, WP2. **`business-continuity-plan.md` §0 is the authoritative statement** |
+| A.8.13 | Information backup | Yes | **Not implemented** | Materially improved 2026-08-07 but not yet operating: the backup target is now reachable (`available=true`, after fixing both the `${TRUENAS_HOST}` placeholder and the `airgap-baseline` egress denial — commit `71371b3`), all **19** live volumes are enrolled in the recurring jobs, and one backup was taken, restored and checksum-verified end to end (`docs/BACKUP-AND-RESTORE-RUNBOOK.md` §7 — a scratch volume, cleaned up after the drill). **Still true, measured 2026-08-07 evening:** no production volume has ever been backed up — the target now holds **zero** `backups.longhorn.io` and zero `backupvolumes.longhorn.io`, the 6 orphaned BackupVolumes from a previous cluster (May 2026) having been deleted on 2026-08-07 precisely because the verifier iterates every BackupVolume and could never have recorded a success while they remained; the unattended nightly schedule has never once run to success (first run pending — backlog P0.3); the backup verifier has never recorded a success; Authentik's Postgres/Redis sit on `local-path` with no backup of any kind, and a nightly `pg_dump` chain is now in git but unproven live (backlog P1.6); no etcd snapshot has ever been taken anywhere (backlog P2.5). The WordPress fleet's separate signed datastore remains the one routinely working backup path (verified 2026-07-30). Moves to Partial when the first unattended nightly run produces backups of real volumes AND the verifier records a `lastSuccessfulTime`. RISK-03, WP2.<br><br>**Velero — exclusion drafted 2026-08-07, status PENDING.** The wording to adopt, once its precondition is met, is: *"Velero is excluded by decision of `<date>`. API-object protection is provided by five named compensating controls: (1) Git as the source of truth for the 63 ArgoCD Applications; (2) **etcd snapshots** covering the console-provisioned WordPress and game-hub objects, which carry no ArgoCD tracking-id and exist only in etcd — first snapshot verified end-to-end on `<DATE — DOES NOT EXIST YET>`; (3) the WordPress fleet's signed datastore, verified 2026-07-30; (4) Longhorn volume backups to the TrueNAS NFS target; (5) the console provisioning path, which can re-create site objects. The `minio-velero` MinIO instance was removed on `<date>` — it was hand-applied outside GitOps, served zero backups for 54 days, and stored Velero data on a Longhorn volume **inside the cluster it would restore**, a circular dependency that never made it a usable DR path."* The precondition is a verified etcd snapshot, which does not yet exist; until then this row states the exclusion as drafted, not adopted |
 | A.8.14 | Redundancy of information processing facilities | Yes | Partial | 3-node etcd quorum, Longhorn cross-node volume replication, Traefik at 2 replicas, MetalLB. **Not met:** all three nodes are converged with workloads (RISK-01); two of three nodes share one hypervisor host, so losing that host loses quorum *and* the NFS target *and* the automation runner simultaneously; no site redundancy |
 | A.8.15 | Logging | Yes | Partial | API server audit logging at Metadata level for all requests; container logs to Loki; Traefik access logs; Authentik events; ArgoCD events. **Not met:** OpenBao has **no audit device**, so secret access is entirely unevidenced (F-08, GAP-M6, WP10); audit logs never leave the node |
 | A.8.16 | Monitoring activities | Yes | Partial | Prometheus (37 PrometheusRules), Loki, Gatus synthetics, Hubble, Kyverno PolicyReports. **Three delivery defects verified 2026-08-07:** every alert reaches only Discord; the **Watchdog dead-man's-switch alert is routed to the `null` receiver**, so a monitoring-stack outage is invisible by construction; and the `email-admin` fallback is both unrouted and configured with an unsubstituted `${BASE_DOMAIN}` placeholder. RISK-12, GAP-M4, WP8 |
 | A.8.17 | Clock synchronization | Yes | **Implemented** | Talos manages NTP on all three nodes. Verify: `talosctl -n 10.0.0.90 time`. Without this, cross-source log correlation would be worthless |
 | A.8.18 | Use of privileged utility programs | Yes | Partial | Talos is an immutable OS with **no shell and no package manager** on the nodes — a strong structural control. `talosctl` and `kubectl` privilege is controlled by credential possession. **Not met:** the Talos CA private key and admin kubeconfig sit unencrypted on the runner VM (RISK-17), so possession is weakly protected |
 | A.8.19 | Installation of software on operational systems | Yes | **Implemented** | Talos immutability makes ad-hoc installation structurally impossible on the nodes. All software arrives as OCI images through ArgoCD from git. A Kyverno registry allowlist (Audit→Enforce) is a WP4 addition that will further constrain provenance |
-| A.8.20 | Networks security | Yes | Partial | Cilium CNI with default-deny ingress+egress in 9 namespaces and airgap-baseline CiliumNetworkPolicies across 25; TLS on all published endpoints; forward-auth on admin surfaces. **Not met:** 7 namespaces have no policy at all, including `velero` which runs `minio-velero` (RISK-14, WP6) |
+| A.8.20 | Networks security | Yes | Partial | Cilium CNI with default-deny ingress+egress in 9 namespaces and airgap-baseline CiliumNetworkPolicies across 25; TLS on all published endpoints; forward-auth on admin surfaces. **Not met:** 7 namespaces have no policy at all, including `velero` which runs `minio-velero` (RISK-14, WP6). *Note:* the recommended resolution for `velero` is deletion, not a policy — see the A.8.13 Velero exclusion and the teardown step in `docs/BACKUP-AND-RESTORE-RUNBOOK.md` §8. That drops the unpolicied count to 6 |
 | A.8.21 | Security of network services | Yes | Partial | Traefik with `secure-headers` on most routes; rate-limit middleware exists but is applied **only** to the Authentik route. **Remediation landed in git 2026-08-07** (`2a897d3`, WP9): `rate-limit-public-cf` on bitwarden, `rate-limit-public` on jellyfin/nextcloud/cluster routes. **Still not met until live convergence is verified**, and the bitwarden forward-auth exception remains permanent by design (native clients cannot complete a browser SSO redirect) — RISK-06 |
 | A.8.22 | Segregation of networks | Yes | Partial | Namespace-level segregation via NetworkPolicy and CiliumNetworkPolicy; `airgap-baseline` pattern with a `pending/` staging directory for safe rollout. **Not met:** the 7 unpolicied namespaces in A.8.20; `monitoring`, `traefik` and `apps-grafana` lack egress deny. RISK-14 |
 | A.8.23 | Web filtering | Yes | Partial | AdGuard provides DNS-level filtering on the network (VM 100). This is network hygiene rather than an enterprise web-filtering control, and it is not integrated with platform logging or alerting |
@@ -211,6 +219,49 @@ disposal of a disk holding user data is a genuine unaddressed risk.
 | A.8.33 | Test information | Yes | **Implemented** | No production personal data in test fixtures; test sites use synthetic content; the `ontwikkel` environment holds no user data; placeholder credentials use literal `change-me` values that the secret-leak gate recognises as non-real |
 | A.8.34 | Protection of information systems during audit testing | Yes | **Implemented** | The 2026-08-07 audit that produced this pack, and every evidence command in `evidence-index.md`, is **strictly read-only** — `kubectl get`/`describe`, `talosctl read`, `gh api` GETs, and read-only SQL SELECTs. The asset-inventory generator refuses any kubectl verb other than `get` by construction. No audit activity has mutated a production system |
 
+### PENDING VERIFICATION — not a status, not in force
+
+The paragraph below is **pre-drafted text, held here deliberately unapplied.**
+A.8.13's status above is **Not implemented** and stays that way until the
+evidence named here has actually been observed. Nothing in this block may be
+read as a current claim, and it must not be applied on "the schedule should
+have run" — that assumption is what cost 54 days of silent backup failure, and
+nothing alerts on a missed run (`LonghornBackupVerifierMissedSuccess` is
+Discord-only).
+
+**Trigger to apply (backlog P0.3, all of it, verified by command):**
+`backups.longhorn.io` rows exist for *production* volumes, dated after an
+unattended 01:00 run, **and** `longhorn-backup-verifier` reports a
+`lastSuccessfulTime`.
+
+**Then, and only then:** change A.8.13's status cell to `Partial`; delete the
+sentence beginning "the unattended nightly schedule has never once run to
+success" and the verifier clause; insert *"Nightly unattended backups verified
+running as of `<date>` (`backups.longhorn.io` rows for production volumes dated
+after 01:00; verifier `lastSuccessfulTime` `<timestamp>`)."*; and update §2
+accordingly — Partial 53→54, Not implemented 14→13, the not-implemented list
+becomes 13 entries, and the "two that materially threaten" paragraph is
+rewritten. Record the change in §7 as v1.2.
+
+> ⛔ **PENDING: the Velero exclusion in A.8.13 / A.5.30 is drafted, not adopted.**
+>
+> The exclusion rests on compensating control (2), etcd snapshots. As of
+> 2026-08-07 **no etcd snapshot has ever been taken** — the script and ansible
+> playbook exist in `InfraWeaver-base` but were never installed, and the
+> `etcd_snapshot_hosts` inventory group they target was defined nowhere
+> (`docs/BACKUP-AND-RESTORE-RUNBOOK.md` §1 callout). Adopting an exclusion whose
+> named compensating control has never executed is the precise failure this
+> platform keeps paying for: a control that reads as present and is absent.
+>
+> **Gate:** the first etcd snapshot verified end-to-end — taken, shipped to the
+> NAS, and read back with a matching sha256 (runbook §8 item 6, `ROUNDTRIP_OK`).
+> Only then: replace `<DATE — DOES NOT EXIST YET>` with the real date, remove
+> this callout, and move A.8.13's Velero clause from PENDING to adopted.
+>
+> The `minio-velero` teardown is **not** gated on this — it is an unrelated
+> hand-applied component serving zero backups, and its removal is an operator
+> step in runbook §8. Only the *SoA wording* waits.
+
 ---
 
 ## 7. Approval and review
@@ -218,6 +269,16 @@ disposal of a disk holding user data is a genuine unaddressed risk.
 **Approved:** 2026-08-07 by the Platform Owner. There is no independent approver
 (A.5.35), and this SoA says so in its own header rather than leaving it to be
 discovered.
+
+**Amended 2026-08-07 (v1.1).** A.5.30 moved Not implemented → Partial on the
+strength of the first executed and verified restore drill
+(`docs/BACKUP-AND-RESTORE-RUNBOOK.md` §7, PASS). A.8.13 and A.5.29
+justifications rewritten to the measured post-drill state — statuses
+unchanged, because no unattended scheduled backup has yet succeeded. A.5.17
+records the deletion of the permanent Authentik API and recovery tokens and
+their expiring service-account replacement (`docs/BREAK-GLASS.md` §10). A.8.5
+justification corrected (a validation stage is bound but inert). Summary
+counts updated (Partial 52→53, Not implemented 15→14; open items remain 67).
 
 **Review triggers:** completion of any work package WP1–WP11 (each changes the
 truth of specific rows above), any SEV-2 or higher incident, any change to the

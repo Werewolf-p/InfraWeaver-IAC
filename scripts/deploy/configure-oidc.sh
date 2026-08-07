@@ -357,12 +357,19 @@ else
   fi
 fi
 
-# ── LDAP Outpost Token ────────────────────────────────────────────────────────
-# Generates the service connection token for the Authentik LDAP outpost.
-# Uses kubectl exec to call Authentik internal port 9000 directly (avoids 405 via port-forward).
-echo "==> Configuring Authentik LDAP outpost..."
-
-# Helper: run curl inside the Authentik server pod on internal port 9000
+# ── Authentik API helper ──────────────────────────────────────────────────────
+# Runs curl inside the Authentik server pod against internal port 9000 (avoids the
+# 405 you get through a port-forward). Used below by the embedded-outpost
+# proxy-provider assignment — that is the WORKING forward-auth path (TrueNAS,
+# Longhorn, n8n). Do not remove it.
+#
+# The LDAP outpost provisioning that used to live here was REMOVED 2026-08-07.
+# The outpost was dead at every link: no Authentik LDAP provider, no LDAP outpost
+# object, no token, no OpenBao path, a Service whose VIP was never assigned
+# (${METALLB_LDAP_VIP} was never in the CMP allowlist) and a Deployment sitting at
+# 0/0 for 54 days. Leaving this block in place would have re-created all of it on
+# the next DR rebuild — resurrecting precisely the dead configuration that the
+# manifest deletion removes. See docs/BREAK-GLASS.md §10.
 ak_exec_curl() {
   local method="$1"; local path="$2"; local data="${3:-}"
   if [ -n "$data" ]; then
@@ -379,105 +386,6 @@ ak_exec_curl() {
         "http://localhost:9000${path}" 2>/dev/null || echo ""
   fi
 }
-
-# 1. Get existing LDAP outpost info via Django shell (most reliable)
-LDAP_OUTPOST_INFO=$($KT exec -i -n authentik deploy/authentik-worker -c worker -- \
-  sh -c "printf 'from authentik.outposts.models import Outpost\nfrom authentik.core.models import Token\nout = Outpost.objects.filter(type=\"ldap\").first()\nif out:\n    t = Token.objects.filter(identifier=out.token_identifier).first()\n    print(\"OUTPOST_TOKEN_ID:\"+out.token_identifier)\n    if t: print(\"TOKEN_KEY:\"+t.key)\n' | ak shell" \
-  2>/dev/null | grep -E "^OUTPOST_TOKEN_ID:|^TOKEN_KEY:" || echo "")
-
-LDAP_OUTPOST_TOKEN=$(echo "$LDAP_OUTPOST_INFO" | grep "^OUTPOST_TOKEN_ID:" | sed 's/OUTPOST_TOKEN_ID://' || echo "")
-LDAP_TOKEN_VALUE=$(echo "$LDAP_OUTPOST_INFO" | grep "^TOKEN_KEY:" | sed 's/TOKEN_KEY://' || echo "")
-
-if [ -n "$LDAP_OUTPOST_TOKEN" ]; then
-  echo "  ✅ LDAP outpost already exists (token_id=$LDAP_OUTPOST_TOKEN)"
-else
-  echo "  No LDAP outpost found - creating via kubectl exec (internal port 9000)..."
-
-  LDAP_PROVIDER_PK=$(ak_exec_curl GET "/api/v3/providers/ldap/?page_size=5" | \
-    python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-
-  if [ -z "$LDAP_PROVIDER_PK" ]; then
-    echo "  Creating LDAP provider..."
-    AUTH_FLOW_PK=$(ak_exec_curl GET "/api/v3/flows/instances/?designation=authentication" | \
-      python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-    INVAL_FLOW_PK=$(ak_exec_curl GET "/api/v3/flows/instances/?designation=invalidation" | \
-      python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-    SEARCH_GROUP=$(ak_exec_curl GET "/api/v3/core/groups/?name=infraweaver-admins" | \
-      python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('results',[]); print(r[0]['pk'] if r else '')" 2>/dev/null || echo "")
-
-    # Derive the LDAP base DN from the configured domain (e.g. example.com ->
-    # DC=ldap,DC=example,DC=com); LDAP_BASE_DN env overrides. Kept out of the source
-    # as a literal so no real domain is baked into the published template.
-    LDAP_BASE_DN="${LDAP_BASE_DN:-DC=ldap,DC=$(printf '%s' "${BASE_DOMAIN:-example.com}" | sed 's/\./,DC=/g')}"
-    if [ -n "$AUTH_FLOW_PK" ]; then
-      LDAP_PAYLOAD=$(python3 -c "
-import json
-d = {
-  'name': 'LDAP Provider',
-  'authorization_flow': '${AUTH_FLOW_PK}',
-  'invalidation_flow': '${INVAL_FLOW_PK:-}',
-  'base_dn': '${LDAP_BASE_DN}',
-  'uid_start_number': 2000,
-  'gid_start_number': 4000,
-}
-if '${SEARCH_GROUP:-}': d['search_group'] = '${SEARCH_GROUP}'
-print(json.dumps(d))
-" 2>/dev/null || echo "")
-      LDAP_PROVIDER_RESP=$(ak_exec_curl POST "/api/v3/providers/ldap/" "$LDAP_PAYLOAD")
-      LDAP_PROVIDER_PK=$(echo "$LDAP_PROVIDER_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('pk',''))" 2>/dev/null || echo "")
-      [ -n "$LDAP_PROVIDER_PK" ] && echo "  ✅ LDAP provider created (pk=$LDAP_PROVIDER_PK)" || \
-        echo "  ⚠️ LDAP provider creation failed: $LDAP_PROVIDER_RESP"
-    else
-      echo "  ⚠️ No authentication flow found - skipping LDAP provider creation"
-    fi
-  else
-    echo "  ✅ Using existing LDAP provider (pk=$LDAP_PROVIDER_PK)"
-  fi
-
-  if [ -n "$LDAP_PROVIDER_PK" ]; then
-    LDAP_APP_EXISTS=$(ak_exec_curl GET "/api/v3/core/applications/?slug=ldap" | \
-      python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if d.get('count',0)>0 else '')" 2>/dev/null || echo "")
-    if [ -z "$LDAP_APP_EXISTS" ]; then
-      ak_exec_curl POST "/api/v3/core/applications/" \
-        "{\"name\":\"LDAP\",\"slug\":\"ldap\",\"provider\":${LDAP_PROVIDER_PK},\"backchannel_providers\":[${LDAP_PROVIDER_PK}],\"open_in_new_tab\":false}" > /dev/null 2>&1 \
-        && echo "  ✅ LDAP application created" || echo "  ⚠️ LDAP application creation failed"
-    fi
-
-    OUTPOST_PAYLOAD="{\"name\":\"authentik LDAP Outpost\",\"type\":\"ldap\",\"providers\":[${LDAP_PROVIDER_PK}],\"config\":{\"authentik_host\":\"https://auth.${BASE_DOMAIN}\",\"authentik_host_insecure\":false,\"log_level\":\"info\",\"kubernetes_replicas\":2}}"
-    LDAP_OUTPOST_JSON=$(ak_exec_curl POST "/api/v3/outposts/instances/" "$OUTPOST_PAYLOAD")
-    LDAP_OUTPOST_TOKEN=$(echo "$LDAP_OUTPOST_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token_identifier',''))" 2>/dev/null || echo "")
-    [ -n "$LDAP_OUTPOST_TOKEN" ] && echo "  ✅ LDAP outpost created (token_id=$LDAP_OUTPOST_TOKEN)" || \
-      echo "  ⚠️ LDAP outpost creation failed: $(echo "$LDAP_OUTPOST_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('detail',str(d)))" 2>/dev/null)"
-  fi
-fi
-
-# Get the token key from DB if not already retrieved
-if [ -n "$LDAP_OUTPOST_TOKEN" ] && [ -z "$LDAP_TOKEN_VALUE" ]; then
-  LDAP_TOKEN_VALUE=$($KT exec -i -n authentik deploy/authentik-worker -c worker -- \
-    sh -c "printf 'from authentik.core.models import Token\nt=Token.objects.filter(identifier=\"${LDAP_OUTPOST_TOKEN}\").first()\nif t: print(\"KEY:\"+t.key)\n' | ak shell" \
-    2>/dev/null | grep "^KEY:" | sed 's/KEY://' || echo "")
-fi
-
-if [ -n "$LDAP_TOKEN_VALUE" ]; then
-  ROOT_TOKEN=$($KT get secret openbao-unseal -n openbao \
-    -o jsonpath='{.data.root_token}' 2>/dev/null | base64 -d || echo "")
-  if [ -n "$ROOT_TOKEN" ]; then
-    $KT exec -n openbao openbao-0 -- \
-      env VAULT_TOKEN="$ROOT_TOKEN" VAULT_ADDR=http://127.0.0.1:8200 \
-      bao kv put secret/platform/authentik-ldap-outpost token="$LDAP_TOKEN_VALUE" > /dev/null 2>&1 && \
-      echo "✅ LDAP outpost token stored in OpenBao" || echo "⚠️ Failed to store LDAP token in OpenBao"
-  fi
-  # Create/update k8s secret directly - do not rely on ExternalSecret sync timing
-  $KT create secret generic authentik-ldap-token -n authentik \
-    --from-literal=token="$LDAP_TOKEN_VALUE" \
-    --dry-run=client -o yaml | $KT apply -f - > /dev/null 2>&1 && \
-    echo "✅ authentik-ldap-token k8s secret applied" || echo "⚠️ Failed to apply k8s secret"
-  $KT annotate externalsecret authentik-ldap-token -n authentik \
-    force-sync="$(date +%s)" --overwrite > /dev/null 2>&1 || true
-else
-  echo "⚠️ Could not retrieve LDAP outpost token value - skipping k8s secret creation"
-fi
-
 
 # ── Assign proxy providers to the embedded outpost ───────────────────────────
 # Enables Traefik forward-auth for all proxy-protected apps (n8n, Longhorn, etc).

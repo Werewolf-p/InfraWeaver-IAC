@@ -263,38 +263,29 @@ spec:
             summary: "ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} not synced"
             description: "ExternalSecret has not synced for > 15 minutes. Check OpenBao connectivity."
 
-    # ── Automation health ───────────────────────────────────────────────────────
-    - name: automation.health
-      rules:
-        - alert: ClusterAutomationCronJobMissedSuccess
-          expr: |
-            time() - kube_cronjob_status_last_successful_time{namespace=~"argocd|longhorn-system",cronjob=~"argocd-self-healer|node-notready-remediator|node-memory-rebalancer|workload-janitor|longhorn-replica-guardian"} > 7200
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Automation CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not succeeded recently"
-            description: "Cluster automation CronJob {{ $labels.cronjob }} has not reported a successful run within the last 2 hours."
-
-        - alert: LonghornBackupVerifierMissedSuccess
-          expr: |
-            time() - kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="longhorn-backup-verifier"} > 172800
-          for: 30m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Longhorn backup verifier has not succeeded in 48h"
-            description: "The longhorn-backup-verifier CronJob has not recorded a successful run within the last 48 hours."
-
-        - alert: ClusterAutomationCronJobSuspended
-          expr: |
-            kube_cronjob_spec_suspend{namespace=~"argocd|longhorn-system",cronjob=~"argocd-self-healer|node-notready-remediator|node-memory-rebalancer|workload-janitor|longhorn-backup-verifier|longhorn-replica-guardian"} == 1
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Automation CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} is suspended"
-            description: "Automation CronJob {{ $labels.cronjob }} is suspended and will not run until resumed."
+    # ── Automation health — SUPERSEDED, removed 2026-08-07 ──────────────────────
+    # The `automation.health` group (ClusterAutomationCronJobMissedSuccess,
+    # LonghornBackupVerifierMissedSuccess, ClusterAutomationCronJobSuspended)
+    # lived here. It was an ALLOWLIST of 6 CronJob names out of the 31 that exist
+    # cluster-wide, and its verifier rule was structurally blind: it computed
+    # `time() - kube_cronjob_status_last_successful_time`, a series that does not
+    # exist for a CronJob with zero successes — which is exactly the state
+    # longhorn-backup-verifier was in for 54 days while that alert sat green.
+    #
+    # Replaced by alerts/cronjob-health.yaml, which derives its threshold from
+    # each CronJob's OWN schedule (2x the interval, clamped 1h..8d) and therefore
+    # needs no allowlist. Coverage is equal or tighter for every name that was
+    # here: the five automation jobs get CronJobMissedSuccess (2x300s..2x3600s →
+    # clamped to 1h, vs the old fixed 2h) plus CronJobLastRunFailed,
+    # CronJobNeverSucceeded and CronJobSuspended; longhorn-backup-verifier gets
+    # the four CRITICAL Backup* rules (missed-success threshold 2x86400 = the old
+    # 172800 exactly, and the never-succeeded case now actually fires).
+    # argocd/node-label-enforcer, which this group never covered at all, is
+    # covered too.
+    #
+    # Left as a comment rather than deleted silently: `monitoring-alerts` has
+    # prune: false, so anyone reverting this needs to know the group is gone on
+    # purpose and that the live object must be reconciled by hand.
 
     # ── Console automation health ────────────────────────────────────────────────
     #

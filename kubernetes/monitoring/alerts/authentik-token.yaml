@@ -1,0 +1,149 @@
+---
+# Authentik console API token expiry alerts.
+#
+# WHY: `iw-console-api-token` is the credential every identity feature of this
+# console runs on — user provisioning, invitations, group sync, RBAC assignment,
+# per-site WordPress access grants, profile sessions, auth events. It was minted
+# on 2026-08-07 with an expiry of 2027-08-07 (docs/BREAK-GLASS.md §10) and, as
+# that section recorded at the time, nothing watched that date. These rules are
+# the thing that watches it.
+#
+# The signal is MEASURED, not scheduled. The console reads its own token back
+# from Authentik on every scrape and exports the result at /api/platform/metrics
+# (scraped every 300s by the existing `wordpress-connector-metrics`
+# ServiceMonitor):
+#
+#   infraweaver_authentik_token_lookup_ok          0/1
+#   infraweaver_authentik_token_seconds_remaining  omitted when unmeasurable;
+#                                                  negative once lapsed
+#   infraweaver_authentik_token_expiring           0/1
+#
+# A hardcoded date could only ever say "the calendar has not reached it yet". A
+# read-back gauge also catches early revocation, deletion, a rename, and a
+# rotation that quietly did not happen.
+#
+# THE GAUGE IS ABSENT, NOT ZERO, when the lifetime is unmeasurable. A 0 would be
+# indistinguishable from "expired this second" and would page on a network blip.
+# Absence is not silence either: `_lookup_ok 0` names the failure, `_expiring 0`
+# names the nothing-to-watch case, and AuthentikConsoleTokenUnobservable below
+# turns a persistently missing gauge into its own (warning) condition. A failure
+# is never rendered as a healthy value.
+#
+# THRESHOLDS ARE 60d / 14d — deliberately WIDER than the OpenBao pair's 30d / 7d
+# in alerts/openbao-token.yaml. DO NOT "harmonise" them; the two tokens are not
+# the same kind of problem. OpenBao's token is renewed by the
+# `openbao-token-renew` CronJob, so its 30-day warning is 30 days in which an
+# automated loop needs a nudge. THIS rotation is MANUAL and ROOT-TOKEN-GATED:
+# replacing the token means minting a new one in Authentik, writing it to
+# OpenBao `secret/platform/infraweaver-console` — which the console's own
+# OpenBao token deliberately CANNOT do (it holds only ["list","read"] on that
+# path; the write needs the root token per docs/OPENBAO-OPERATIONS.md) — then an
+# ExternalSecret resync, a console restart and a grant/revoke verification. That
+# is scheduled operator time with a credential that lives offline, not a job to
+# be restarted, so the warning has to arrive two months out rather than one.
+#
+# Routing: severity=critical → Alertmanager receiver "all" (Discord webhook,
+# repeat 1h); severity=warning → receiver "discord" (repeat 6h). See
+# kubernetes/monitoring/kube-prometheus-stack/values.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: authentik-token-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # must match the prometheusRule selector label
+spec:
+  groups:
+    - name: authentik.token
+      rules:
+        # ── 1. The countdown itself ─────────────────────────────────────────
+        - alert: AuthentikConsoleTokenExpiringSoon
+          expr: |
+            infraweaver_authentik_token_seconds_remaining < 5184000
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console Authentik API token expires in under 60 days"
+            description: >-
+              The console's Authentik API token `iw-console-api-token` has less than
+              60 days left ({{ $value | humanizeDuration }} remaining) and nothing
+              renews it. Rotate it on a day you choose, not on the day it lapses:
+              the procedure is manual and needs the OpenBao root token, so it cannot
+              be done in the five minutes before a demo. Follow the rotation record
+              in docs/BREAK-GLASS.md §10 ("Resolved 2026-08-07 — `iw-admin-token`
+              ROTATED and deleted"), which is the exact sequence that minted this
+              token. The replacement MUST keep the identifier `iw-console-api-token`
+              or this metric stops existing and you get an Unobservable page instead.
+
+        - alert: AuthentikConsoleTokenExpiryImminent
+          expr: |
+            infraweaver_authentik_token_seconds_remaining < 1209600
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Console Authentik API token expires in under 14 days"
+            description: >-
+              The console's Authentik API token `iw-console-api-token` has less than
+              14 days left ({{ $value | humanizeDuration }} remaining; a negative
+              value means it has ALREADY lapsed). Once it lapses every Authentik call
+              the console makes returns 401 — user provisioning, invitations, group
+              sync, RBAC assignment and every WordPress per-site access grant stop,
+              quietly, because they fail one request at a time rather than all at
+              once. Rotate NOW, following docs/BREAK-GLASS.md §10, keeping the
+              identifier `iw-console-api-token`.
+
+        # ── 2. Can we still see the expiry at all? ──────────────────────────
+        # A dead exporter must not read as "healthy". `absent()` covers the console
+        # being down, the ServiceMonitor being broken and the scrape being
+        # unauthorized; `_lookup_ok == 0` covers the console being UP but unable to
+        # read the token back (Authentik down, 401 because the token has already
+        # lapsed, 403 once `svc-infraweaver-console` is scoped below superuser
+        # without `authentik_core.view_token`, or no token carrying the identifier —
+        # which is what a rotation that renamed it looks like from here).
+        #
+        # KNOWN AND ACCEPTED: this also fires for the third exporter state, "token
+        # found but declared non-expiring" (`_lookup_ok 1`, `_expiring 0`, gauge
+        # absent). Adding `or infraweaver_authentik_token_expiring == 0` was
+        # considered and REJECTED, for two reasons.
+        #
+        #   1. It would not change WHEN this alert fires. The exporter only emits
+        #      `_seconds_remaining` when `expiring` is true (a non-expiring record
+        #      returns secondsRemaining: null in src/lib/secrets/authentik-token.ts),
+        #      so `_expiring == 0` is a strict SUBSET of
+        #      `absent(_seconds_remaining) == 1`. The extra term would add a second
+        #      firing instance of the same alert for the same condition and nothing
+        #      else — more pages, no more signal.
+        #   2. Conflating them is right on the merits. All three states mean one
+        #      thing to whoever is woken up — "the expiry countdown is not visible,
+        #      go look at the token" — and all three start with the same command,
+        #      the `ak shell` token dump in docs/BREAK-GLASS.md §10. A non-expiring
+        #      console token is not a benign case to be filtered out: it is a
+        #      regression of the 2026-08-07 rotation, whose whole point was to put
+        #      an expiry on this credential. It SHOULD page.
+        #
+        # 2h rather than the sibling's 1h because the scrape interval is 300s: an
+        # hour is only 12 samples, and a console rollout plus a slow Authentik can
+        # spend several of them.
+        - alert: AuthentikConsoleTokenUnobservable
+          expr: |
+            absent(infraweaver_authentik_token_seconds_remaining) == 1
+            or infraweaver_authentik_token_lookup_ok == 0
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console Authentik API token expiry is not observable"
+            description: >-
+              Prometheus cannot read how long the console's Authentik API token has
+              left. Either the /api/platform/metrics scrape is failing (console down,
+              ServiceMonitor broken, scrape token wrong), or the console cannot read
+              the token back from Authentik (Authentik down, 401, 403 on view_token,
+              or no token with identifier `iw-console-api-token` — a rotation that
+              renamed it lands here), or the token in place no longer expires at all,
+              which is a regression of the 2026-08-07 rotation. While this persists
+              the two expiry alerts above are blind — which is precisely the gap
+              docs/BREAK-GLASS.md §10 recorded. Start with the `ak shell` token dump
+              at the end of that section; it prints identifier, intent, expiring and
+              expires for every live token.

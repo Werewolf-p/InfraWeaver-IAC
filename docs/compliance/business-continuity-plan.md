@@ -156,10 +156,19 @@ be unable to unseal OpenBao or authenticate to Authentik.
 
 Verification is the part that failed here, so it is stated as a requirement, not
 a nicety: the `longhorn-backup-verifier` CronJob must record a
-`lastSuccessfulTime`, and `LonghornBackupVerifierMissedSuccess` must alert when
-it does not. That alert rule already exists in the `platform-alerts`
-PrometheusRule — **the detection worked; the backup did not, and the alert
-delivered only to Discord** (RISK-12 / GAP-M4).
+`lastSuccessfulTime`, and `BackupCronJobMissedSuccess` /
+`BackupCronJobNeverSucceeded` (`kubernetes/monitoring/alerts/cronjob-health.yaml`,
+both `severity: critical`) must alert when it does not.
+
+**Correction, 2026-08-07: the detection did NOT work.** The predecessor rule
+`LonghornBackupVerifierMissedSuccess` computed
+`time() - kube_cronjob_status_last_successful_time`, and that series does not
+exist for a CronJob with zero successes — which is precisely the state
+`longhorn-backup-verifier` was in for all 54 days. The alert could not have
+fired. It has been replaced by the pair above, of which
+`BackupCronJobNeverSucceeded` covers exactly the never-succeeded case, plus
+`BackupCronJobAbsent` for a deleted CronJob. Delivery still terminates at one
+Discord webhook (RISK-12 / GAP-M4).
 
 ## 5. Recovery objectives
 

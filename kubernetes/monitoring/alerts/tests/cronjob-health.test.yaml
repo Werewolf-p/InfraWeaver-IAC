@@ -1,0 +1,390 @@
+# promtool unit tests for cronjob.health + cronjob.backup.chain
+#
+# Run by: scripts/validate-iac.sh (gate 5/5). Do not run promtool against this
+# file directly from the repo — `rules.yaml` below does not exist here. The rules
+# live inside a PrometheusRule custom resource, which promtool cannot read, so
+# the gate extracts `.spec` from every PrometheusRule into a temp directory as
+# `rules.yaml`, copies this file next to it, and runs there. Same mechanics as
+# console-automation.test.yaml; see that file's header.
+#
+# promtool's clock starts at 0, so a constant last_successful_time of 0 means
+# "succeeded at t=0 and never again" and `time() - 0` is simply the eval time.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── Daily job stops succeeding: fires after 2x interval (48h), not before ──
+  - interval: 1m
+    name: daily cronjob missed success fires at 48h
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="longhorn-orphan-cleaner"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="longhorn-system",cronjob="longhorn-orphan-cleaner"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_next_schedule_time{namespace="longhorn-system",cronjob="longhorn-orphan-cleaner"}'
+        values: '86400+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-orphan-cleaner"}'
+        values: '0+0x3000'
+    alert_rule_test:
+      - eval_time: 47h
+        alertname: CronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 49h
+        alertname: CronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: longhorn-system
+              cronjob: longhorn-orphan-cleaner
+            exp_annotations:
+              summary: 'CronJob longhorn-system/longhorn-orphan-cleaner has not succeeded within 2x its schedule interval'
+              description: 'CronJob longhorn-orphan-cleaner has gone more than twice its own schedule interval without a successful run — at least one whole cycle is missing. This is the shape that catches a silently dead job. Check: kubectl -n longhorn-system get jobs --sort-by=.metadata.creationTimestamp | tail, then the newest pod''s logs.'
+
+  # ── Clamp floor: a */10 job (interval 600 -> 2x=1200 -> clamped 3600) ─────
+  # Without the clamp a */10 CronJob would page 20 minutes after one hiccup.
+  - interval: 1m
+    name: fast cronjob clamps to one hour not twenty minutes
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="kyverno",cronjob="kyverno-cleanup-admission-reports"}'
+        values: '0+0x200'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="kyverno",cronjob="kyverno-cleanup-admission-reports"}'
+        values: '0+0x200'
+      - series: 'kube_cronjob_next_schedule_time{namespace="kyverno",cronjob="kyverno-cleanup-admission-reports"}'
+        values: '600+0x200'
+      - series: 'kube_cronjob_spec_suspend{namespace="kyverno",cronjob="kyverno-cleanup-admission-reports"}'
+        values: '0+0x200'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: CronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: kyverno
+              cronjob: kyverno-cleanup-admission-reports
+            exp_annotations:
+              summary: 'CronJob kyverno/kyverno-cleanup-admission-reports has not succeeded within 2x its schedule interval'
+              description: 'CronJob kyverno-cleanup-admission-reports has gone more than twice its own schedule interval without a successful run — at least one whole cycle is missing. This is the shape that catches a silently dead job. Check: kubectl -n kyverno get jobs --sort-by=.metadata.creationTimestamp | tail, then the newest pod''s logs.'
+
+  # ── Clamp ceiling: truenas-backup-weekly's interval is 604800, so 2x = 1209600
+  # would page only 14 days after a missed run. The 691200 (8d) cap makes it page
+  # ~1 day after the miss instead. Without the clamp NOTHING below could fire.
+  #
+  # last_successful_time is -690000 rather than 0 so the 8-day threshold is
+  # crossed 20 simulated minutes in: promtool re-evaluates every rule in the repo
+  # at every step, so an honest 8-day horizon at a 1m evaluation_interval would
+  # make this one test ~11 600 steps and the slowest thing in CI. The arithmetic
+  # under test (time() - lst vs the clamped threshold) is identical either way.
+  - interval: 1m
+    name: weekly backup cronjob clamps to eight days not fourteen
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '-690000+0x60'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x60'
+      - series: 'kube_cronjob_next_schedule_time{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '604800+0x60'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x60'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '0+0x60'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
+        values: '0+0x60'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x60'
+    alert_rule_test:
+      # t=15m -> time()-lst = 690900, still under the 691200 cap
+      - eval_time: 15m
+        alertname: BackupCronJobMissedSuccess
+        exp_alerts: []
+      # crosses at t=20m, `for: 15m` -> firing from t=36m
+      - eval_time: 40m
+        alertname: BackupCronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: longhorn-system
+              cronjob: truenas-backup-weekly
+            exp_annotations:
+              summary: 'BACKUP CronJob longhorn-system/truenas-backup-weekly has not succeeded within 2x its schedule'
+              description: 'truenas-backup-weekly is part of the backup chain and has gone more than twice its schedule interval without success. The last time this failure mode went unwatched it lasted 54 days. Runbook: docs/BACKUP-AND-RESTORE-RUNBOOK.md.'
+
+  # ── REGRESSION: suspended CronJob never fires staleness ────────────────────
+  # last_successful_time freezes while suspended, so time()-lst grows without
+  # bound. Without the `unless` this fires forever on a deliberate operator pause.
+  - interval: 1m
+    name: suspended cronjob does not fire missed-success
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_next_schedule_time{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+        values: '1800+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+        values: '1+0x3000'
+    alert_rule_test:
+      - eval_time: 40h
+        alertname: CronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 40h
+        alertname: CronJobSuspended
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: jellyfin
+              cronjob: jellyfin-library-bootstrap
+            exp_annotations:
+              summary: 'CronJob jellyfin/jellyfin-library-bootstrap is suspended'
+              description: 'CronJob jellyfin-library-bootstrap is suspended and will not run until resumed: kubectl -n jellyfin patch cronjob jellyfin-library-bootstrap -p ''{"spec":{"suspend":false}}'''
+
+  # ── Never succeeded: fires after the 26h creation grace, not before ────────
+  - interval: 1m
+    name: never-succeeded cronjob fires after grace
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="game-hub",cronjob="game-hub-scale-down"}'
+        values: '0+0x1700'
+      - series: 'kube_cronjob_created{namespace="game-hub",cronjob="game-hub-scale-down"}'
+        values: '0+0x1700'
+    alert_rule_test:
+      - eval_time: 20h
+        alertname: CronJobNeverSucceeded
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: CronJobNeverSucceeded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: game-hub
+              cronjob: game-hub-scale-down
+            exp_annotations:
+              summary: 'CronJob game-hub/game-hub-scale-down has NEVER succeeded'
+              description: 'CronJob game-hub-scale-down was created over 26 hours ago, is not suspended, and has no recorded successful run at all. The missed-success alert cannot fire for it because the metric it subtracts from does not exist yet. Check the job template, image, RBAC, and NetworkPolicies.'
+
+  # ── REGRESSION: a CronJob that HAS succeeded must not fire never-succeeded ──
+  - interval: 1m
+    name: healthy cronjob never fires never-succeeded
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="game-hub",cronjob="game-hub-scale-up"}'
+        values: '0+0x1700'
+      - series: 'kube_cronjob_created{namespace="game-hub",cronjob="game-hub-scale-up"}'
+        values: '0+0x1700'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="game-hub",cronjob="game-hub-scale-up"}'
+        values: '0+60x1700'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: CronJobNeverSucceeded
+        exp_alerts: []
+
+  # ── Last run failed: fires while newest job is failed, resolves on success ─
+  # This is the Kyverno scenario KubeJobFailed could not catch, plus the
+  # regression that killed the 23-alert noise wall: a STALE failed job (started
+  # before the last success) must NOT fire.
+  - interval: 1m
+    name: last-run-failed fires and self-resolves
+    input_series:
+      - series: 'kube_job_status_start_time{namespace="kyverno",job_name="kyverno-cleanup-admission-reports-1"}'
+        values: '7200+0x300'
+      - series: 'kube_job_owner{namespace="kyverno",job_name="kyverno-cleanup-admission-reports-1",owner_kind="CronJob",owner_name="kyverno-cleanup-admission-reports"}'
+        values: '1+0x300'
+      - series: 'kube_job_status_failed{namespace="kyverno",job_name="kyverno-cleanup-admission-reports-1"}'
+        values: '1+0x300'
+      # last success BEFORE the failed job's start -> fires; then a new success
+      # AFTER it at t=180m -> resolves.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="kyverno",cronjob="kyverno-cleanup-admission-reports"}'
+        values: '3600+0x179 10900+0x120'
+    alert_rule_test:
+      - eval_time: 160m
+        alertname: CronJobLastRunFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: kyverno
+              cronjob: kyverno-cleanup-admission-reports
+            exp_annotations:
+              summary: 'CronJob kyverno/kyverno-cleanup-admission-reports: most recent run failed'
+              description: 'The newest Job of CronJob kyverno-cleanup-admission-reports started after its last recorded success and has failed pods (BackoffLimitExceeded, DeadlineExceeded, or still retrying). This resolves on the next successful run. Check: kubectl -n kyverno logs job/$(kubectl -n kyverno get jobs --sort-by=.metadata.creationTimestamp -o name | tail -1 | cut -d/ -f2)'
+      - eval_time: 200m
+        alertname: CronJobLastRunFailed
+        exp_alerts: []
+
+  # ── REGRESSION: the 23-alert noise wall. A failed Job retained by
+  # failedJobsHistoryLimit=3 LONG AFTER a later success must stay silent. This is
+  # exactly the state that had the chart's KubeJobFailed firing x23 into Discord
+  # on 2026-08-07 — the measured reason the only working channel was ignored. ──
+  - interval: 1m
+    name: stale failed job after a later success stays silent
+    input_series:
+      - series: 'kube_job_status_start_time{namespace="infraweaver-console",job_name="roster-drift-28000000"}'
+        values: '600+0x300'
+      - series: 'kube_job_owner{namespace="infraweaver-console",job_name="roster-drift-28000000",owner_kind="CronJob",owner_name="roster-drift"}'
+        values: '1+0x300'
+      - series: 'kube_job_status_failed{namespace="infraweaver-console",job_name="roster-drift-28000000"}'
+        values: '1+0x300'
+      # succeeded at t=3600, i.e. AFTER the failed job started
+      - series: 'kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="roster-drift"}'
+        values: '3600+0x300'
+    alert_rule_test:
+      - eval_time: 250m
+        alertname: CronJobLastRunFailed
+        exp_alerts: []
+
+  # ── Standalone Job (no CronJob owner) fires; the owned one above does not ──
+  - interval: 1m
+    name: standalone failed job fires
+    input_series:
+      - series: 'kube_job_status_failed{namespace="velero",job_name="minio-create-bucket",reason="BackoffLimitExceeded"}'
+        values: '1+0x120'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: StandaloneJobFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: velero
+              job_name: minio-create-bucket
+            exp_annotations:
+              summary: 'Job velero/minio-create-bucket (no CronJob owner) has failed'
+              description: 'Standalone Job minio-create-bucket has failed pods and no CronJob owner, so no schedule will retry it. Investigate, then fix or delete the Job (deleting clears this alert).'
+
+  # ── REGRESSION: a CronJob-owned failed Job must NOT reach StandaloneJobFailed
+  # (otherwise every CronJob failure pages twice, un-inhibitably) ─────────────
+  - interval: 1m
+    name: cronjob-owned failed job does not fire standalone
+    input_series:
+      - series: 'kube_job_status_failed{namespace="kyverno",job_name="kyverno-cleanup-ephemeral-reports-9"}'
+        values: '1+0x120'
+      - series: 'kube_job_owner{namespace="kyverno",job_name="kyverno-cleanup-ephemeral-reports-9",owner_kind="CronJob",owner_name="kyverno-cleanup-ephemeral-reports"}'
+        values: '1+0x120'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: StandaloneJobFailed
+        exp_alerts: []
+
+  # ── Backup chain: verifier that never succeeded is CRITICAL ────────────────
+  - interval: 1m
+    name: backup verifier never succeeded fires critical
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x1700'
+      - series: 'kube_cronjob_created{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x1700'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: BackupCronJobNeverSucceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: longhorn-system
+              cronjob: longhorn-backup-verifier
+            exp_annotations:
+              summary: 'BACKUP CronJob longhorn-system/longhorn-backup-verifier has NEVER succeeded'
+              description: 'Backup-chain CronJob longhorn-backup-verifier has no successful run at all and is older than 26h. A backup control that has never succeeded is a hypothesis, not a control. (This alert fired on deploy day for longhorn-backup-verifier — that was correct.)'
+      - eval_time: 27h
+        alertname: CronJobNeverSucceeded   # generic must NOT double-fire
+        exp_alerts: []
+
+  # ── Backup chain: 48h staleness at CRITICAL, and the generic warning rule
+  # must stay silent for the same CronJob (severity must not double-page) ────
+  - interval: 1m
+    name: backup daily missed success fires critical only
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_next_schedule_time{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '86400+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '0+0x3000'
+      # the other three backup CronJobs exist, so BackupCronJobAbsent is silent
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x3000'
+    alert_rule_test:
+      - eval_time: 47h
+        alertname: BackupCronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 49h
+        alertname: BackupCronJobMissedSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: longhorn-system
+              cronjob: truenas-backup-daily
+            exp_annotations:
+              summary: 'BACKUP CronJob longhorn-system/truenas-backup-daily has not succeeded within 2x its schedule'
+              description: 'truenas-backup-daily is part of the backup chain and has gone more than twice its schedule interval without success. The last time this failure mode went unwatched it lasted 54 days. Runbook: docs/BACKUP-AND-RESTORE-RUNBOOK.md.'
+      - eval_time: 49h
+        alertname: CronJobMissedSuccess   # generic must NOT double-fire
+        exp_alerts: []
+      - eval_time: 49h
+        alertname: BackupCronJobAbsent
+        exp_alerts: []
+
+  # ── Backup chain: a suspended backup CronJob is CRITICAL, and its staleness
+  # alert is correctly silent — which is exactly why the suspend alert exists ─
+  - interval: 1m
+    name: suspended backup cronjob fires critical
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '1+0x3000'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_next_schedule_time{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '604800+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x3000'
+    alert_rule_test:
+      - eval_time: 40h
+        alertname: BackupCronJobSuspended
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: longhorn-system
+              cronjob: truenas-backup-weekly
+            exp_annotations:
+              summary: 'BACKUP CronJob longhorn-system/truenas-backup-weekly is suspended'
+              description: 'A backup-chain CronJob is suspended. The staleness alerts exclude suspended jobs, so while this persists NOTHING else watches this control. Resume it or accept in writing that backups are off.'
+      - eval_time: 40h
+        alertname: BackupCronJobMissedSuccess
+        exp_alerts: []
+      - eval_time: 40h
+        alertname: CronJobSuspended   # generic must NOT double-fire
+        exp_alerts: []
+
+  # ── Backup chain: a deleted backup CronJob pages ───────────────────────────
+  - interval: 1m
+    name: absent backup cronjob fires critical
+    input_series:
+      # three of four exist; truenas-backup-daily is missing entirely
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x120'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
+        values: '0+0x120'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x120'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BackupCronJobAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: longhorn-system
+              cronjob: truenas-backup-daily
+            exp_annotations:
+              summary: 'A backup-chain CronJob no longer exists'
+              description: 'kube-state-metrics reports no CronJob object for longhorn-system/truenas-backup-daily. It was deleted or pruned; every other backup alert is now blind to it. Check the longhorn / monitoring-alerts ArgoCD applications and git history.'
