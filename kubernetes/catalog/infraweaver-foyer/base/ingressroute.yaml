@@ -43,6 +43,19 @@ metadata:
   annotations:
     external-dns.alpha.kubernetes.io/managed: "true"
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+    # An EXPLICIT target is REQUIRED here, not optional. external-dns runs with
+    # `--default-targets=203.0.113.10`, but this version logs
+    #   "ignoring default targets [...] due to new behavior.
+    #    Use --force-default-targets to revert to old behavior"
+    # and publishes nothing at all for a route that does not name its own target.
+    #
+    # Measured 2026-08-07: with only the two annotations above, this route was
+    # correctly matched by the annotation filter and STILL produced no record —
+    # external-dns reported "All records are already up to date" across several
+    # sync intervals and a full restart, while portal.${BASE_DOMAIN} stayed
+    # NXDOMAIN. Every other managed route in this repo carries this annotation;
+    # see platform/external-routes/manifests/11-routes-authentik.yaml.
+    external-dns.alpha.kubernetes.io/target: "${PUBLIC_INGRESS_IP}"
   labels:
     app: infraweaver-foyer
     infraweaver.io/access-tier: public
