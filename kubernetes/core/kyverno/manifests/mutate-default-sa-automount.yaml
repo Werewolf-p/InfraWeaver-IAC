@@ -209,7 +209,30 @@ metadata:
 spec:
   admission: true
   background: true
-  mutateExistingOnPolicyUpdate: true
+  # FALSE, deliberately. Admission-time mutation only.
+  #
+  # With this true, the background controller walks `mutate.targets` directly
+  # and the rule-level `exclude` below does NOT filter it — it filters the
+  # trigger, not the target. Measured 2026-08-07: all 37 default
+  # ServiceAccounts were patched, kube-system / kube-public / kube-node-lease
+  # included, despite being listed in `exclude`.
+  #
+  # Nothing broke — kube-system's default SA is used by the apiserver,
+  # controller-manager and scheduler, which are static pods authenticating with
+  # certificates that never read the token — but a declared exclusion that does
+  # not hold is exactly the "control that reads as present and is absent"
+  # pattern this policy set exists to remove.
+  #
+  # `namespaceSelector` on a target is not available here: this Kyverno rejects
+  # it with `strict decoding error: unknown field
+  # spec.rules[0].mutate.targets[0].namespaceSelector`.
+  #
+  # So the sweep is done ONCE, by hand, over the namespaces that should have it
+  # (already applied), and from here the policy only mutates ServiceAccounts at
+  # admission — where match/exclude behave correctly and kube-system is genuinely
+  # exempt. New namespaces are covered automatically; nothing re-patches the
+  # three exempt ones.
+  mutateExistingOnPolicyUpdate: false
   rules:
     - name: set-automount-false
       match:
