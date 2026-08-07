@@ -94,6 +94,28 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    # Proxmox VE API — the /infrastructure node-management surface.
+    #
+    # Named /32s rather than ${MGMT_SUBNET_CIDR}: this grant lets the console
+    # reach a hypervisor API that can create and destroy VMs, so it is scoped to
+    # the two registered endpoints and nothing else on that subnet. Adding a
+    # third hypervisor is a deliberate edit here AND a host-registry entry.
+    #
+    # Required because the broad 0.0.0.0/0 rule below excludes 10.0.0.0/8, and
+    # the MGMT_SUBNET_CIDR rule above opens 6443 only. Measured 2026-08-07 from
+    # inside the console pod before this rule existed:
+    #   10.1.0.3:8006 -> FAILED TimeoutError
+    #   10.1.0.4:8006 -> FAILED TimeoutError
+    # The surface would have rendered every host "unavailable" with a timeout
+    # diagnosis — honest, but permanently wrong.
+    - to:
+        - ipBlock:
+            cidr: 10.1.0.3/32
+        - ipBlock:
+            cidr: 10.1.0.4/32
+      ports:
+        - port: 8006
+          protocol: TCP
     # External HTTPS + SMTP submission (GitHub API for GitOps commits, OIDC
     # discovery, and the console mailer's O365 submission on 587 — user invitation,
     # provisioned-credential, and RBAC-change emails). Without 587 the mailer's TCP
