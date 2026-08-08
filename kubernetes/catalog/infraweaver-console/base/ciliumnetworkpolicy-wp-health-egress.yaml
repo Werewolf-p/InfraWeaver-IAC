@@ -13,9 +13,16 @@ metadata:
     infraweaver.io/component: iwsl
 spec:
   endpointSelector:
-    matchLabels:
-      app.kubernetes.io/managed-by: infraweaver-console
-      infraweaver.io/component: iwsl
+    matchExpressions:
+      # `iwsl` is the WordPress connector's sweeps; `sweep-client` is the label
+      # every later console sweep carries. Widened rather than duplicated: two
+      # policies granting the same egress to two labels is two places to forget.
+      - key: app.kubernetes.io/managed-by
+        operator: In
+        values: [infraweaver-console]
+      - key: infraweaver.io/component
+        operator: In
+        values: [iwsl, sweep-client]
   egress:
     # The cluster resolver is backed by CoreDNS. Allow both kube-system and
     # dns-system so DNS works regardless of which CoreDNS instance answers.

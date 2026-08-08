@@ -25,6 +25,13 @@ spec:
             matchLabels:
               app.kubernetes.io/managed-by: infraweaver-console
               infraweaver.io/component: iwsl
+        # Every later console sweep carries `sweep-client` rather than `iwsl`.
+        # k8s NetworkPolicy `from` entries are a union, so this ADDS a source
+        # without touching the connector's.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: infraweaver-console
+              infraweaver.io/component: sweep-client
       ports:
         - port: 3000
           protocol: TCP

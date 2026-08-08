@@ -1,0 +1,120 @@
+# Architecture-atlas freshness sweep — hourly, server-driven.
+#
+# WHAT IT DOES. POSTs the console's /api/wiki/atlas-sweep. The route compares the
+# atlas's recorded source commits against both repositories, records the result
+# where the freshness badge and the settings page read it, and — when the setting
+# is on (it ships ON) and the atlas is behind — dispatches a regeneration job to
+# the build host. Regeneration itself never runs in the console pod: the pod has
+# no source checkouts, no dev dependencies and no git write credential.
+#
+# AUTH. A dedicated token, distinct in value from every other sweep's, sourced
+# from the SAME ESO-managed secret the console reads
+# (`infraweaver-console-secret` key `wiki-atlas-cron-token`, synced from OpenBao
+# `secret/platform/infraweaver-console`) so the job and the server cannot drift.
+# The console middleware (proxy.ts) lets this exact path+method past the session
+# and CSRF gates only when the token matches; the handler re-validates it.
+# Dedicated rather than shared because this endpoint can rewrite and push a
+# directory in the platform repository — a read-only sweep's token must not.
+#
+# WHEN A 409 IS SUCCESS. The route answers 409 when a regeneration is already
+# running: refused, not queued. `--fail` would turn that into a job failure and
+# page a human about the system working exactly as designed, so the exit status
+# is inspected instead and 409 is accepted. A disabled wiki addon answers 404 for
+# the same reason — surface off means API off, and that is a no-op, not a fault.
+#
+# ALERTING IS INHERITED, NOT DECLARED. This job needs no rule of its own:
+#   · `ConsoleAutomationCronJobMissedSuccess` (alerts/manifests/prometheus-rules.yaml,
+#     group console.automation.health) selects namespace="infraweaver-console"
+#     with a NEGATIVE match on the three daily sweeps. An hourly job added here is
+#     covered by default — 3h without a success is two consecutive misses.
+#   · `ConsoleAutomationCronJobNeverSucceeded` covers the case that rule is blind
+#     to: a job that has never succeeded at all, which is how the Longhorn backup
+#     verifier sat green for 54 days.
+#   · `CronJobLastRunFailed` (alerts/cronjob-health.yaml) DOES include this
+#     namespace and gives the fast signal, ~20-30 minutes.
+# The failure those three cannot see — the sweep succeeds but regeneration never
+# does — is covered by the exporter metrics on /api/platform/metrics
+# (infraweaver_wiki_atlas_*), which is the layer that watches the dispatched job
+# rather than the dispatcher.
+#
+# NETWORKING. The sweep pod is default-denied. It carries the
+# `infraweaver.io/component: sweep-client` label, which the egress and ingress
+# policies alongside this file select, so it can reach CoreDNS and the console
+# Service and nothing else.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wiki-atlas-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: wiki-atlas
+spec:
+  # :17 rather than :00. Seven other sweeps fire on the hour in this namespace on
+  # a box with an OOM history; moving this one off the pile costs nothing and
+  # removes it from the thundering herd. The hour is also the debounce against a
+  # merge train — a regeneration per commit would be pointless churn.
+  schedule: "17 * * * *"
+  concurrencyPolicy: Replace # kill a wedged sweep, never let a hung pod block the schedule
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: sweep-client
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: atlas-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wiki-atlas-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              args:
+                - >-
+                  code=$(curl --silent --show-error --max-time 240
+                  --output /dev/null --write-out '%{http_code}'
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Content-Type: application/json"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  --data '{}'
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wiki/atlas-sweep);
+                  echo "atlas-sweep HTTP $code";
+                  case "$code" in
+                    2*) exit 0 ;;
+                    404) echo "wiki addon disabled - nothing to do"; exit 0 ;;
+                    409) echo "a regeneration is already running - refused, not queued"; exit 0 ;;
+                    *) exit 1 ;;
+                  esac

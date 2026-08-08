@@ -57,6 +57,14 @@ secrets:
     game-hub-power-cron-token:
       type: password
       length: 64
+    # Dedicated token for the hourly wiki-atlas freshness sweep, which asks the
+    # console whether the generated architecture atlas is behind its sources and
+    # dispatches a regeneration when it is. Same Retain hazard as the keys above:
+    # undeclared, it would not merely break the sweep — it would abort the entire
+    # infraweaver-console-secret on first sync and take the console with it.
+    wiki-atlas-cron-token:
+      type: password
+      length: 64
     # HMAC key for Game Hub Sleep Fleet wake tickets. GAME_HUB_SLEEP_ENABLED has
     # been "1" for weeks while this key did not exist, so hibernation refused
     # every request rather than park a server it could never wake — the feature
