@@ -79,7 +79,17 @@ spec:
 
                   now = datetime.now(timezone.utc)
                   stale: list[str] = []
+                  in_flight: list[str] = []
                   healthy = 0
+
+                  # A backup that is still uploading is the system WORKING, not failing.
+                  # Measured 2026-08-08: the first full run (51.5 GB across 20 volumes)
+                  # started at 01:00 and was still going at 07:10. A BackupVolume is
+                  # created the moment its backup STARTS, so at 03:30 this job saw
+                  # volumes whose upload had not finished, found no completed backup,
+                  # and exited 1 — reporting failure on the first night the chain ever
+                  # worked. Any night a run overruns 03:30 would repeat it.
+                  PENDING_STATES = {"inprogress", "pending", "started"}
 
                   for item in entries:
                     name = item.get("name") or item.get("id")
@@ -92,16 +102,31 @@ spec:
                     else:
                       backup_values = list(backups)
                     latest = max((parse_time(entry.get("created")) for entry in backup_values if entry.get("created")), default=None)
+                    running = [entry for entry in backup_values if str(entry.get("state", "")).lower() in PENDING_STATES]
                     if latest is None:
-                      stale.append(f"{name}: no backups present")
+                      # No completed backup yet. Only a genuine absence is a failure;
+                      # an upload in flight is not.
+                      if running:
+                        in_flight.append(f"{name}: {len(running)} backup(s) still uploading, none completed yet")
+                      else:
+                        stale.append(f"{name}: no backups present")
                       continue
                     age_hours = (now - latest).total_seconds() / 3600
                     if age_hours > max_age_hours:
-                      stale.append(f"{name}: latest backup is {age_hours:.1f}h old")
+                      # Deliberately NOT excused by an upload in progress. Past this
+                      # point the chain has delivered nothing for max_age_hours, and a
+                      # stuck upload would otherwise hold the check green forever —
+                      # which is the failure mode this job exists to catch.
+                      suffix = " (an upload is in progress, but the last delivered backup is older than the limit)" if running else ""
+                      stale.append(f"{name}: latest backup is {age_hours:.1f}h old{suffix}")
                     else:
                       healthy += 1
 
                   print(f"Verified {healthy} Longhorn backup volumes")
+                  if in_flight:
+                    print("Backups still in flight (working, not counted as failures):")
+                    for item in in_flight:
+                      print(f"- {item}")
                   if stale:
                     print("Stale Longhorn backups detected:")
                     for item in stale:
