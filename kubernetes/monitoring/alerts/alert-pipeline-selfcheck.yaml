@@ -122,16 +122,31 @@ spec:
           # kube_secret_info appears the moment a Secret exists, so its absence
           # means the ExternalSecret has not synced — almost always because
           # secret/platform/monitoring/alerting was never seeded in OpenBao.
-          expr: absent(kube_secret_info{namespace="monitoring",secret="alertmanager-escalation-urls"})
+          #
+          # RE-POINTED 2026-08-09, from the combined `alertmanager-escalation-urls`
+          # to the DEAD-MAN half specifically. The two endpoints were split into
+          # one ExternalSecret each, because only one of them can be self-served:
+          # the ntfy topic is a random string the platform mints itself, while
+          # the healthchecks endpoint needs an account on an external service.
+          # The push leg is wired and its secret now exists, so a guard still
+          # keyed on the old combined name would have gone green while the
+          # dead-man leg — the half that cannot be self-served, and the half that
+          # detects this whole cluster dying — was still missing. That is the
+          # same silent-disarm this file was bitten by once already today.
+          expr: absent(kube_secret_info{namespace="monitoring",secret="alertmanager-healthchecks-url"})
           for: 1h
           labels:
             severity: warning
           annotations:
-            summary: "External alert escalation is not provisioned (step 1 of 2)"
+            summary: "External dead-man endpoint is not provisioned (step 1 of 2)"
             description: >-
-              The Secret alertmanager-escalation-urls does not exist, so the
-              external ntfy push and the healthchecks.io dead-man endpoint
-              cannot be wired. Every alert on this platform, including every
+              The Secret alertmanager-healthchecks-url does not exist, so the
+              healthchecks.io dead-man endpoint cannot be wired. The ntfy push
+              leg is separate and already live; this is the leg that detects the
+              whole cluster dying, and it is the one that cannot be self-served —
+              it needs an account on an external service. Until it exists, the
+              absence of a heartbeat is something an operator must NOTICE rather
+              than be told about. Every alert on this platform, including every
               critical, currently terminates at one Discord webhook inside this
               cluster. Operator step and the exact `bao kv put` command are in
               kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml.
@@ -168,5 +183,5 @@ spec:
               healthchecks.io dead-man leg are not in the running config.
               Critical alerts are still Discord-only. Enable the staged block in
               kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only
-              after the alertmanager-escalation-urls Secret exists, or the
-              Alertmanager pod will hang in ContainerCreating.
+              after the matching Secret exists, or the Alertmanager pod will hang
+              in ContainerCreating.

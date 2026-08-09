@@ -120,10 +120,10 @@ tests:
           - exp_labels:
               severity: warning
               namespace: monitoring
-              secret: alertmanager-escalation-urls
+              secret: alertmanager-healthchecks-url
             exp_annotations:
-              summary: 'External alert escalation is not provisioned (step 1 of 2)'
-              description: 'The Secret alertmanager-escalation-urls does not exist, so the external ntfy push and the healthchecks.io dead-man endpoint cannot be wired. Every alert on this platform, including every critical, currently terminates at one Discord webhook inside this cluster. Operator step and the exact `bao kv put` command are in kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml. This alert clearing proves the SECRET exists — not that the receiver is wired; AlertEscalationReceiverNotWired covers that.'
+              summary: 'External dead-man endpoint is not provisioned (step 1 of 2)'
+              description: 'The Secret alertmanager-healthchecks-url does not exist, so the healthchecks.io dead-man endpoint cannot be wired. The ntfy push leg is separate and already live; this is the leg that detects the whole cluster dying, and it is the one that cannot be self-served — it needs an account on an external service. Until it exists, the absence of a heartbeat is something an operator must NOTICE rather than be told about. Every alert on this platform, including every critical, currently terminates at one Discord webhook inside this cluster. Operator step and the exact `bao kv put` command are in kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml. This alert clearing proves the SECRET exists — not that the receiver is wired; AlertEscalationReceiverNotWired covers that.'
 
   # ── Escalation step 1 done: the guard clears on its own ───────────────────
   # A neighbouring Secret in the same namespace must NOT satisfy it — that is
@@ -131,7 +131,7 @@ tests:
   - interval: 1m
     name: escalation secret present clears the guard
     input_series:
-      - series: 'kube_secret_info{namespace="monitoring",secret="alertmanager-escalation-urls"}'
+      - series: 'kube_secret_info{namespace="monitoring",secret="alertmanager-healthchecks-url"}'
         values: '1+0x120'
     alert_rule_test:
       - eval_time: 90m
@@ -153,7 +153,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'External alert escalation receiver is not wired (step 2 of 2)'
-              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the alertmanager-escalation-urls Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
+              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the matching Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
       # receiver count goes to 6 at t=90m -> guard clears immediately
       - eval_time: 95m
         alertname: AlertEscalationReceiverNotWired
@@ -178,7 +178,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'External alert escalation receiver is not wired (step 2 of 2)'
-              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the alertmanager-escalation-urls Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
+              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the matching Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
 
   # ── REGRESSION: a DOWN etcd target must not silence the guard's neighbours,
   # and must not be confused with "no target at all". `up == 0` still means the
