@@ -399,6 +399,53 @@ alertmanager:
           - to: "${ADMIN_EMAIL}"
             send_resolved: false
 
+      # ── InfraWeaver console inbound receiver — step 2 of 2, DO NOT UNCOMMENT YET
+      #
+      # Gives the console's alert inbox (`/alerts`) a COPY of every alert, so
+      # cluster alerts and console-native ones land in one place. It is additive:
+      # the route below carries `continue: true`, so Discord delivery is
+      # unchanged and this cannot become a new single point of failure.
+      #
+      # THE TOKEN IS NEVER IN THIS FILE. `${...}` is not substituted here (this
+      # is a Helm `$values` file and bypasses the argocd CMP — the same trap that
+      # shipped the literal `changeme` to the live SMTP config above), so the
+      # token is read from a mounted Secret BY PATH. It lives only in OpenBao at
+      # `secret/platform/alerts` → `inbound-token`, delivered by
+      # manifests/alerts-inbound-externalsecret.yaml.
+      #
+      # ENABLE ORDER — the order is not optional:
+      #   1. bao kv put secret/platform/alerts inbound-token="$(openssl rand -hex 32)"
+      #   2. Confirm BOTH ExternalSecrets are SecretSynced:
+      #        kubectl get externalsecret alerts-inbound-token -n monitoring
+      #        kubectl get externalsecret alerts-inbound-token -n infraweaver-console
+      #      and that the console Deployment carries ALERTS_INBOUND_TOKEN from the
+      #      infraweaver-console one. Until it does the receiver 503s every POST
+      #      (fail-closed by design) and AlertmanagerFailedToSendAlerts will fire.
+      #   3. Uncomment all three blocks below.
+      # Uncommenting `alertmanagerSpec.secrets` before step 1 leaves the
+      # Alertmanager pod in ContainerCreating FOREVER — no alerting at all, a
+      # worse outage than the leg it adds. Same hazard, same answer, as the SMTP
+      # secret documented above.
+      #
+      # (a) here in `receivers:` —
+      #   - name: "infraweaver-console"
+      #     webhook_configs:
+      #       - url: "http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/alertmanager/inbound"
+      #         send_resolved: true
+      #         http_config:
+      #           authorization:
+      #             type: Bearer
+      #             credentials_file: /etc/alertmanager/secrets/alerts-inbound-token/token
+      #
+      # (b) in `route.routes:` above, as the FIRST entry so it sees everything —
+      #   - receiver: "infraweaver-console"
+      #     continue: true          # <- keeps Discord delivery untouched
+      #     group_wait: 10s         # the inbox is a screen, not a page; be prompt
+      #
+      # (c) in `alertmanagerSpec:` —
+      #   secrets:
+      #     - alerts-inbound-token
+
     # ══ ESCALATION TRANSPORT (GAP-M4 Phase C) — STAGED, NOT YET ACTIVE ═══════
     #
     # THE PROBLEM, measured not assumed (2026-08-07):
