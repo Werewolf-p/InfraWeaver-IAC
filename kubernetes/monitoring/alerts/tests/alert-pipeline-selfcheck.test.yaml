@@ -138,13 +138,13 @@ tests:
         alertname: AlertEscalationSecretMissing
         exp_alerts: []
 
-  # ── Escalation transport, step 2: receiver count still at today's 4 -> page,
-  # and reaching 5 (critical-push added) clears it ──────────────────────────
+  # ── Escalation transport, step 2: receiver count still at today's 5 -> page,
+  # and reaching 6 (critical-push added) clears it ──────────────────────────
   - interval: 1m
-    name: escalation receiver not wired pages until the fifth receiver exists
+    name: escalation receiver not wired pages until the sixth receiver exists
     input_series:
       - series: 'alertmanager_receivers{namespace="monitoring",pod="alertmanager-kube-prometheus-stack-alertmanager-0"}'
-        values: '4+0x89 5+0x60'
+        values: '5+0x89 6+0x60'
     alert_rule_test:
       - eval_time: 65m
         alertname: AlertEscalationReceiverNotWired
@@ -154,10 +154,31 @@ tests:
             exp_annotations:
               summary: 'External alert escalation receiver is not wired (step 2 of 2)'
               description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the alertmanager-escalation-urls Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
-      # receiver count goes to 5 at t=90m -> guard clears immediately
+      # receiver count goes to 6 at t=90m -> guard clears immediately
       - eval_time: 95m
         alertname: AlertEscalationReceiverNotWired
         exp_alerts: []
+
+  # ── REGRESSION: the count that disarmed this guard once already ────────────
+  # On 2026-08-09 an unrelated fifth receiver (infraweaver-console, the alert
+  # inbox) was added and the then-current `< 5` stopped firing on its own, while
+  # the escalation leg was still unwired. Five receivers is TODAY's reality and
+  # must still page: the guard is about the escalation receiver existing, not
+  # about receivers existing.
+  - interval: 1m
+    name: five receivers is today's baseline and must still page
+    input_series:
+      - series: 'alertmanager_receivers{namespace="monitoring",pod="alertmanager-kube-prometheus-stack-alertmanager-0"}'
+        values: '5+0x120'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: AlertEscalationReceiverNotWired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'External alert escalation receiver is not wired (step 2 of 2)'
+              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the alertmanager-escalation-urls Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
 
   # ── REGRESSION: a DOWN etcd target must not silence the guard's neighbours,
   # and must not be confused with "no target at all". `up == 0` still means the

@@ -142,13 +142,21 @@ spec:
           # Step 2 has no direct metric: Alertmanager exports no per-receiver
           # series, and alertmanager_notifications_failed_total is labelled by
           # integration, not by receiver. The receiver COUNT is the only
-          # available proxy. It is 4 today (null, discord, email-admin,
-          # deadmansswitch) and becomes 5 when critical-push is added.
+          # available proxy.
           # LIMITATION, stated rather than hidden: adding any unrelated receiver
           # would also satisfy this. If the receiver set in values.yaml changes
           # for any other reason, this threshold MUST be re-derived in the same
           # commit or it silently stops guarding anything.
-          expr: max(alertmanager_receivers) < 5
+          #
+          # RE-DERIVED 4 -> 5 on 2026-08-09, and this is exactly the failure the
+          # paragraph above predicted. The alert manager added a fifth receiver,
+          # `infraweaver-console`, which has nothing to do with escalation — and
+          # the old `< 5` went quiet on its own while the escalation leg remained
+          # unwired. The guard was disarmed by an unrelated change, silently,
+          # which is worse than never having had it.
+          # Today: null, discord, email-admin, deadmansswitch, infraweaver-console
+          # = 5. It becomes 6 when critical-push is added.
+          expr: max(alertmanager_receivers) < 6
           for: 1h
           labels:
             severity: warning
