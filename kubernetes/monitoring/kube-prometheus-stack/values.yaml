@@ -233,6 +233,9 @@ alertmanager:
     # forever — no alerting at all — which is why the order was not optional.
     secrets:
       - alerts-inbound-token
+      # Confirmed SecretSynced before this line was added — mounting a missing
+      # Secret leaves this pod in ContainerCreating forever.
+      - alertmanager-smtp-secret
     storage:
       volumeClaimTemplate:
         spec:
@@ -268,9 +271,13 @@ alertmanager:
       # Outlook rejects a From that differs from the authenticated user (554
       # SendAsDenied), so both are the same address — see the same note in
       # catalog/infraweaver-console/overlays/prod/kustomization.yaml.
-      smtp_from: "${ADMIN_EMAIL}"
+      # The AUTHENTICATED mailbox, literal rather than templated: ${...} is not
+      # substituted in this file, so the previous value was sent to Office365 as the
+      # raw string "${ADMIN_EMAIL}" and 535d on every attempt regardless of password.
+      # From equals the auth mailbox so no SendAs grant is required.
+      smtp_from: "example-owner@example.com"
       smtp_smarthost: "smtp-mail.outlook.com:587"
-      smtp_auth_username: "${ADMIN_EMAIL}"
+      smtp_auth_username: "example-owner@example.com"
       # ⚠ SECOND KNOWN GAP, verified not assumed: `${...}` is NOT substituted in
       # this file. The `platform-monitoring` ApplicationSet consumes it as a
       # multi-source Helm `$values` valueFile, which bypasses the argocd CMP that
@@ -295,7 +302,11 @@ alertmanager:
       # AlertmanagerFailedToSendAlerts fires on
       # alertmanager_notifications_failed_total{integration="email"} — instead of
       # this being an unnoticed single point of failure.
-      smtp_auth_password: "changeme"
+      # Read from the mounted Secret, never from this file. Same OpenBao key the
+      # console mailer already authenticates invitations with
+      # (secret/platform/authentik, property smtp-password), delivered by
+      # manifests/alertmanager-smtp-externalsecret.yaml.
+      smtp_auth_password_file: /etc/alertmanager/secrets/alertmanager-smtp-secret/password
       smtp_require_tls: true
     route:
       group_by: ["alertname", "namespace", "severity"]
