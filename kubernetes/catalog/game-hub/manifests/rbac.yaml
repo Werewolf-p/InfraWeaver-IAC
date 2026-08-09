@@ -44,6 +44,26 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch"]
+  # ── Addon stop / remove ────────────────────────────────────────────────────
+  # The trashcan on a STOPPED addon sweeps what it owns
+  # (src/lib/addon-registry/workloads.ts + /api/addons/[id]/resources). Measured
+  # against the live cluster, everything above already covered STOPPING this
+  # addon — Deployments, StatefulSets and CronJobs are all writable here — but
+  # the sweep could not delete DaemonSets or ServiceAccounts, so a "remove" would
+  # have reported partial failure while leaving exactly those two behind.
+  #
+  # DaemonSets get delete but are still never STOPPED: they have no replica count
+  # to zero, so the lifecycle code reports them as unstoppable rather than
+  # rewriting a pod template. Delete is for the sweep alone.
+  #
+  # ServiceAccounts get delete and nothing more — the console removes a stopped
+  # addon's identities, it does not mint them.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -415,6 +415,37 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments/scale"]
     verbs: ["get", "update", "patch"]
+  # ── Addon stop / remove ────────────────────────────────────────────────────
+  # Disabling an addon scales its workloads to zero and suspends its CronJobs
+  # (src/lib/addon-registry/workloads.ts); the trashcan on a stopped addon then
+  # sweeps what is left behind. Measured against the live cluster before this was
+  # added, the console could already update Deployments and StatefulSets here but
+  # could NOT update or delete CronJobs and Jobs — so disabling WordPress Manager
+  # would have stopped its Deployments while its CronJobs kept firing on
+  # schedule. The code reports that failure rather than hiding it, which is why
+  # the gap was visible at all. This closes it.
+  #
+  # SUSPENDING A CRONJOB IS AN `update`. There is no "suspend" verb in RBAC, so
+  # stopping one needs the same verb as editing it.
+  #
+  # Scoped to this namespace, not granted cluster-wide: an addon's whole
+  # ownership model is namespace AND labels, and a cluster-wide grant would hand
+  # the console CronJob write access everywhere to solve a problem in one place.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+  # Sweepable by the trashcan, so it needs delete. Deliberately NOT create or
+  # update: the console removes a stopped addon's ServiceAccounts, it does not
+  # mint identities.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
