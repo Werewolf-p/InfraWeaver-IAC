@@ -236,6 +236,9 @@ alertmanager:
       # Confirmed SecretSynced before this line was added — mounting a missing
       # Secret leaves this pod in ContainerCreating forever.
       - alertmanager-smtp-secret
+      # The ntfy push endpoint, read with `url_file` so the topic — which IS the
+      # credential — never appears in this file. Same confirm-then-mount order.
+      - alertmanager-ntfy-url
     storage:
       volumeClaimTemplate:
         spec:
@@ -326,6 +329,15 @@ alertmanager:
         # SCREEN, not a pager: an operator opening /alerts during an incident
         # should not wait out a batching window to see what is firing.
         - receiver: "infraweaver-console"
+          continue: true
+          group_wait: 10s
+
+        # ── Critical escalation, pushed off-cluster ─────────────────────────
+        # `continue: true` again: this ADDS a transport, it does not take one
+        # away. Criticals still reach Discord and the console inbox exactly as
+        # before, so a broken ntfy cannot swallow an alert.
+        - matchers: ['severity = "critical"']
+          receiver: "critical-push"
           continue: true
           group_wait: 10s
 
@@ -431,6 +443,24 @@ alertmanager:
         email_configs:
           - to: "${ADMIN_EMAIL}"
             send_resolved: false
+
+      # ── Escalation: critical alerts, pushed OUT of this cluster ─────────────
+      # Every alert here used to terminate at one Discord webhook inside this
+      # cluster, so a critical could be invisible precisely when the cluster was
+      # the thing that was broken. This is the independent transport for the ones
+      # that matter most.
+      #
+      # `url_file`, not `url`: the ntfy topic name is the whole credential — an
+      # unguessable topic is the only thing standing between an attacker and the
+      # platform's critical alerts — so it is mounted, never written here.
+      # Verified `url_file` is supported by the shipped Alertmanager 0.28.1.
+      #
+      # send_resolved so a recovered critical clears on the phone too; a pushed
+      # alert with no matching clear trains people to ignore the channel.
+      - name: "critical-push"
+        webhook_configs:
+          - url_file: /etc/alertmanager/secrets/alertmanager-ntfy-url/url
+            send_resolved: true
 
       # The console's alert inbox. Authenticated by a shared bearer token read
       # from the mounted Secret BY PATH — `${...}` is not substituted in this
