@@ -122,8 +122,8 @@ tests:
               namespace: monitoring
               secret: alertmanager-healthchecks-url
             exp_annotations:
-              summary: 'External dead-man endpoint is not provisioned (step 1 of 2)'
-              description: 'The Secret alertmanager-healthchecks-url does not exist, so the healthchecks.io dead-man endpoint cannot be wired. The ntfy push leg is separate and already live; this is the leg that detects the whole cluster dying, and it is the one that cannot be self-served — it needs an account on an external service. Until it exists, the absence of a heartbeat is something an operator must NOTICE rather than be told about. Every alert on this platform, including every critical, currently terminates at one Discord webhook inside this cluster. Operator step and the exact `bao kv put` command are in kubernetes/monitoring/kube-prometheus-stack/manifests/externalsecret.yaml. This alert clearing proves the SECRET exists — not that the receiver is wired; AlertEscalationReceiverNotWired covers that.'
+              summary: 'Dead-man watcher is not provisioned (step 1 of 2)'
+              description: 'No dead-man watcher is provisioned, so the ABSENCE of the heartbeat from this platform is not detected by anything. The public healthchecks.io endpoint this once pointed at was withdrawn on purpose: alert content must not leave this network. The constraint that remains is physics, not preference — a heartbeat that stops when the cluster dies cannot be judged BY the cluster. It does not have to leave the NETWORK, only the CLUSTER: a watcher on the Proxmox host or the ops VM satisfies both. Until one exists, a dead pipeline is something an operator must NOTICE rather than be told about. Do NOT clear this by pointing at a public endpoint; that trades a visible gap for an invisible data leak.'
 
   # ── Escalation step 1 done: the guard clears on its own ───────────────────
   # A neighbouring Secret in the same namespace must NOT satisfy it — that is
