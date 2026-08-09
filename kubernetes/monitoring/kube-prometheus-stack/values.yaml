@@ -225,6 +225,14 @@ alertmanager:
   enabled: true
   alertmanagerSpec:
     priorityClassName: platform-standard
+    # Mounted at /etc/alertmanager/secrets/alerts-inbound-token/token and read by
+    # the console receiver's `credentials_file`, so the token never appears in
+    # this file. VERIFIED PRESENT before this was enabled: the ExternalSecret in
+    # `monitoring` reports SecretSynced and the Secret carries the `token` key.
+    # Enabling it while the Secret is absent leaves this pod in ContainerCreating
+    # forever — no alerting at all — which is why the order was not optional.
+    secrets:
+      - alerts-inbound-token
     storage:
       volumeClaimTemplate:
         spec:
@@ -296,6 +304,20 @@ alertmanager:
       repeat_interval: 6h
       receiver: "discord"
       routes:
+        # ── InfraWeaver console inbox ────────────────────────────────────────
+        # FIRST so it sees everything, and `continue: true` so it consumes
+        # nothing: every alert still falls through to the routes below exactly as
+        # before. This leg is additive by construction — if the console is down,
+        # Discord delivery is unaffected, so the inbox cannot become a new single
+        # point of failure for alerting.
+        #
+        # group_wait is shorter than the 30s default because the destination is a
+        # SCREEN, not a pager: an operator opening /alerts during an incident
+        # should not wait out a batching window to see what is firing.
+        - receiver: "infraweaver-console"
+          continue: true
+          group_wait: 10s
+
         # ── Dead-man's switch ────────────────────────────────────────────────
         # Watchdog always fires; its ABSENCE is the signal. Routing it to `null`
         # (the old behaviour) threw that signal away, so a dead Prometheus, a
@@ -399,7 +421,22 @@ alertmanager:
           - to: "${ADMIN_EMAIL}"
             send_resolved: false
 
-      # ── InfraWeaver console inbound receiver — step 2 of 2, DO NOT UNCOMMENT YET
+      # The console's alert inbox. Authenticated by a shared bearer token read
+      # from the mounted Secret BY PATH — `${...}` is not substituted in this
+      # file (it is a Helm `$values` file and bypasses the argocd CMP, the trap
+      # that shipped the literal `changeme` to the live SMTP config), so a token
+      # written here would be both wrong and in git. It is minted by the console
+      # into OpenBao and delivered by manifests/alerts-inbound-externalsecret.yaml.
+      - name: "infraweaver-console"
+        webhook_configs:
+          - url: "http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/alerts/inbound"
+            send_resolved: true
+            http_config:
+              authorization:
+                type: Bearer
+                credentials_file: /etc/alertmanager/secrets/alerts-inbound-token/token
+
+      # ── HISTORICAL NOTE — the block below is now LIVE, kept for its reasoning
       #
       # Gives the console's alert inbox (`/alerts`) a COPY of every alert, so
       # cluster alerts and console-native ones land in one place. It is additive:

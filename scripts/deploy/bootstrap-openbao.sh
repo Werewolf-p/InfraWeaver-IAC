@@ -698,6 +698,23 @@ path "secret/metadata/platform/nas/creds/*" { capabilities = ["read","delete"] }
 # and the console must be able to re-read them to hand them to their owner.
 path "secret/data/platform/app-accounts/*" { capabilities = ["create","read","update","delete"] }
 path "secret/metadata/platform/app-accounts/*" { capabilities = ["read","delete","list"] }
+# Alertmanager inbound token (console lib/alerts/inbound-token.ts).
+# create+read+update on this ONE path: the console mints it on first use from
+# the "Set up cluster alert delivery" action, and an existing token is never
+# overwritten, so read alone is not enough. NO delete, for the same reason the
+# trust keyrings above are create/read/update only — a deletable token would
+# break Alertmanager authentication silently, and the failure would look like a
+# network problem during the incident it was carrying alerts about.
+# Granted HERE rather than in platform-k8s for the same reason as the audit
+# signing key below: platform-k8s is also held by the ESO token. ESO must be
+# able to READ this value — it already can, via the read-only
+# secret/data/platform/* glob in that policy, which is how it lands in both
+# namespaces — but it has no business minting a credential it merely delivers.
+# NOTE no apostrophes anywhere in this block: the policy body is wrapped in
+# sh -c with single quotes, so one would terminate the wrapper. The pre-push
+# IaC gate checks exactly that.
+path "secret/data/platform/alerts" { capabilities = ["create","read","update"] }
+path "secret/metadata/platform/alerts" { capabilities = ["read"] }
 # Audit-log signing key (console lib/audit/signing.ts, SIGNING_KV_PATH).
 # readKv+writeKv on this ONE path: the key is created on first use and rotated
 # in place, so read alone is not enough. Granted here rather than in
