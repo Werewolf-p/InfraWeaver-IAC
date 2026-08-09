@@ -1,0 +1,116 @@
+# Alert dispatch — the sweep that turns firing alerts into notifications.
+#
+# THIS IS THE ONLY THING THAT DELIVERS. The console's inbox fills up on its own:
+# kube-prometheus-stack's Alertmanager POSTs into /api/alerts/inbound, plugins
+# POST into /api/alerts/ingest, and console code raises alerts in-process. None
+# of that tells anybody. This CronJob is what evaluates the notification policy
+# — routes, silences, quiet hours, the three timers, escalation — and actually
+# sends. Without it the product is a very well-organised list of things nobody
+# has been told about, which is the quietest possible way for an alerting system
+# to be broken.
+#
+# WHY EVERY MINUTE, when every other sweep here is hourly or */5. The default
+# `group_wait` is 30 seconds — the window in which sibling alerts are collected
+# into one notification — and `group_interval` is 5 minutes. A */5 tick would
+# make the first notification about a brand-new problem arrive up to five
+# minutes late and would quantise every other timer to the same grid. One minute
+# is the finest granularity a CronJob offers and it keeps the delay under the
+# smallest timer the product exposes.
+#
+# THE COST IS ACCEPTED AND STATED: 1440 Jobs a day. History limits are 1/1 rather
+# than the 3/3 used elsewhere, so at most two Job objects exist at a time. The
+# work itself is two ConfigMap reads and, usually, nothing else. If the pod churn
+# ever becomes a problem on this cluster, the answer is a single long-lived
+# ticker Deployment posting on the same schedule — not a slower sweep, which
+# would silently degrade every timer an operator configured.
+#
+# CONCURRENCY IS HANDLED TWICE, deliberately. `Forbid` stops two Jobs from the
+# same CronJob overlapping; a lease on the console's routing ConfigMap stops two
+# console REPLICAS delivering the same group. The second is the one that matters
+# — the Jobs are one caller, but the Service load-balances across pods — and it
+# is what replaces Alertmanager's memberlist gossip, which this console
+# deliberately does not run.
+#
+# Auth: a DEDICATED token from the same ESO-managed secret the console reads
+# (`infraweaver-console-secret` key `alerts-dispatch-cron-token`, synced from
+# OpenBao `secret/platform/infraweaver-console`), so the CronJob and the server
+# can never drift apart. Its own value rather than a shared one: this route makes
+# the console send real notifications to real people and must be revocable on its
+# own. proxy.ts lets the request past the session gate only when the token
+# matches; the route handler re-validates it (defence in depth), and falls back
+# to an alerts:admin session when the token is absent — fail-closed either way.
+#
+# Networking: the pod carries `infraweaver.io/component: iwsl`, so the existing
+# allow-wp-health-sweep-egress (CiliumNetworkPolicy) and
+# allow-wp-health-sweep-to-console (NetworkPolicy) already cover it — both select
+# on that label pair rather than on a job name. No new policy.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: alerts-dispatch
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid # a sweep still running has the fleet covered; a second would race it for the lease
+  # 30s, not the 300 used by the hourly sweeps: a tick that has not started
+  # within half a minute has been overtaken by the next one, and running it late
+  # would only re-do work the newer tick is already doing.
+  startingDeadlineSeconds: 30
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      # 0, not 2: the sweep runs again in sixty seconds. A retry storm would
+      # stack Jobs against a console that is already struggling, and the
+      # dispatcher's own logic already re-attempts a retryable delivery on the
+      # next pass by deliberately not advancing that group's state.
+      backoffLimit: 0
+      activeDeadlineSeconds: 50
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: alerts-dispatch
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: alerts-dispatch-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 40
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/alerts/dispatch

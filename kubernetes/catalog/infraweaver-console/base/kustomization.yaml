@@ -29,6 +29,7 @@ resources:
   - wordpress-sandbox-sweep-cronjob.yaml
   - wordpress-patch-sweep-cronjob.yaml
   - wiki-atlas-sweep-cronjob.yaml
+  - alerts-dispatch-cronjob.yaml
   - networkpolicy-wp-health.yaml
   - backup-networkpolicy.yaml
   - game-servers-namespace.yaml

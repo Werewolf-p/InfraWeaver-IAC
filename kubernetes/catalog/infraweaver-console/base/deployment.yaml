@@ -437,6 +437,18 @@ spec:
               name: infraweaver-console-secret
               key: replica-floor-cron-token
               optional: true
+        # DEDICATED token for the per-minute alert-dispatch CronJob's POST to
+        # /api/alerts/dispatch — the sweep that turns firing alerts into actual
+        # notifications. Its own value rather than a shared one because this
+        # route makes the console send real messages to real people. Optional:
+        # absent = cron token auth disabled and the sweep is reachable only with
+        # an alerts:admin session, which fails closed rather than open.
+        - name: ALERTS_DISPATCH_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: alerts-dispatch-cron-token
+              optional: true
         # DEDICATED token for the hourly WordPress core-update sweep CronJob's POST
         # to /api/wordpress/core-update-sweep — the tick that finalizes elapsed
         # soaks, reaps parked candidates and, when the operator's policy says so,
