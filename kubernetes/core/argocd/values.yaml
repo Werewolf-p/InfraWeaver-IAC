@@ -21,6 +21,15 @@ global:
     - name: ghcr-pull
 
 controller:
+  # argocd_app_info comes from the application controller, and it had NO series
+  # at all: the chart ships metrics disabled, so no argocd-metrics Service ever
+  # existed and every ArgoCD alert rule was unfirable. AlertInputMissingArgoCD
+  # in monitoring/alerts/alert-pipeline-selfcheck.yaml is the guard against that
+  # regressing — a rule with no input reads as coverage while measuring nothing.
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
   resources:
     requests:
       cpu: 250m

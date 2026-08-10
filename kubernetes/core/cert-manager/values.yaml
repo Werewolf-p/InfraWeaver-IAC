@@ -52,6 +52,12 @@ cainjector:
       cpu: 250m
       memory: 256Mi
 
-# Disable prometheus metrics - monitoring stack is optional
+# The monitoring stack is NOT optional any more, and this being false was not a
+# free saving: certmanager_certificate_expiration_timestamp_seconds had no
+# series, so CertificateExpiringSoon and CertificateExpiringCritical could never
+# fire. Nothing was watching certificate expiry — the rules existed and measured
+# nothing. AlertInputMissingCertManager guards against that regressing.
 prometheus:
-  enabled: false
+  enabled: true
+  servicemonitor:
+    enabled: true
