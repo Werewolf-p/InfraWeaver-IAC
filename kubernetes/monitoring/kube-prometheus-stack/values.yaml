@@ -409,7 +409,15 @@ alertmanager:
       # it previously existed but nothing routed to it.
       - name: "email-admin"
         email_configs:
-          - to: "${ADMIN_EMAIL}"
+          # LITERAL, not templated — same reason as smtp_from/smtp_auth_username
+          # in `global` above: `${...}` is NOT substituted in this file, so
+          # "${ADMIN_EMAIL}" reached Alertmanager verbatim and every send died
+          # with `parse 'to' addresses: mail: missing '@' or angle-addr`. That is
+          # an unrecoverable error, so Alertmanager never even retried: 100% of
+          # email notifications failed and email has never once delivered.
+          # This address is already in this file as smtp_from, so writing it here
+          # discloses nothing new to the public mirror.
+          - to: "example-owner@example.com"
             send_resolved: true
 
       # Heartbeat sink. Two legs on purpose: the Discord bridge works TODAY (so
@@ -429,7 +437,10 @@ alertmanager:
           - url: "http://alertmanager-discord.monitoring.svc.cluster.local:9094"
             send_resolved: false
         email_configs:
-          - to: "${ADMIN_EMAIL}"
+          # Literal for the same reason as email-admin above. With this fixed,
+          # the two legs of this receiver are genuinely independent transports
+          # again rather than both terminating in Discord.
+          - to: "example-owner@example.com"
             send_resolved: false
 
       # The console's alert inbox. Authenticated by a shared bearer token read

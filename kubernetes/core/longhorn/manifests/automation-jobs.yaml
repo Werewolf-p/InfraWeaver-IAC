@@ -58,8 +58,15 @@ spec:
                   api = os.environ.get("LONGHORN_API", "http://longhorn-frontend.longhorn-system.svc.cluster.local:80").rstrip("/")
                   max_age_hours = int(os.environ.get("MAX_BACKUP_AGE_HOURS", "36"))
 
-                  def fetch(path: str):
-                    with urllib.request.urlopen(f"{api}{path}", timeout=30) as response:
+                  def fetch(path: str, body: dict | None = None):
+                    data = json.dumps(body).encode() if body is not None else None
+                    request = urllib.request.Request(
+                      f"{api}{path}",
+                      data=data,
+                      headers={"Content-Type": "application/json"} if data is not None else {},
+                      method="POST" if data is not None else "GET",
+                    )
+                    with urllib.request.urlopen(request, timeout=30) as response:
                       return json.loads(response.read().decode())
 
                   def parse_time(raw: str | None):
@@ -95,7 +102,11 @@ spec:
                     name = item.get("name") or item.get("id")
                     if not name:
                       continue
-                    backups_payload = fetch(f"/v1/backupvolumes/{urllib.parse.quote(name, safe='')}/backups")
+                    # Longhorn's v1 API has no /v1/backupvolumes/<name>/backups
+                    # collection; the per-volume backup list is only reachable as
+                    # the POST action ?action=backupList. The GET path returned 404
+                    # on every run, which is why this job had never once succeeded.
+                    backups_payload = fetch(f"/v1/backupvolumes/{urllib.parse.quote(name, safe='')}?action=backupList", body={})
                     backups = backups_payload.get("data") or backups_payload.get("items") or {}
                     if isinstance(backups, dict):
                       backup_values = list(backups.values())

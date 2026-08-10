@@ -1,0 +1,33 @@
+# Scrapes longhorn-manager so the Longhorn alert family has an input.
+#
+# WHY THIS EXISTS: longhorn_volume_robustness had no series at all, which meant
+# LonghornVolumesDegraded, LonghornVolumeDegraded, LonghornVolumeFaulted and
+# LonghornNodeStoragePressure in kubernetes/monitoring/alerts/ could never fire.
+# The rules were present and looked like coverage; nothing was behind them. The
+# AlertInputMissingLonghorn self-check in alert-pipeline-selfcheck.yaml is what
+# surfaced that, and it stays as the guard against this regressing.
+#
+# longhorn-manager exposes Prometheus metrics on the existing longhorn-backend
+# service (port name "manager", 9500) at /metrics — no extra service or chart
+# value is required, only this ServiceMonitor.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: longhorn
+  namespace: longhorn-system
+  labels:
+    app.kubernetes.io/name: longhorn
+spec:
+  selector:
+    matchLabels:
+      app: longhorn-manager
+  namespaceSelector:
+    matchNames:
+      - longhorn-system
+  endpoints:
+    - port: manager
+      path: /metrics
+      # Longhorn recomputes volume/node metrics on scrape; 30s matches the rest
+      # of the stack and keeps the cost off the manager's hot path.
+      interval: 30s
+      scrapeTimeout: 10s

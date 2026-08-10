@@ -175,10 +175,19 @@ spec:
           # against; a failed one is an incident until deleted or fixed.
           # kube_job_status_failed carries a verified `reason` label
           # (BackoffLimitExceeded / DeadlineExceeded / Evicted) for triage.
+          #
+          # Jobs that eventually SUCCEEDED are excluded. kube_job_status_failed
+          # counts failed PODS, not a failed Job, and it never returns to 0 once
+          # a pod has failed. velero/minio-create-bucket lost one pod and then
+          # completed on 2026-07-08, and this rule paged about it for a month
+          # afterwards: a retry that worked is the backoff doing its job, not an
+          # incident. A Job that is still genuinely failing has no succeeded pod.
           expr: |
             max by (namespace, job_name) (kube_job_status_failed) > 0
             unless on (namespace, job_name)
               max by (namespace, job_name) (kube_job_owner{owner_kind="CronJob"})
+            unless on (namespace, job_name)
+              max by (namespace, job_name) (kube_job_status_succeeded) > 0
           for: 20m
           labels:
             severity: warning

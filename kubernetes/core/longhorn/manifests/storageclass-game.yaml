@@ -3,16 +3,35 @@ kind: StorageClass
 metadata:
   # Dedicated storage class for game server workloads.
   #
-  # WHY single replica + strict-local:
+  # WHY single replica:
   #   Game servers use Recreate strategy with ReadWriteOnce PVCs. When a server pod is
   #   stopped or deleted, Longhorn detaches the volume. With 3 replicas, Longhorn attempts
   #   to rebuild the replica set across ALL nodes — causing a cluster-wide I/O storm that
   #   makes OTHER services (authentik, console, OpenBao) slow or unavailable.
   #
-  #   strict-local keeps the single replica on the SAME node as the pod. Volume attach/detach
-  #   is purely local disk I/O with zero cross-node network impact. The tradeoff is that
-  #   if the node fails, the game server data is unavailable until the node recovers — which
-  #   is acceptable for game servers (backed by Velero snapshots).
+  #   numberOfReplicas: 1 is what prevents that storm: with one replica there is no
+  #   replica set to rebuild on attach/detach, whatever the locality setting is.
+  #
+  # WHY NOT strict-local (changed 2026-08-10):
+  #   strict-local additionally pinned the replica to the pod's node, which read as free
+  #   extra performance. It is not free. A strict-local volume can ONLY be attached on the
+  #   node already holding its replica; Longhorn's admission webhook rejects anything else
+  #   with "moving a strict-local volume ... to another node is not supported". Longhorn
+  #   attaches a DETACHED volume for a recurring snapshot/backup on the volume's OWNER
+  #   node, and ownership is redistributed by hash whenever longhorn-manager restarts.
+  #   Once owner and replica landed on different nodes the recurring job blocked forever
+  #   on those volumes, and with concurrency 4 and 10 such volumes the queue never drained
+  #   — so NOTHING in the cluster got snapshotted or backed up. That is how the whole
+  #   backup chain died on 2026-08-09 while every individual component looked healthy.
+  #
+  #   dataLocality: disabled keeps the single replica where it was scheduled and lets the
+  #   volume attach anywhere, so detached volumes can be snapshotted and backed up. The
+  #   tradeoff is that when a game pod runs on a node that does not hold the replica, its
+  #   disk I/O crosses the LAN instead of being node-local.
+  #
+  #   Do NOT restore strict-local here without first solving detached backups. Game data is
+  #   NOT covered by Velero — Velero is not installed, only its MinIO bucket exists. This
+  #   Longhorn recurring-job chain is the only thing backing game-hub up.
   #
   # Use "longhorn" or "longhorn-retain" for infrastructure services that need HA replicas.
   # Use "longhorn-game" for all game-hub workloads.
@@ -28,6 +47,7 @@ parameters:
   staleReplicaTimeout: "2880"
   fromBackup: ""
   fsType: ext4
-  # strict-local: replica is always on the same node as the pod that uses the volume.
-  # This eliminates cross-node replication I/O when game servers start/stop.
-  dataLocality: "strict-local"
+  # disabled: the single replica stays where it was scheduled and the volume may attach
+  # from any node. Required for recurring snapshots/backups of DETACHED volumes — see the
+  # WHY NOT strict-local note above before changing this.
+  dataLocality: "disabled"
