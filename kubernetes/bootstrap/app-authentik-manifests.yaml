@@ -14,14 +14,30 @@ spec:
     repoURL: ${DEPLOY_REPO_URL}
     targetRevision: main
     path: kubernetes/platform/authentik/manifests
-    directory:
-      # Required for manifests/blueprints/ (WP11, GAP-C5) to be seen at all.
-      # A plain directory source is non-recursive by default, so without this
-      # the blueprint ConfigMaps in that subdirectory would never be created —
-      # they would look like config-as-code and do nothing. ArgoCD reads only
-      # *.yaml / *.yml / *.json, which is what keeps the *.yaml.DEFERRED
-      # enforcement blueprints out of the cluster.
-      recurse: true
+    # THE BLUEPRINTS NEVER APPLIED. Without this plugin the ConfigMaps reached
+    # Authentik with a literal `${BASE_DOMAIN}` inside them, so every proxy
+    # provider entry failed validation —
+    #   Entry invalid: Serializer errors {'external_host': ['Enter a valid URL.']}
+    #   Blueprint validation failed
+    # — and the whole blueprint was discarded, both the hand-written apps file and
+    # the one `generate-forward-auth-blueprint.py` regenerates on every deploy.
+    # That is the automation which is supposed to give any *.int host behind
+    # forward-auth an Authentik provider with zero per-app config; it has been
+    # silently doing nothing, which is how the status page ended up as a host no
+    # provider claimed and the outpost answered its own 404.
+    #
+    # SAFE HERE because `ALLOWED_VARS` on the CMP sidecar is an explicit
+    # allowlist — ${BASE_DOMAIN} and ${ADMIN_EMAIL} are in it, ${OUT} and
+    # ${STAMP} are NOT, so the shell in pg-backup.yaml passes through untouched.
+    # No secret-class placeholder exists in this tree either, so the plugin's
+    # refuse-to-sync guard cannot trip on it.
+    #
+    # `directory.recurse: true` is gone with the switch: a plugin source ignores
+    # `directory`, and the CMP's own `find . -name '*.yaml'` already recurses —
+    # including manifests/blueprints/ (WP11, GAP-C5) and still excluding the
+    # *.yaml.DEFERRED enforcement blueprints, which do not match `*.yaml`.
+    plugin:
+      name: envsubst-v1.0
   destination:
     server: https://kubernetes.default.svc
     namespace: authentik
