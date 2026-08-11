@@ -4,32 +4,12 @@
 # via 10-routes-int.yaml. Only public apps remain here.
 
 # ── Test website (public) ─────────────────────────────────────────────────────
-apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
-metadata:
-  name: test-website-platform
-  namespace: traefik
-  labels:
-    infraweaver.io/access-tier: public
-spec:
-  entryPoints:
-    - websecure
-  routes:
-    - match: Host(`test.${BASE_DOMAIN}`)
-      kind: Rule
-      # rate-limit-public-cf (the Cloudflare variant): test.${BASE_DOMAIN}
-      # resolves to 188.114.96.0/97.0, i.e. it IS Cloudflare-proxied, so
-      # Traefik's connection source is an edge IP and the plain rate-limit-public
-      # would put every visitor in one shared bucket. 100/s burst 200 per real
-      # client is far above anything a static site needs; see the header of
-      # core/traefik/manifests/middleware-rate-limit.yaml.
-      middlewares:
-        - name: secure-headers
-          namespace: traefik
-        - name: rate-limit-public-cf
-          namespace: traefik
-      services:
-        - name: test-website
-          port: 80
-  tls:
-    secretName: platform-wildcard-tls  # public *.${BASE_DOMAIN} cert
+# REMOVED. This route matched Host(`test.${BASE_DOMAIN}`) and forwarded to the
+# `test-website` ExternalName service, which resolved into the `test-website`
+# namespace — a namespace that no longer exists. Every request therefore got a
+# 502, and because the WordPress site of the same name (`wordpress/test`) matches
+# the identical host with no greater specificity, this dead route was shadowing a
+# site that was up and healthy the whole time.
+#
+# The host is served by `wordpress/test`, which the WordPress addon owns and
+# which carries its own Authentik gate. Nothing replaces this block.

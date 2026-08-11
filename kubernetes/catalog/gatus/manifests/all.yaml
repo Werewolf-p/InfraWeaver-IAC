@@ -300,16 +300,35 @@ spec:
   routes:
     - match: Host(`status.int.${BASE_DOMAIN}`)
       kind: Rule
+      # BOTH NAMES WERE WRONG, AND A WRONG NAME HERE IS NOT A DEGRADED ROUTE —
+      # it is no route at all. Traefik refuses to build a router whose middleware
+      # cannot be resolved, so `status.int.${BASE_DOMAIN}` answered a plain
+      # `404 page not found` on every path for 25 days while the Gatus pod, its
+      # Service and its endpoint were all healthy. The status page was the one
+      # surface that could not report its own outage.
+      #
+      # The middlewares that exist are `traefik/forward-auth` (the Authentik
+      # forward-auth used by every other internal route here) and
+      # `traefik/secure-headers`. `authentik/authentik-forward-auth` and
+      # `traefik/security-headers` never existed under those names.
       middlewares:
-        - name: authentik-forward-auth
-          namespace: authentik
-        - name: security-headers
+        - name: forward-auth
+          namespace: traefik
+        - name: secure-headers
           namespace: traefik
       services:
         - name: gatus
           port: 8080
+  # THE SECOND HALF OF THE SAME OUTAGE. `secretName` is resolved in the
+  # IngressRoute's OWN namespace, and `platform-wildcard-int-tls` lives in
+  # `traefik` — Traefik logged `secret gatus/platform-wildcard-int-tls does not
+  # exist` on every reload. Jellyfin, Nextcloud and Tradesphere are all routes
+  # that live outside `traefik` and all reference the shared default store
+  # instead, which is why they serve and this did not.
   tls:
-    secretName: platform-wildcard-int-tls
+    store:
+      name: default
+      namespace: traefik
 ---
 # NetworkPolicy for Gatus
 apiVersion: networking.k8s.io/v1

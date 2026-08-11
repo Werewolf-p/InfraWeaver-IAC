@@ -54,19 +54,10 @@ spec:
     - port: 8200
       name: http
 ---
-# Test website
-apiVersion: v1
-kind: Service
-metadata:
-  name: test-website
-  namespace: traefik
-spec:
-  type: ExternalName
-  externalName: test-website.test-website.svc.cluster.local
-  ports:
-    - port: 80
-      name: http
----
+# Test website — REMOVED together with its IngressRoute in 06-routes-cluster.yaml.
+# `externalName` pointed at the `test-website` namespace, which no longer exists,
+# so the service resolved to nothing and returned 502 for every request to
+# test.${BASE_DOMAIN}. That host is served by `wordpress/test`.
 # Authentik (SSO/OIDC identity provider)
 apiVersion: v1
 kind: Service
