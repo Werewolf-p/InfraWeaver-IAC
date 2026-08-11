@@ -599,6 +599,40 @@ data:
           provider: !Find [authentik_providers_proxy.proxyprovider, [name, Grafana Forward-Auth Provider]]
           policy_engine_mode: any
 
+      # ── Gatus / status page (forward-auth proxy) ─────────────────────────────────────────
+      # The third and last fault behind the status page's 404. With the middleware
+      # names and the TLS store corrected, Traefik built the router and handed the
+      # request to the embedded outpost — which answered 404 itself, because no
+      # proxy provider claimed `status.int.<domain>`. An outpost does not fail open
+      # for a host it has never heard of.
+      #
+      # Declared here rather than left to `generate-forward-auth-blueprint.py`
+      # because that generator discovers hosts by scanning for the `forward-auth`
+      # middleware, and this route named a middleware that never existed — so the
+      # host was invisible to the very automation meant to protect it. Listing it
+      # here also makes the generator skip it (`_existing_hosts()`), so the two
+      # cannot fight over the same provider.
+      - model: authentik_providers_proxy.proxyprovider
+        state: present
+        identifiers:
+          name: Gatus Forward-Auth Provider
+        attrs:
+          name: Gatus Forward-Auth Provider
+          mode: forward_single
+          external_host: "https://status.int.${BASE_DOMAIN}"
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+
+      - model: authentik_core.application
+        state: present
+        identifiers:
+          slug: gatus-fwd
+        attrs:
+          name: Gatus (forward-auth)
+          slug: gatus-fwd
+          provider: !Find [authentik_providers_proxy.proxyprovider, [name, Gatus Forward-Auth Provider]]
+          policy_engine_mode: any
+
       # ── OpenBao (forward-auth) (forward-auth proxy) ──────────────────────────────────────
       - model: authentik_providers_proxy.proxyprovider
         state: present
