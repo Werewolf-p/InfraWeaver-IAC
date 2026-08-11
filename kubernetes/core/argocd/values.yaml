@@ -284,16 +284,40 @@ configs:
         - /metadata/annotations/argocd.argoproj.io~1tracking-id
     # CronJob health: ArgoCD's built-in check marks Degraded after any single missed run
     # (lastScheduleTime > lastSuccessfulTime). This causes false alarms for transient failures.
-    # Override: only mark Progressing when jobs are actively running; otherwise Healthy.
-    # Real alerting for persistent CronJob failures is handled by PrometheusRule alerts.
+    # Override below. Real alerting for persistent CronJob failures is handled by
+    # PrometheusRule alerts, which is where a failing sweep belongs — not in a sync state.
+    #
+    # A RUNNING JOB IS NOT "PROGRESSING", and saying it was cost this platform its
+    # headline invariant. The previous version returned Progressing whenever
+    # status.active was non-empty. That was invisible while every CronJob here ran
+    # hourly or daily — a few seconds of Progressing per hour, never sampled. Then
+    # `alerts-dispatch` (ns infraweaver-console) landed on `* * * * *`, and from that
+    # moment the console's catalog app — and its parent `bootstrap`, via app-of-apps
+    # health aggregation — flapped out of Healthy roughly once a minute.
+    #
+    # MEASURED 2026-08-11, 120 samples at 3s intervals: `bootstrap` Progressing in 13
+    # samples, `catalog-infraweaver-console-manifests` in 15, with onset within ~5s of
+    # every minute boundary. So "63/63 Synced+Healthy" — which several runbooks read as
+    # a green light before proceeding — was false ~11% of the time, for no reason
+    # anyone could see: at the moment of sampling, all 56 of the catalog app's managed
+    # resources reported healthy and the app still said Progressing.
+    #
+    # ArgoCD health answers "has this resource converged on its desired state?". A
+    # CronJob running a Job HAS converged; running Jobs is the desired state. The
+    # activity stays in the message, where it is diagnostic without being a health
+    # state, and `suspend` is surfaced because a suspended CronJob looks identical to
+    # a healthy idle one otherwise.
     resource.customizations.health.batch_CronJob: |
       hs = {}
+      hs.status = "Healthy"
+      if obj.spec ~= nil and obj.spec.suspend == true then
+        hs.message = "CronJob suspended"
+        return hs
+      end
       if obj.status ~= nil and obj.status.active ~= nil and #obj.status.active > 0 then
-        hs.status = "Progressing"
         hs.message = #obj.status.active .. " active job(s) running"
         return hs
       end
-      hs.status = "Healthy"
       hs.message = "CronJob scheduled"
       return hs
     # On bare-metal (no cloud LB), ingresses never get an ADDRESS — mark them always healthy

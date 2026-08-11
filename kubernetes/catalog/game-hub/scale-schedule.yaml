@@ -71,9 +71,12 @@ spec:
       # for a full alert cycle, then it self-cleans.
       ttlSecondsAfterFinished: 86400
       # 300s, not 1800s: this script early-exits in seconds while disabled, and runs
-      # a handful of `kubectl scale` calls when enabled. A tight deadline caps how
-      # long a future wedged Job can hold the argocd-cm batch_CronJob health Lua
-      # (core/argocd/values.yaml) in Progressing — it keys off status.active.
+      # a handful of `kubectl scale` calls when enabled. A tight deadline bounds how
+      # long a wedged Job can hold the `concurrencyPolicy: Forbid` slot, which would
+      # otherwise make every following scheduled run a skipped one.
+      # This used to cite the argocd-cm batch_CronJob health Lua, which returned
+      # Progressing while status.active was non-empty. It no longer does: a running
+      # Job is not a health state — see core/argocd/values.yaml.
       activeDeadlineSeconds: 300
       template:
         metadata:
@@ -173,9 +176,12 @@ spec:
       # for a full alert cycle, then it self-cleans.
       ttlSecondsAfterFinished: 86400
       # 300s, not 1800s: this script early-exits in seconds while disabled, and runs
-      # a handful of `kubectl scale` calls when enabled. A tight deadline caps how
-      # long a future wedged Job can hold the argocd-cm batch_CronJob health Lua
-      # (core/argocd/values.yaml) in Progressing — it keys off status.active.
+      # a handful of `kubectl scale` calls when enabled. A tight deadline bounds how
+      # long a wedged Job can hold the `concurrencyPolicy: Forbid` slot, which would
+      # otherwise make every following scheduled run a skipped one.
+      # This used to cite the argocd-cm batch_CronJob health Lua, which returned
+      # Progressing while status.active was non-empty. It no longer does: a running
+      # Job is not a health state — see core/argocd/values.yaml.
       activeDeadlineSeconds: 300
       template:
         metadata:
