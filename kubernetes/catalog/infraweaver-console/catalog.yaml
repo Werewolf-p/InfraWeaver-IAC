@@ -78,6 +78,14 @@ secrets:
     replica-floor-cron-token:
       type: password
       length: 64
+    # Dedicated token for the per-minute alerts-dispatch CronJob. Undeclared, it
+    # hit the same Retain hazard every key above documents: ESO aborts the ENTIRE
+    # infraweaver-console-secret when any one key is missing from OpenBao, so this
+    # single omission takes down every other console token with it. The repo's own
+    # validate-iac gate 4 has been failing on it on `main`.
+    alerts-dispatch-cron-token:
+      type: password
+      length: 64
     # Shared service token binding the console (proxy half) to the
     # infraweaver-backup datastore pod (execute half). Both read the SAME value
     # from infraweaver-console-secret, so declaring it here is what makes a fresh

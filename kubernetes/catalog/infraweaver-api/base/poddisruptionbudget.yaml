@@ -4,7 +4,18 @@ metadata:
   name: infraweaver-api
   namespace: infraweaver-console
 spec:
-  minAvailable: 1
+  # maxUnavailable, NOT minAvailable.
+  #
+  # `minAvailable: 1` against a Deployment that can sit at ONE replica permits
+  # zero voluntary evictions: kubectl drain blocks forever, and so does the
+  # platform's own node-notready-remediator, which drains with a timeout and
+  # simply times out every time. Node maintenance and worker decommission stall
+  # behind the very controller you need running to fix them.
+  #
+  # `maxUnavailable: 1` allows the eviction at one replica and still guarantees
+  # no more than one pod down once the HPA scales past 1 — same protection,
+  # without the deadlock. No replica-count change required.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: infraweaver-api
