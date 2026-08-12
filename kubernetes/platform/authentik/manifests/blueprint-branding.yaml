@@ -44,10 +44,33 @@ data:
         attrs:
           order: 10
 
-      # Show username AND password on a single login form (no two-step flow).
-      # Setting password_stage on the default identification stage makes Authentik
-      # render the password field inline instead of asking for the identifier
-      # first and the password on a separate page.
+      # ── The login form is the STOCK two-step flow again ──────────────────
+      #
+      # This used to set `password_stage` on the identification stage, which
+      # renders username and password together on one page. It looked tidier and
+      # it cost the flow everything else a login page can do, because the
+      # combined form is a shortcut around the stage machinery rather than a
+      # configuration of it:
+      #
+      #   · WebAuthn / security keys. A passkey is offered by the IDENTIFICATION
+      #     stage, before a password is asked for — that is the whole point of
+      #     it. A form that demands a password in the same submit has nowhere to
+      #     put "use your security key instead".
+      #   · MFA. The authenticator-validation stage at order 30 still ran, but
+      #     the standalone password binding below was DELETED to stop the
+      #     password being asked twice — so the flow's own password step no
+      #     longer existed, and anything that reasons about stages (a policy
+      #     bound to the password stage, a re-auth prompt) had nothing to bind
+      #     to.
+      #   · Recovery. "Forgot password?" is rendered by the stage that owns the
+      #     password field. Inline, there is no such stage view, so the link had
+      #     nowhere to appear and a locked-out user had no self-service route.
+      #
+      # So: `password_stage` is explicitly NULLED — omitting it would leave the
+      # live value in place, because a blueprint patch only writes what it names
+      # — and the standalone binding is restored at order 20, which is where
+      # stock Authentik puts it, between identification (10) and MFA (30).
+      #
       # NOTE: user_fields MUST be resent here — patching the identification stage
       # without it fails with "When no user fields are selected, at least one
       # source must be selected".
@@ -59,18 +82,30 @@ data:
           user_fields:
             - email
             - username
-          password_stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+          password_stage: null
+          # Puts "Forgot password?" on the login page. The default brand also
+          # names this flow (`flow_recovery` below), but the link the stage
+          # renders comes from the STAGE's own field — the brand's is the
+          # fallback for surfaces that have no stage to ask.
+          recovery_flow: !Find [authentik_flows.flow, [slug, default-recovery-flow]]
 
-      # Remove the standalone password stage binding so the password is not
-      # prompted a SECOND time after the inline field above (goauthentik #5407).
-      # GUARDRAIL: this removes ONLY the binding, never the password stage itself —
-      # the password is still collected/validated via the inline password_stage,
-      # so the flow always retains a password step.
+      # The password step, back where stock Authentik puts it.
+      #
+      # Order 20 is deliberate and load-bearing: identification is 10 and the
+      # authenticator-validation stage is 30 (see
+      # `blueprints/10-authentication-current-state.yaml`), so a password step
+      # anywhere else would either precede identification or follow MFA.
       - model: authentik_flows.flowstagebinding
-        state: absent
+        state: present
         identifiers:
           target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
           stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
+        attrs:
+          order: 20
+          evaluate_on_plan: false
+          re_evaluate_policies: true
+          policy_engine_mode: any
+          invalid_response_action: retry
 
       # Update the default brand with InfraWeaver theme + recovery flow
       - model: authentik_brands.brand

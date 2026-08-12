@@ -93,9 +93,17 @@ data:
           webauthn_user_verification: preferred
 
       # ── Stage bindings, in execution order ────────────────────────────────
-      # 10  identification (username/email + inline password stage)
+      # 10  identification (username/email; offers recovery and any passkey)
+      # 20  password        — NOT declared here; owned by blueprint-branding.yaml
       # 30  MFA validation  (inert, see above)
       # 100 user login      (issues the session)
+      #
+      # Order 20 was empty when this export was taken, because the identification
+      # stage carried an inline `password_stage` and the standalone binding had
+      # been deleted to stop the password being asked twice. That arrangement is
+      # gone: it left the flow with no password STAGE to bind a policy to, and it
+      # gave WebAuthn and "Forgot password?" nowhere to render. See the long note
+      # in `../blueprint-branding.yaml`, which owns both halves of the fix.
       #
       # evaluate_on_plan=false + re_evaluate_policies=true is the combination
       # that makes any policy bound to a stage evaluate against the IDENTIFIED
