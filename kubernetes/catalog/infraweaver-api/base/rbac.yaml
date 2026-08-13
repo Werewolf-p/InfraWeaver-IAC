@@ -107,6 +107,13 @@ rules:
   # pods/exec subresource and this rule only ever granted get/list/watch, so
   # `kubectl auth can-i create pods/exec --all-namespaces` already answered
   # "no". Removing it changes no behaviour — see the residual-risk note R4.
+  #
+  # `resourcequotas` ADDED. `GET /cluster/quotas` (routes/cluster.ts) calls
+  # listResourceQuotaForAllNamespaces and had no grant at all, so the /quota
+  # page and the "Quota hotspots" panel on /cluster have been 403ing — a
+  # pre-existing gap (R4), not a regression from the split. A ResourceQuota
+  # holds limits and usage counters and no credential material, so it belongs
+  # in the cluster-wide read set with the rest of the inventory.
   - apiGroups: [""]
     resources:
       - pods
@@ -116,6 +123,7 @@ rules:
       - services
       - configmaps
       - namespaces
+      - resourcequotas
       - persistentvolumeclaims
       - persistentvolumes
     verbs: ["get", "list", "watch"]
@@ -124,6 +132,21 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  # PodDisruptionBudget read for the "Disruption budgets" section on /cluster
+  # (`GET /cluster/pdbs`). The whole `policy` group was absent, so the section —
+  # which only renders when `pdbs.length > 0` — silently never appeared. A PDB
+  # carries a selector and availability counters, no secret material.
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  # HorizontalPodAutoscaler read for the HPA section on /cluster
+  # (`GET /cluster/hpa`). The `autoscaling` group was absent ENTIRELY, so this
+  # panel was broken for READS too — not only for the PATCH listed in R4. Same
+  # silent failure mode as the PDB section: it renders only when
+  # `hpas.length > 0`, so a 403 looked identical to "this cluster has no HPAs".
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "networkpolicies"]
@@ -193,11 +216,46 @@ rules:
   #
   # NOT create: this service never creates a pod anywhere, and cluster-wide
   # pod-create would re-open the escalation this change closes.
-  # NOT patch: the finalizer-strip branch in the same handler wants `patch pods`
-  # and has never had it (measured: can-i patch pods = no). Left as-is — see R4.
+  # NOT patch, still: see the namespace-cleanup entry in R4. The finalizer-strip
+  # branch wants `patch pods` and the job sweep wants `delete jobs`, but that
+  # handler cannot be reached from any UI — the client/server contract does not
+  # line up (evidence in R4), so granting two cluster-wide destructive verbs
+  # would change nothing an operator can actually do. Fix the contract first.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["delete"]
+  # Node PATCH, cluster-wide — `PATCH /k8s/nodes/:name/cordon` (routes/nodes.ts),
+  # which sets `spec.unschedulable`. Also the implicit cordon inside the /cluster
+  # drain flow. cluster:admin / cluster:drain gated in the API.
+  #
+  # WHY CLUSTER-WIDE: Nodes are cluster-scoped objects. There is no namespaced
+  # form of a Node, so a Role cannot express this — the choice is cluster scope
+  # or the feature does not exist. `resourceNames` was considered and rejected:
+  # the node set changes as the cluster is scaled, and a stale list here would
+  # fail exactly when an operator is trying to drain a sick node.
+  #
+  # WHAT IT DOES NOT GRANT: no secret read, no workload create. `patch nodes`
+  # can edit labels and taints as well as `unschedulable`, which can influence
+  # scheduling — that is the honest cost of this grant, and it is bounded by the
+  # cluster:admin gate on the route. `nodes/status` is a separate subresource and
+  # is deliberately not included.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+  # HorizontalPodAutoscaler PATCH, cluster-wide — `PATCH /cluster/hpa` adjusts
+  # min/max replicas. The namespace arrives in the request body with no
+  # allow-list, so the target set is every namespace and there is nothing to
+  # scope a Role to. cluster:scale gated in the API (cluster:admin at the console
+  # proxy).
+  #
+  # Bounded by construction: the route's zod schema clamps minReplicas and
+  # maxReplicas to 1..100 and requires max >= min, so the worst case is a
+  # capacity change on an existing autoscaler, not a new workload. Only `patch` —
+  # NOT create or delete, so an HPA cannot be attached to a workload that does
+  # not already have one.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["patch"]
   # ConfigMap write, cluster-wide. ACCEPTED RISK, not a clean result — see R1.
   # `PATCH/DELETE /config-maps/:namespace/:name` takes the namespace straight
   # from the URL path with no allow-list (routes/config-maps.ts), so this is
@@ -233,13 +291,31 @@ rules:
   # `infraweaver.io/source: community-apps`, with RESERVED_NAMESPACES as
   # defence-in-depth. That is an application-layer control, NOT RBAC — R3.
   #
-  # `create` is NOT granted, and is not granted today either (measured: can-i
-  # create namespaces = no) even though the same route calls createNamespace.
-  # Left exactly as it is: this change removes privilege, it does not add any.
-  # See R4.
+  # `create` IS now granted, and it is the one grant here that adds privilege.
+  # Justification, because it deserves one:
+  #
+  #   · It is load-bearing and BROKEN without it. routes/community-apps.ts
+  #     `POST /:slug/secrets` calls createNamespace to give the app's Secrets a
+  #     home before ArgoCD syncs. It has never had the permission (measured
+  #     before this change: can-i create namespaces = no), so community-app
+  #     install has been failing on its first install into a new namespace for
+  #     as long as the route has existed. This is the pre-existing gap in R4
+  #     that actually bites an operator.
+  #   · It cannot be narrowed. Same reason as `delete` directly below: the
+  #     namespace name is the user-chosen app slug, so it is not a set that
+  #     `resourceNames` can enumerate when this manifest is written.
+  #   · It is strictly weaker than the `delete` already granted next to it.
+  #     Creating an empty namespace discloses nothing and runs nothing — this
+  #     ClusterRole grants no workload create, so a new namespace stays empty
+  #     unless ArgoCD (a separate identity) syncs into it.
+  #
+  # Guard is application-layer, same as delete: RESERVED_NAMESPACES plus the
+  # `infraweaver.io/source: community-apps` + `app.kubernetes.io/name: <slug>`
+  # labels this route stamps on every namespace it creates. Those labels are now
+  # the ownership proof the secret-write path checks on every path — see R6.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["delete"]
+    verbs: ["create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -451,29 +527,58 @@ subjects:
 #      confine community apps to a fixed namespace prefix that RBAC could match —
 #      which RBAC still cannot do, so it really needs a validating admission
 #      policy instead.
-#  R4. Several capabilities the code calls for were ALREADY not granted before
-#      this change and are still not granted: `patch nodes` (the cordon in
-#      routes/nodes.ts), `delete jobs` and `patch pods` (the other two halves of
-#      /cluster/namespace-cleanup), `patch horizontalpodautoscalers` (PATCH
-#      /cluster/hpa — the whole `autoscaling` group was absent), `create
-#      namespaces` (community-app install), `create pods/exec` (routes/exec.ts,
-#      so EXEC_ALLOWED_NAMESPACES currently gates a call that 403s anyway), and
-#      the reads behind /cluster/quotas (`resourcequotas`) and the PDB panel
-#      (`policy/poddisruptionbudgets`). All measured with `kubectl auth can-i`
-#      against the live ServiceAccount BEFORE this change. They are pre-existing
-#      gaps, NOT regressions introduced here; listed so nobody blames this commit
-#      when they surface. They were left alone on purpose — this change removes
-#      privilege and must not quietly add any.
-#  R5. KNOWN BREAKAGE, accepted as the point of the change: `GET /secrets` with
-#      no namespace (or namespace=all) calls listSecretForAllNamespaces and will
-#      now 503. The Security > Secrets inventory can only list Secrets in
-#      infraweaver-console and infraweaver-system. That IS escalation #1 — the
-#      panel was reading every credential in the cluster to render a key-name
-#      list. Restoring it needs the API to serve that view from metadata it is
-#      allowed to see, not a wider grant.
-#      Second, smaller case: routes/community-apps.ts re-reads an existing Secret
-#      to check its ownership label before overwriting it (the 409 branch), which
-#      needs `get` in the app's namespace. Fresh installs are unaffected;
-#      re-installing over an existing Secret will now fail closed with
-#      "Failed to create secrets" instead of overwriting.
+#  R4. RESOLVED, in part. The seven capabilities the code called for that were
+#      ALREADY 403 before the split (all measured with `kubectl auth can-i`
+#      against the live ServiceAccount) have each been decided rather than left:
+#
+#        GRANTED, because the feature is reachable and the grant is defensible:
+#        · `resourcequotas` read            → /quota page + /cluster hotspots
+#        · `policy/poddisruptionbudgets`    → /cluster disruption-budget section
+#        · `autoscaling/hpa` read AND patch → /cluster HPA section. NOTE: the
+#          READ was missing too, which the original R4 did not say — the whole
+#          group was absent, so this panel was dark, not merely read-only.
+#        · `patch nodes`                    → cordon / drain. Cluster-scoped by
+#          nature; justified inline above.
+#        · `create namespaces`              → community-app install. The one that
+#          actually broke an operator-facing flow; justified inline above.
+#
+#        NOT GRANTED, deliberately:
+#        · `create pods/exec` — routes/exec.ts is now DISABLED in code and
+#          answers 501 with the reason. Exec exposes every Secret and the SA
+#          token of the target pod, and EXEC_ALLOWED_NAMESPACES pointed at
+#          infraweaver-console / infraweaver-system, i.e. at the platform's own
+#          credentials. Granting it would re-open by another door the disclosure
+#          escalation #1 closed. It has never worked, so nothing regresses.
+#        · `patch pods` + `delete jobs` — the other two halves of
+#          /cluster/namespace-cleanup. The feature is unreachable: the console
+#          page POSTs `{ preview: true }` and reads `data.namespaces`, while the
+#          handler's zod schema requires `{ namespace }` and has no preview mode
+#          at all, so every call from the UI 400s before touching the cluster.
+#          Granting two cluster-wide destructive verbs to complete a code path no
+#          operator can invoke buys nothing. The contract is the blocker; fix it
+#          first, then revisit this grant with the feature actually working.
+#  R5. RESOLVED. `GET /secrets` no longer calls listSecretForAllNamespaces. It
+#      reads secrets one namespace at a time: the default view is the inventory
+#      set (infraweaver-console + infraweaver-system — the namespaces a Role
+#      already grants, chosen so that NOTHING had to be granted for this panel),
+#      and a caller may name any other namespace explicitly. A namespace the Role
+#      does not cover comes back in an `unreadable` list with its reason, and the
+#      console renders that as "could not look", never as "no secrets" (design
+#      canon S8). Cluster-wide secret read stays gone.
+#      The community-apps 409 branch is fixed too — see R6.
+#  R6. The community-app secret-write ownership check MOVED; it was not restored.
+#      It used to re-read the target Secret to inspect its labels, which needed
+#      `get secrets` in a namespace named after a user-chosen slug — i.e. exactly
+#      the cluster-wide secret read that cannot come back. The check now runs
+#      against the NAMESPACE object (which this service may read) and requires
+#      the `infraweaver.io/source: community-apps` + `app.kubernetes.io/name`
+#      labels that only this route writes. That is deliberately STRICTER than
+#      what it replaces: the old code let an installed app write into whatever
+#      namespace its ArgoCD Application declared as destination, and
+#      POST /:slug/argocd-app accepts any non-reserved namespace — so a
+#      catalog:write holder could aim an Application at a namespace they did not
+#      own. Requiring the namespace's own labels on every path closes that.
+#      Residual: a Secret created by the app itself, inside the app's own
+#      namespace, is now overwritten on re-install without a per-object check.
+#      That is within the app's own blast radius and is what re-install means.
 # ═══════════════════════════════════════════════════════════════════════════

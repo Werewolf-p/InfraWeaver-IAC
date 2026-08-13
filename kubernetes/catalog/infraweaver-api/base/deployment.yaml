@@ -92,12 +92,13 @@ spec:
                 secretKeyRef:
                   name: infraweaver-api-console-secret
                   key: CONSOLE_API_SECRET
-            # C7: comma-separated allowlist of namespaces the diagnostic pod-exec
-            # endpoint may target. Empty = fail-closed (every exec rejected). OSS
-            # forks opt in by setting this per-environment; prod overlay bakes the
-            # platform's own namespaces.
-            - name: EXEC_ALLOWED_NAMESPACES
-              value: ""
+            # EXEC_ALLOWED_NAMESPACES REMOVED — routes/exec.ts is disabled and no
+            # longer reads it. Pod exec needs `create pods/exec`, which this
+            # ServiceAccount has never had and which is deliberately not granted
+            # (see rbac.yaml R4): exec exposes every Secret and the SA token of
+            # the target pod, and this list pointed at infraweaver-console /
+            # infraweaver-system — the platform's own credentials. Leaving the
+            # variable would advertise a control that controls nothing.
           envFrom:
             - secretRef:
                 name: infraweaver-api-argocd-token
