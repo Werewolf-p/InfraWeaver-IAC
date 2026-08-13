@@ -756,10 +756,30 @@ data:
           expression: |
             return {"nc_groups": [group.name for group in request.user.ak_groups.all()]}
 
+      # IDENTIFIED BY client_id, NOT BY name — and this entry is why.
+      #
+      # This blueprint sat in `status: error` for weeks and took the other
+      # entries in the file down with it. Measured on the live DB 2026-08-13:
+      #     client_id 'nextcloud'  ->  name 'nextcloud'
+      # The provider had been renamed (or created) outside this blueprint, so
+      # `identifiers: {name: Nextcloud Provider}` matched nothing, the importer
+      # decided to CREATE, and Postgres refused:
+      #     Serializer errors {'client_id': [... 'OAuth2/OpenID Provider with
+      #     this Client ID already exists.', code='unique']}
+      # One invalid entry fails the WHOLE blueprint, which is why the ArgoCD and
+      # OpenBao entries — both fine, both still matching on name — stopped being
+      # reconciled along with it.
+      #
+      # `name` is not what the database enforces uniqueness on; `client_id` is.
+      # Identifying by the non-unique field means any rename silently orphans the
+      # entry and turns the next apply into a collision. The siblings above match
+      # on name only because nobody has renamed them YET. Adopting the existing
+      # row also converges it: `name` is an attr here, so the rename happens
+      # THROUGH the blueprint instead of colliding with it.
       - model: authentik_providers_oauth2.oauth2provider
         state: present
         identifiers:
-          name: Nextcloud Provider
+          client_id: nextcloud
         attrs:
           name: Nextcloud Provider
           client_id: nextcloud
@@ -790,7 +810,10 @@ data:
         attrs:
           name: Nextcloud
           slug: nextcloud
-          provider: !Find [authentik_providers_oauth2.oauth2provider, [name, Nextcloud Provider]]
+          # Matched on client_id for the same reason the provider entry above is
+          # identified by it: a !Find on `name` resolves to nothing the moment
+          # somebody renames the provider, and this one HAD been renamed.
+          provider: !Find [authentik_providers_oauth2.oauth2provider, [client_id, nextcloud]]
           policy_engine_mode: any
 
       # NOTE: Embedded Outpost configuration (proxy providers) is handled by
