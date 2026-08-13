@@ -167,15 +167,15 @@
 # ── §4 ARMING PROCEDURE ─────────────────────────────────────────────────────
 #   0. [DONE 2026-08-13] Fix Traefik `forwardedHeaders.trustedIPs` (Cloudflare
 #      ranges) on web/websecure only.
-#   0b. [OUTSTANDING] Apply the Cloudflare Transform Rule in §3c — Modify
-#      Request Header → REMOVE `X-Forwarded-For` (not Set; see §3c) — then
-#      CONFIRM a real client IP appears in Authentik's event log, including that
-#      a request sent with a bogus `X-Forwarded-For:` is recorded under the real
-#      caller, not the bogus value. This is now the gate. One command:
-#          bash scripts/cloudflare-xff-transform.sh --apply    # needs CF_TRANSFORM_TOKEN
-#          bash scripts/cloudflare-xff-transform.sh --verify   # needs neither token nor rule
-#      Measured 2026-08-13 with --verify: SPOOFABLE. Do not close this line on
-#      anything less than that command printing AUTHORITATIVE.
+#   0b. [DONE 2026-08-13] Cloudflare Transform Rule applied on the zone:
+#      http_request_late_transform → rewrite → REMOVE `X-Forwarded-For`,
+#      expression `true`, via scripts/cloudflare-xff-transform.sh --apply.
+#      PROVEN, not assumed — the same probe that failed before it now passes:
+#          before: spoof 203.0.113.77 → authentik recorded 203.0.113.77
+#          after : spoof 203.0.113.77 → authentik recorded the real caller
+#      Re-check at any time with `--verify`; it must print AUTHORITATIVE. If it
+#      ever prints SPOOFABLE or names a Cloudflare edge address, comment the
+#      mount in ../../values.yaml back out before doing anything else.
 #   1. [PARTIAL] Break-glass is armed but not exercised (last_login NULL).
 #      Verify a real login with it before relying on any lockout.
 #   2. [DONE] `git mv 70-brute-force-reputation.yaml.DEFERRED 70-brute-force-reputation.yaml`

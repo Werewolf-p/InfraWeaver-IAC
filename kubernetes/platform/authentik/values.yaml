@@ -193,11 +193,11 @@ blueprints:
     # user on first sync. Verified against the running pod's own source, not
     # from memory; see §2 / §2b of the blueprint.
     #
-    # ⚠️ DISARMED AGAIN 2026-08-13, BEFORE THIS EVER MERGED. §3c is still open
-    # and the line was going to ship anyway — the branch carrying it
-    # (fix/traefik-cloudflare-xff-arm-brute-force) put the mount and the warning
-    # in the same commit, so merging it would have armed the policy while the
-    # hole it warns about was wide open.
+    # It was DISARMED once, 2026-08-13, before it ever merged: the branch
+    # carrying it (fix/traefik-cloudflare-xff-arm-brute-force) put the mount and
+    # the warning in the same commit, so merging would have armed the policy
+    # while the hole it warns about was wide open. Kept below, because the reason
+    # it was disarmed is the reason it may be armed now.
     #
     # Cloudflare APPENDS to a caller-supplied X-Forwarded-For and Authentik reads
     # the FIRST entry, so with this mounted:
@@ -240,7 +240,16 @@ blueprints:
     # must print AUTHORITATIVE. It printed SPOOFABLE on 2026-08-13.
     # `scripts/validate-iac.sh` gate 6 fails the build if this line comes back
     # while the blueprint still marks §3c outstanding.
-    #   - authentik-blueprint-brute-force
+    #
+    # ✅ RE-ARMED 2026-08-13, on evidence rather than on a plan. The Cloudflare
+    # Transform Rule now REMOVES the visitor-supplied X-Forwarded-For at the edge
+    # (see the blueprint's §3c for why "set" was impossible), and the probe that
+    # used to prove the hole now proves it closed: a request carrying
+    # `X-Forwarded-For: 203.0.113.77` through the edge is recorded by Authentik
+    # under the real caller. Re-check with
+    #     bash scripts/cloudflare-xff-transform.sh --verify
+    # which must print AUTHORITATIVE. Comment this line out again if it does not.
+    - authentik-blueprint-brute-force
     # NOT listed, deliberately — these are the MFA enforcement flips, and they
     # can lock the sole administrator out of every admin surface at once.
     # Adding a name here is the second of two gates a human must open, and

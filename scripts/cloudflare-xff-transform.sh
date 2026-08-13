@@ -207,7 +207,7 @@ report_rules() {
     if [[ "$msg" == *"Authentication error"* ]]; then
       warn "token cannot read $PHASE rulesets: $msg"
       warn "it needs Zone → Transform Rules → Edit (the platform's DNS token is not enough)"
-    elif [[ "$msg" == *"not found"* ]]; then
+    elif [[ "$msg" == *"not find"* || "$msg" == *"not found"* ]]; then
       log "no $PHASE ruleset exists on this zone yet — --apply will create it"
       return 0
     else
