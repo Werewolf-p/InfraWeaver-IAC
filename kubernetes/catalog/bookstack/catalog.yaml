@@ -12,3 +12,37 @@ categories:
 ingressroute:
   host: bookstack.int.${BASE_DOMAIN}
 installed_at: 2026-05-17T22:00:38.433Z
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Read by scripts/seed-catalog-secrets.sh → secret/data/platform/bookstack, then
+# pulled into app-key-secret[value] / db-password-secret[value] by
+# manifests/secrets.yaml.
+#
+# Declaring these keys here is what makes them EXIST. The seeder generates only
+# what catalog.yaml declares, so an undeclared property means OpenBao never
+# holds it, ESO has nothing to sync, and the pod never receives its env —
+# silently, on every fresh install. The console's catalog.yaml documents the
+# sharper edge of the same rule: under `deletionPolicy: Retain` ESO aborts the
+# ENTIRE secret when any single referenced property is missing rather than
+# skipping that one key, so one undeclared token takes every other key with it.
+# The ExternalSecrets beside this file deliberately do not set Retain, but the
+# declaration is what makes a fresh install work either way.
+secrets:
+  path: platform/bookstack
+  keys:
+    # Laravel's encryption key — every session cookie and encrypted column is
+    # sealed with it. 40 characters, not 32, on purpose: Laravel accepts a RAW
+    # APP_KEY only at exactly 32 bytes, and the seeder builds a password by
+    # stripping `=+/` out of base64 and then `head -c`, so a 32-char request
+    # comes up short often enough to be a coin-flip. The ExternalSecret slices
+    # the first 32 characters and emits `base64:<b64 of those 32>`, which is
+    # exactly 32 bytes every time. The value this replaced was the literal
+    # `change-me`, live since 2026-05-17 — treat that one as compromised.
+    app-key:
+      type: password
+      length: 40
+    # Database password. Same history: it shipped as `change-me` on an app whose
+    # catalog.yaml already said it was installed.
+    db-password:
+      type: password
+      length: 32

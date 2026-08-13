@@ -125,10 +125,13 @@ tests:
         exp_alerts: []
 
   # ── A suspended CronJob other than openbao DOES fire the suspend alert ─────
+  # Was wordpress-backup-sweep until 2026-08-12; that job moved to the CRITICAL
+  # cronjob.backup.chain group and is now excluded here, so the example is a
+  # plain console sweep. roster-drift is hourly and carries no special handling.
   - interval: 1m
     name: suspended console cronjob fires the suspend alert
     input_series:
-      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-backup-sweep"}'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="roster-drift"}'
         values: '1+0x60'
     alert_rule_test:
       - eval_time: 30m
@@ -137,10 +140,36 @@ tests:
           - exp_labels:
               severity: warning
               namespace: infraweaver-console
+              cronjob: roster-drift
+            exp_annotations:
+              summary: 'Console CronJob infraweaver-console/roster-drift is suspended'
+              description: 'Console automation CronJob roster-drift is suspended and will not run until resumed.'
+
+  # ── The promotion, asserted in both directions ─────────────────────────────
+  # A suspended wordpress-backup-sweep must now fire the CRITICAL backup-chain
+  # rule and must NOT also fire the console warning. Both halves matter: the
+  # first proves the fleet's backups are held to the Longhorn standard, the
+  # second proves one condition does not reach Discord twice (Alertmanager
+  # cannot inhibit across differing alertnames).
+  - interval: 1m
+    name: suspended wordpress-backup-sweep is critical, and pages only once
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-backup-sweep"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ConsoleAutomationCronJobSuspended
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BackupCronJobSuspended
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: infraweaver-console
               cronjob: wordpress-backup-sweep
             exp_annotations:
-              summary: 'Console CronJob infraweaver-console/wordpress-backup-sweep is suspended'
-              description: 'Console automation CronJob wordpress-backup-sweep is suspended and will not run until resumed.'
+              summary: 'BACKUP CronJob infraweaver-console/wordpress-backup-sweep is suspended'
+              description: 'A backup-chain CronJob is suspended. The staleness alerts exclude suspended jobs, so while this persists NOTHING else watches this control. Resume it or accept in writing that backups are off.'
 
   # ── Never-succeeded, now gated on kube_cronjob_created ────────────────────
   # placement-rebalance was created at t=0 and has no success series.

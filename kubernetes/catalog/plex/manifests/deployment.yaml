@@ -25,12 +25,67 @@ spec:
       labels:
         app.kubernetes.io/name: plex
     spec:
+      # ⚠️ hostNetwork IS RETAINED, AND IT IS THE LARGEST REMAINING RISK HERE.
+      #
+      # What it costs: a hostNetwork pod carries Cilium's `reserved:host`
+      # identity, which places it outside EVERY CiliumNetworkPolicy on this
+      # cluster — the airgap baselines, the allowlists, all of it. This is a
+      # media transcoder that parses container formats supplied by whoever
+      # produced the file, so "outside all network policy" is exactly the wrong
+      # property for it to have.
+      #
+      # Why it stays anyway: hostNetwork is here for Plex's LAN client
+      # discovery (GDM on UDP 32410-32414 and DLNA/SSDP on UDP 1900), which is
+      # multicast/broadcast. `hostPort: 32400` does NOT carry those ports and
+      # would not restore discovery — it would only re-expose the web port. So
+      # removing hostNetwork is not a like-for-like swap: it ends auto-discovery
+      # for every Plex client on the LAN and leaves manual server-URL entry as
+      # the only path. That is a change to how the owner's media server behaves,
+      # not a security cleanup, and it is not this commit's to make.
+      #
+      # THE REPLACEMENT WHEN SOMEONE DOES MAKE IT: a MetalLB LoadBalancer
+      # Service with a dedicated LAN IP, which keeps a stable address for
+      # clients and puts the pod back inside the policy layer. Do that, then
+      # tighten the namespace to baseline, then delete `plex` from the
+      # disallow-host-namespaces exclude list in
+      # kubernetes/core/kyverno/manifests/cluster-policies.yaml — all three, or
+      # the pod stops being admitted.
       hostNetwork: true
       securityContext:
         fsGroup: 1000
+        # The single highest-value control for this workload, and it was absent.
+        # RuntimeDefault blocks ~44% of kernel syscalls, including those used by
+        # the container-escape CVEs (CVE-2022-0492, CVE-2023-0386). It matters
+        # here more than almost anywhere else on the cluster: this container
+        # runs ffmpeg-family demuxers over untrusted media, which is the classic
+        # memory-corruption surface, and a hostNetwork pod that escapes lands on
+        # the node with no network policy between it and anything.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: plex
           image: lscr.io/linuxserver/plex
+          # Was: no container securityContext at all — root, full default
+          # capability set, privilege escalation permitted.
+          securityContext:
+            # Sets no_new_privs. s6-overlay drops to PUID/PGID with setuid()
+            # while still root, which no_new_privs does not affect; it only
+            # blocks REGAINING privilege via a setuid binary later, which is
+            # what an exploited transcoder would try.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # linuxserver.io images run an s6 init that chowns /config and
+              # the media mounts to PUID:PGID before dropping privilege, so a
+              # bare drop:[ALL] makes the container fail at startup. This is the
+              # standard linuxserver set and nothing wider.
+              # IF THE POD FAILS AT INIT with chown/permission errors, this list
+              # is what to widen — one capability at a time, with the error that
+              # justified it. Do not "fix" it by deleting the whole block.
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+            # readOnlyRootFilesystem is deliberately NOT set: s6-overlay writes
+            # to /run and /var/run during init, so enabling it needs an emptyDir
+            # per write path. That is a separate, testable change.
           env:
             - name: VERSION
               value: "docker"

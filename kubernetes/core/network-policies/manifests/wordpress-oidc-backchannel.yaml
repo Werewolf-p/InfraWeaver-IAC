@@ -25,7 +25,15 @@ metadata:
   namespace: wordpress
   labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}
 spec:
-  endpointSelector: {matchLabels: {"infraweaver.io/component": wordpress}}
+  # WIDENED 2026-08-12 in lockstep with wordpress-lockdown.yaml. Same reason,
+  # different symptom: a blue/green update rolled the fleet onto
+  # `wordpress-slot-b` pods that this backchannel allow never matched, so SSO
+  # login broke for the slot-b half of every update window — and because the
+  # front-channel keeps working, it presents as an intermittent "login
+  # sometimes fails" rather than as a policy gap.
+  endpointSelector:
+    matchExpressions:
+      - {key: "infraweaver.io/component", operator: In, values: [wordpress, wordpress-slot-b]}
   egress:
     - toEndpoints:
         - {matchLabels: {"k8s:io.kubernetes.pod.namespace": authentik, "app.kubernetes.io/name": authentik}}

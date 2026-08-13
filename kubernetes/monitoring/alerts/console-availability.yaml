@@ -1,4 +1,45 @@
 ---
+# Console availability.
+#
+# WHY THIS FILE WAS REWRITTEN (2026-08-12): NOTHING on this platform could tell
+# that the console was serving errors. ConsoleHighLatency and ConsoleHighErrorRate
+# were keyed on `nginx_ingress_controller_*`. This cluster has never run an nginx
+# ingress controller — it runs Traefik, 44 IngressRoutes' worth — so both series
+# were empty and both rules had sat permanently green since the day they were
+# written. Everything else that watches the console watches LIVENESS, not
+# CORRECTNESS: ConsolePodCountLow asserts `replicas_available >= 1`, and the Gatus
+# probe plus the startup/readiness/liveness probes all point at /api/ping, which
+# returns a hardcoded literal and touches nothing. A console 500ing every single
+# authenticated request satisfies all five.
+#
+# WHY TRAEFIK AND NOT THE CONSOLE'S OWN EXPORTER: the console is scraped at
+# /api/platform/metrics (overlays/prod/wordpress-metrics-monitor.yaml), so keying
+# on a series the application emits about itself would have been the better
+# shape — it survives an ingress swap and it counts what the app actually did.
+# MEASURED, and stated rather than assumed: it does not emit one. That endpoint
+# renders exactly three families — infraweaver_openbao_token_*,
+# infraweaver_authentik_token_* and infraweaver_wiki_atlas_* — and there is no
+# request counter, no status-code label and no duration histogram anywhere in the
+# console (no prom-client, no middleware instrumentation). So the ingress is the
+# only place this platform counts a console 5xx at all, and these rules are keyed
+# there. The follow-up that makes them independent of the ingress is a
+# `infraweaver_http_requests_total{route,status}` family on the platform
+# exporter; when it lands, repoint these two and keep the absent guard.
+#
+# THE SERVICE SELECTOR IS A PREFIX, NOT A LITERAL. Traefik's kubernetescrd
+# provider names a service `<namespace>-<ingressroute>-<20 hex of the route rule
+# hash>@kubernetescrd`, so the hash changes whenever a route's match expression is
+# edited. Matching on the stable `traefik-infraweaver-console-int-` prefix covers
+# both routes of that IngressRoute (the document/navigate route and the catch-all)
+# and survives a rule edit. It does NOT survive renaming or moving the
+# IngressRoute — which is precisely why AlertInputMissingConsoleRequests in
+# alerts/alert-pipeline-selfcheck.yaml guards these two series. A wrong selector
+# becomes a page instead of silence, which is the whole reason that file exists.
+#
+# Requests rejected upstream by the forward-auth middleware never reach the
+# service and are therefore not counted here. That is correct for these rules:
+# the question is whether the console is answering badly, not whether Authentik
+# is turning people away.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -23,11 +64,20 @@ spec:
               Check pod status: kubectl get pods -n infraweaver-console
 
         - alert: ConsoleHighLatency
+          # Threshold unchanged at 5s, but it is only now REACHABLE: the chart's
+          # default histogram buckets stop at 5.0, and histogram_quantile()
+          # returns the highest finite bound once the quantile lands in +Inf, so
+          # `> 5` could not evaluate true no matter how slow the console got.
+          # kubernetes/core/traefik/values.yaml now declares
+          # buckets 0.1,0.3,1.2,5.0,10.0,30.0 for exactly this reason — the two
+          # changes are one fix and must not be split.
           expr: |
             histogram_quantile(0.95,
-              sum(rate(nginx_ingress_controller_request_duration_seconds_bucket{
-                namespace="infraweaver-console"
-              }[5m])) by (le, ingress)
+              sum by (le) (
+                rate(traefik_service_request_duration_seconds_bucket{
+                  service=~"traefik-infraweaver-console-int-.+@kubernetescrd"
+                }[5m])
+              )
             ) > 5
           for: 5m
           labels:
@@ -35,29 +85,54 @@ spec:
           annotations:
             summary: "InfraWeaver Console P95 latency > 5s"
             description: >-
-              The 95th percentile response time for infraweaver-console has exceeded 5 seconds
-              for 5 minutes. Investigate slow queries or resource contention.
+              The 95th percentile response time measured at Traefik for the
+              infraweaver-console IngressRoute has exceeded 5 seconds for 5
+              minutes. This is server-side time only. Check the console's own
+              upstreams first — Kubernetes API, OpenBao, Authentik and Prometheus
+              are all synchronous on some console routes, and a slow dependency
+              shows up here before it shows up anywhere else.
 
         - alert: ConsoleHighErrorRate
+          # Two conditions, deliberately. The ratio alone is a trap on a console
+          # whose traffic goes to near-zero overnight: one 500 out of three
+          # requests at 04:00 is 33% and would page, while one 500 out of three
+          # requests is not an incident. The `and` clause requires 0.05 req/s
+          # sustained over the same 5m window — about 15 requests — before the
+          # ratio is allowed to mean anything. Below that floor the console is
+          # not being used and its error RATE is not a measurement.
+          #
+          # Severity stays warning, matching the rule this replaces. It is now a
+          # rule that can actually fire, which was the defect; changing which
+          # escalation route it rides is a separate decision with its own
+          # consequences (the critical route fans out to two transports).
           expr: |
             (
-              sum(rate(nginx_ingress_controller_requests{
-                namespace="infraweaver-console",
-                status=~"5.."
+              sum(rate(traefik_service_requests_total{
+                service=~"traefik-infraweaver-console-int-.+@kubernetescrd",
+                code=~"5.."
               }[5m]))
               /
-              sum(rate(nginx_ingress_controller_requests{
-                namespace="infraweaver-console"
+              sum(rate(traefik_service_requests_total{
+                service=~"traefik-infraweaver-console-int-.+@kubernetescrd"
               }[5m]))
             ) > 0.05
+            and
+            sum(rate(traefik_service_requests_total{
+              service=~"traefik-infraweaver-console-int-.+@kubernetescrd"
+            }[5m])) > 0.05
           for: 5m
           labels:
             severity: warning
           annotations:
             summary: "InfraWeaver Console error rate > 5%"
             description: >-
-              More than 5% of requests to infraweaver-console are returning 5xx errors.
-              Duration: 5 minutes. Check application logs and error boundaries.
+              More than 5% of the requests Traefik forwarded to
+              infraweaver-console came back 5xx, for 5 minutes, at meaningful
+              traffic. Nothing else on this platform detects this: the pod-count
+              alert, the Gatus probe and all three kubelet probes assert only
+              that /api/ping answers, and /api/ping returns a literal without
+              touching the API server, OpenBao or Authentik. Start with the
+              console pod logs and the error boundaries, not with the pod state.
 
         - alert: ApiPodCountLow
           expr: |
@@ -69,3 +144,41 @@ spec:
             summary: "InfraWeaver API has no available pods"
             description: >-
               The infraweaver-api deployment has had fewer than 1 available replica for 2 minutes.
+
+        # The WordPress backup DATASTORE. It had no availability alert at all,
+        # which is the third deployment in this namespace and the only one that
+        # holds data.
+        #
+        # `for: 15m`, not the 2m the console and API use, and the number is
+        # derived from this Deployment's own shape rather than picked. It is
+        # `replicas: 1` + `strategy: Recreate` on an RWO longhorn-retain PVC BY
+        # DESIGN (single writer IS the consistency model — see
+        # base/backup-deployment.yaml), so EVERY rollout is a legitimate
+        # zero-available window while the volume detaches from the old node and
+        # attaches to the new one. A 2m rule would page on every console release.
+        # 15m is past every observed rollout and still well inside the hourly
+        # :20 sweep, whose curl already rides out ~90s of 503 with
+        # `--retry 3 --retry-delay 30`.
+        #
+        # Warning, not critical, and the split is the point: an unavailable
+        # datastore costs at most one hourly tick, while backups that have
+        # actually STOPPED are what BackupCronJobMissedSuccess in
+        # alerts/cronjob-health.yaml pages critically about. Severity follows the
+        # data-loss risk, not the object.
+        - alert: BackupDatastoreUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="infraweaver-console", deployment="infraweaver-backup"} < 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "InfraWeaver backup datastore has no available pods"
+            description: >-
+              The infraweaver-backup deployment has had zero available replicas
+              for 15 minutes — longer than any Recreate rollout of it takes. While
+              this persists every /api/wordpress/backups/** call 503s at the proxy,
+              so no site is backed up and no snapshot can be restored. The usual
+              cause is the RWO Longhorn volume failing to detach from a lost node;
+              check `kubectl -n infraweaver-console describe pod -l
+              app=infraweaver-backup` for Multi-Attach or FailedAttachVolume, and
+              the Longhorn UI for a stuck attachment.

@@ -205,6 +205,32 @@ spec:
     # configured. etcd-snapshot-verifier is reserved in the regex for the P2.5
     # fold-in (it matches nothing until that CronJob exists — deliberately
     # silent, NOT an absent-guard, so this file can merge before P2.5 lands).
+    #
+    # wordpress-backup-sweep JOINED THIS GROUP on 2026-08-12, and the namespace
+    # selector widened to `infraweaver-console` to reach it. It backs up the
+    # entire WordPress fleet and was being held to a WEAKER standard than
+    # Longhorn purely because of where it happens to live: the console namespace
+    # gave it one warning-severity staleness rule, no absent guard, and no
+    # outcome check. "Which namespace the object is in" is not a statement about
+    # how much the data is worth. It is now excluded from
+    # console.automation.health in alerts/manifests/prometheus-rules.yaml — that
+    # exclusion and this inclusion are one change and must move together, or the
+    # same condition pages twice and Alertmanager cannot inhibit across
+    # alertnames.
+    #
+    # WHAT IS STILL MISSING, stated rather than implied: Longhorn has an OUTCOME
+    # verifier (longhorn-backup-verifier proves a fresh backup exists on the
+    # target). WordPress has no equivalent, and one cannot be written here today
+    # — MEASURED: the console's exporters render only infraweaver_openbao_token_*,
+    # infraweaver_authentik_token_*, infraweaver_wiki_atlas_* and iwsl_connector_*
+    # (up / roundtrip / last_seq / rotation_pending / scrape_up). Not one series
+    # describes a snapshot. So every rule below still proves the DISPATCHER ran,
+    # not that a site's bytes landed in the chunk store — the sweep can return
+    # 200 having backed up nothing. Closing that needs either an
+    # `iwsl_backup_last_success_timestamp{site=...}` family on
+    # /api/wordpress/metrics, or a wordpress-backup-verifier CronJob on the
+    # longhorn-backup-verifier pattern. Whichever lands, add it to the regex
+    # above AND to the absent guard below in the SAME commit.
     - name: cronjob.backup.chain
       rules:
         - alert: BackupCronJobMissedSuccess
@@ -212,14 +238,14 @@ spec:
             (
               time()
               - max by (namespace, cronjob) (
-                  kube_cronjob_status_last_successful_time{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                  kube_cronjob_status_last_successful_time{namespace=~"longhorn-system|monitoring|infraweaver-console",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier|wordpress-backup-sweep"}
                 )
             )
             >
             clamp(
               2 * max by (namespace, cronjob) (
-                    kube_cronjob_next_schedule_time{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
-                  - kube_cronjob_status_last_schedule_time{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+                    kube_cronjob_next_schedule_time{namespace=~"longhorn-system|monitoring|infraweaver-console",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier|wordpress-backup-sweep"}
+                  - kube_cronjob_status_last_schedule_time{namespace=~"longhorn-system|monitoring|infraweaver-console",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier|wordpress-backup-sweep"}
                   ),
               3600, 691200
             )
@@ -239,7 +265,7 @@ spec:
         - alert: BackupCronJobNeverSucceeded
           expr: |
             max by (namespace, cronjob) (
-              kube_cronjob_spec_suspend{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"} == 0
+              kube_cronjob_spec_suspend{namespace=~"longhorn-system|monitoring|infraweaver-console",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier|wordpress-backup-sweep"} == 0
             )
             unless on (namespace, cronjob)
               max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
@@ -259,7 +285,7 @@ spec:
         - alert: BackupCronJobSuspended
           expr: |
             max by (namespace, cronjob) (
-              kube_cronjob_spec_suspend{namespace=~"longhorn-system|monitoring",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+              kube_cronjob_spec_suspend{namespace=~"longhorn-system|monitoring|infraweaver-console",cronjob=~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier|wordpress-backup-sweep"}
             ) == 1
           for: 15m
           labels:
@@ -283,6 +309,7 @@ spec:
             or absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"})
             or absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"})
             or absent(kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-backup-sweep"})
           for: 30m
           labels:
             severity: critical
@@ -292,4 +319,5 @@ spec:
               kube-state-metrics reports no CronJob object for
               {{ $labels.namespace }}/{{ $labels.cronjob }}. It was deleted or
               pruned; every other backup alert is now blind to it. Check the
-              longhorn / monitoring-alerts ArgoCD applications and git history.
+              owning ArgoCD application (longhorn, infraweaver-console) and git
+              history.

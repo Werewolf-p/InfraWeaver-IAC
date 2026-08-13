@@ -33,29 +33,12 @@ spec:
                       - catalog-app
       exclude:
         any:
-          # ── Belt-and-braces, NOT the primary scope control ──────────────────
-          # The `match` above already restricts this rule to namespaces labelled
-          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
-          # and `infraweaver-console`. Verified 2026-08-07: every namespace
-          # listed here produces ZERO results under all eight of these policies,
-          # because none of them carries that label.
-          #
-          # The list is here anyway for one measured reason. kyverno/values.yaml
-          # declares `config.excludeNamespacesFromAdmission` and
-          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
-          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
-          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
-          # only the chart defaults: resourceFilters exclude kyverno,
-          # kube-system, kube-public and kube-node-lease, and the webhook
-          # namespaceSelector excludes kube-system and kyverno. So the
-          # namespace protection the values file appears to provide does not
-          # exist, and a policy in Enforce cannot rely on it.
-          #
-          # These are the namespaces whose pods legitimately run privileged,
-          # host-networked or hostPath-mounted. If one of them is ever labelled
-          # catalog-app -- which is now the documented opt-in for this policy
-          # set -- this block is what stops admission from being blocked for
-          # cilium, longhorn, buildkitd, node-exporter and friends.
+          # Namespaces whose pods legitimately run privileged, host-networked or
+          # hostPath-mounted. Kept even though the match above is narrow, because
+          # kyverno/values.yaml's `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` are BOTH INERT — the live
+          # ConfigMap carries only the chart defaults. Verify, do not trust it:
+          #     kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'
           - resources:
               namespaces:
                 - kube-system
@@ -68,6 +51,83 @@ spec:
                 - build
                 - falco
                 - velero
+      validate:
+        message: "Image tag ':latest' is not allowed. Pin to a specific version (e.g. 'myapp:1.2.3')."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+---
+# Kyverno ClusterPolicy — Block :latest image tags, WIDE SCOPE, AUDIT ONLY
+#
+# The opt-out half of the ratchet described in the SCOPE MODEL header of
+# cluster-policies.yaml. What this newly reaches is the point: a mutable tag in
+# `wordpress`, `game-hub` or an on-demand catalog namespace means the image that
+# runs after the next pod restart is not the image anyone reviewed — and for a
+# registry we push to ourselves, a tag overwrite is code execution on the next
+# reschedule with no git commit to point at.
+#
+# It ships Audit, not Enforce, on measured grounds: four catalog apps pin
+# `:latest` today (homer, it-tools, cyberchef, gotify). Enforce would refuse
+# admission to all four at their next restart. Pin them, confirm the report is
+# clean, then widen the Enforce policy above and delete this one.
+#
+# KNOWN GAP, NOT FIXED HERE: the pattern `!*:latest` is a literal string match,
+# so an image with NO tag at all — `mace/qbittorrent`, `lscr.io/linuxserver/plex`
+# — passes even though the runtime resolves it to :latest. Catching that needs a
+# separate rule matching `image: "!*:*"`, which would also have to allow digest
+# pins; it is deliberately left out of this change rather than half-done.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag-wide
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag (wide scope, audit)
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Audit-only companion to disallow-latest-tag covering every namespace that
+      is not core/platform infrastructure. Measures the remediation backlog
+      before the Enforce policy is widened.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-image-tag-wide
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaceSelector:
+                matchExpressions:
+                  - key: infraweaver.io/type
+                    operator: NotIn
+                    values: [core, platform, platform-app, system]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - cilium-secrets
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
+                - argocd
+                - traefik
+                - dns-system
+                # Already covered at Enforce by the narrow policy above; listing
+                # them here keeps exactly one report per pod.
+                - gatus
+                - infraweaver-console
+                - stirling-pdf
+                - registry
       validate:
         message: "Image tag ':latest' is not allowed. Pin to a specific version (e.g. 'myapp:1.2.3')."
         pattern:

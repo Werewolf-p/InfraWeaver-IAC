@@ -10,10 +10,15 @@
 # Checks:
 #   1. kustomize build — every overlays/*/ renders without error
 #   2. kubeconform     — rendered manifests pass Kubernetes schema validation
-#   3. secret-leak gate — no NEW raw `kind: Secret` with a real value is added
+#   3. secret-leak gate — no raw `kind: Secret` carrying a value is added
 #                         (declarative refs via ExternalSecret/OpenBao only).
 #                         Existing known offenders are baselined (ratchet): the
 #                         gate blocks new leaks while we migrate the old ones.
+#                         A write-me placeholder ("change-me") FAILS like any
+#                         other value — under GitOps ArgoCD applies it and
+#                         selfHeal re-asserts it, so it is the live credential,
+#                         not a TODO. Narrow per-secret exemptions only, via
+#                         PLACEHOLDER_EXEMPT below.
 #   4. cron-secret seed gate — every secret key an in-cluster CronJob depends on,
 #                         when sourced (via its ExternalSecret) from a catalog
 #                         app's OpenBao path, must be declared in that app's
@@ -44,9 +49,25 @@ FAILED=0
 # Format: "<path>::<secret-name>"  (see docs/gitops-operating-model.md §Secrets)
 # Empty: all previously-committed raw Secrets have been migrated to ExternalSecret
 # (OpenBao) or inlined as non-sensitive config. Keep it empty — fix leaks, don't
-# baseline them. The placeholder community-app Secrets (vaultwarden/bookstack) use
-# only "change-me" values, which the gate ignores as non-real.
+# baseline them.
 SECRET_BASELINE=()
+
+# Secrets allowed to ship a WRITE-ME placeholder value ("change-me" and friends).
+# Format: "<path>::<secret-name>". Intended for scaffolding a human must edit
+# before it is ever applied — a template under kubernetes/catalog/_template/, not
+# a manifest ArgoCD syncs.
+#
+# WHY THIS LIST IS NARROW AND WAS ONCE THE WHOLE RULE. Until now the gate treated
+# "change-me" as a non-value everywhere, and that is exactly how two of them
+# reached a live cluster: vaultwarden's ADMIN_TOKEN and bookstack's APP_KEY +
+# DB_PASSWORD sat at "change-me" on apps whose own catalog.yaml said
+# `installed_at: 2026-05-17`. Under GitOps a placeholder in a manifest ArgoCD
+# applies is not a placeholder — it is the live credential, re-asserted by
+# selfHeal every time somebody rotates it in-cluster. So the gate now FAILS on a
+# placeholder by default and only an entry here excuses one, per file and per
+# secret name, with a comment saying why. An EMPTY value is still not a
+# credential and needs no entry.
+PLACEHOLDER_EXEMPT=()
 
 echo "── 1/5 kustomize build (overlays) ───────────────────────────────────────"
 mapfile -t OVERLAYS < <(find kubernetes -type f -path '*/overlays/*/kustomization.yaml' -printf '%h\n' | sort -u)
@@ -79,11 +100,17 @@ else
 fi
 
 echo "── 3/5 secret-leak gate ──────────────────────────────────────────────────"
-LEAKS="$(BASELINE="${SECRET_BASELINE[*]}" python3 - << 'PY'
+LEAKS="$(BASELINE="${SECRET_BASELINE[*]}" EXEMPT="${PLACEHOLDER_EXEMPT[*]}" python3 - << 'PY'
 import glob, yaml, os
 baseline = set(os.environ.get("BASELINE","").split())
-placeholders = {"", "change-me", "changeme", "placeholder", "changethis", "tbd"}
-violations = []
+exempt = set(os.environ.get("EXEMPT","").split())
+# Write-me placeholders. NOT treated as "no value": under GitOps ArgoCD applies
+# them verbatim and selfHeal re-applies them over any in-cluster rotation, so a
+# committed "change-me" IS the live credential. They are reported separately
+# from a real leak only so the message can say which mistake was made; both fail.
+placeholders = {"change-me", "changeme", "change_me", "placeholder", "changethis",
+                "change-this", "tbd", "todo", "secret", "password", "hunter2"}
+leaks, weak = [], []
 for f in glob.glob('kubernetes/**/*.yaml', recursive=True):
     try:
         docs = list(yaml.safe_load_all(open(f)))
@@ -93,20 +120,33 @@ for f in glob.glob('kubernetes/**/*.yaml', recursive=True):
         if not isinstance(d, dict) or d.get('kind') != 'Secret':
             continue
         name = (d.get('metadata') or {}).get('name')
+        ref = f"{f}::{name}"
         vals = list((d.get('stringData') or {}).values()) + list((d.get('data') or {}).values())
-        real = [v for v in vals if isinstance(v, str) and v.strip() and v.strip().lower() not in placeholders]
-        if real and f"{f}::{name}" not in baseline:
-            violations.append(f"{f}::{name}")
-for v in sorted(set(violations)):
-    print(v)
+        # An empty value carries no credential and is how a template declares a
+        # key it does not own; everything else is a value this repo would apply.
+        present = [v.strip() for v in vals if isinstance(v, str) and v.strip()]
+        if not present:
+            continue
+        if all(v.lower() in placeholders for v in present):
+            if ref not in exempt:
+                weak.append(ref)
+        elif ref not in baseline:
+            leaks.append(ref)
+for v in sorted(set(leaks)):
+    print(f"leak {v}")
+for v in sorted(set(weak)):
+    print(f"placeholder {v}")
 PY
 )"
 if [[ -n "$LEAKS" ]]; then
-  echo "  ✗ raw Secret(s) with real values committed to git (use ExternalSecret + OpenBao):"
+  echo "  ✗ raw Secret(s) committed to git — use ExternalSecret + OpenBao:"
   echo "$LEAKS" | sed 's/^/      /'
+  echo "      (a 'placeholder' hit is a credential too: ArgoCD applies it and selfHeal"
+  echo "       re-asserts it over any in-cluster rotation. Exempt only a template a"
+  echo "       human edits before apply, via PLACEHOLDER_EXEMPT in this script.)"
   FAILED=1
 else
-  echo "  ✓ no new committed secrets (baseline: ${#SECRET_BASELINE[@]} pending migration)"
+  echo "  ✓ no committed secrets or write-me placeholders (baseline: ${#SECRET_BASELINE[@]}, exempt: ${#PLACEHOLDER_EXEMPT[@]})"
 fi
 
 echo "── 4/5 cron-secret seed gate ─────────────────────────────────────────────"

@@ -38,29 +38,13 @@ spec:
                   infraweaver.io/type: catalog-app
       exclude:
         any:
-          # ── Belt-and-braces, NOT the primary scope control ──────────────────
-          # The `match` above already restricts this rule to namespaces labelled
-          # infraweaver.io/type=catalog-app, and live that is exactly `gatus`
-          # and `infraweaver-console`. Verified 2026-08-07: every namespace
-          # listed here produces ZERO results under all eight of these policies,
-          # because none of them carries that label.
-          #
-          # The list is here anyway for one measured reason. kyverno/values.yaml
-          # declares `config.excludeNamespacesFromAdmission` and
-          # `features.webhooks.namespaceSelector` naming ~26 infrastructure
-          # namespaces, and NEITHER IS IN EFFECT. The live ConfigMap
-          # (`kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'`) carries
-          # only the chart defaults: resourceFilters exclude kyverno,
-          # kube-system, kube-public and kube-node-lease, and the webhook
-          # namespaceSelector excludes kube-system and kyverno. So the
-          # namespace protection the values file appears to provide does not
-          # exist, and a policy in Enforce cannot rely on it.
-          #
-          # These are the namespaces whose pods legitimately run privileged,
-          # host-networked or hostPath-mounted. If one of them is ever labelled
-          # catalog-app -- which is now the documented opt-in for this policy
-          # set -- this block is what stops admission from being blocked for
-          # cilium, longhorn, buildkitd, node-exporter and friends.
+          # Namespaces whose pods legitimately run privileged, host-networked or
+          # hostPath-mounted. Kept even though the match above is narrow, because
+          # kyverno/values.yaml's `config.excludeNamespacesFromAdmission` and
+          # `features.webhooks.namespaceSelector` are BOTH INERT — the live
+          # ConfigMap carries only the chart defaults (kyverno, kube-system,
+          # kube-public, kube-node-lease). Verify, do not trust the values file:
+          #     kubectl get cm kyverno -n kyverno -o jsonpath='{.data}'
           - resources:
               namespaces:
                 - kube-system
@@ -73,6 +57,85 @@ spec:
                 - build
                 - falco
                 - velero
+      validate:
+        message: >-
+          Pod "{{ request.object.metadata.name }}" should set
+          spec.securityContext.seccompProfile.type to RuntimeDefault or Localhost.
+          This limits kernel syscall exposure and reduces container escape risk.
+        pattern:
+          spec:
+            securityContext:
+              seccompProfile:
+                type: "RuntimeDefault | Localhost"
+---
+# Kyverno ClusterPolicy: require seccomp profile — WIDE SCOPE, AUDIT ONLY
+#
+# The opt-out half of the ratchet described in the SCOPE MODEL header of
+# cluster-policies.yaml. seccomp RuntimeDefault is the single highest-value
+# control for the namespaces this newly reaches: `wordpress` executes
+# third-party plugin code, `game-hub`/`game-servers` execute third-party mods,
+# and `plex`/`jellyfin` parse attacker-supplied container formats — the exact
+# shape of the container-escape CVEs (CVE-2022-0492, CVE-2023-0386) whose
+# syscalls RuntimeDefault blocks. None of them had ANY seccomp rule before.
+#
+# It ships Audit, not Enforce, on measured grounds: 36 workload files under
+# kubernetes/catalog/ declare no seccompProfile at all, so Enforce here would
+# refuse admission to all of them at their next restart — a node drain would
+# take out the catalog. Fix the workloads, confirm the report is clean, THEN
+# widen the Enforce policy above and delete this one. Never run both at Enforce.
+#     kubectl get clusterpolicyreport -o wide | grep require-seccomp-profile-wide
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-seccomp-profile-wide
+  annotations:
+    policies.kyverno.io/title: Require Seccomp Profile (wide scope, audit)
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Audit-only companion to require-seccomp-profile covering every namespace
+      that is not core/platform infrastructure. Measures the remediation backlog
+      before the Enforce policy is widened.
+spec:
+  validationFailureAction: Audit
+  admission: true
+  background: true
+  rules:
+    - name: check-seccomp-profile-wide
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchExpressions:
+                  - key: infraweaver.io/type
+                    operator: NotIn
+                    values: [core, platform, platform-app, system]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - cilium-secrets
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - monitoring
+                - build
+                - falco
+                - velero
+                - argocd
+                - traefik
+                - dns-system
+                # Already covered at Enforce by the narrow policy above; listing
+                # them here keeps exactly one report per pod.
+                - gatus
+                - infraweaver-console
+                - stirling-pdf
+                - registry
       validate:
         message: >-
           Pod "{{ request.object.metadata.name }}" should set

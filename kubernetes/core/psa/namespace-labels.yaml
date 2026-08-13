@@ -352,6 +352,66 @@ metadata:
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 ---
+# ═════════════════════════════════════════════════════════════════════════════
+# LEAST-TRUSTED WORKLOADS — added 2026-08-12
+# ═════════════════════════════════════════════════════════════════════════════
+# `wordpress` runs third-party plugin code that site owners install themselves,
+# on ~14 pods, and it had NO PSA labels at all. It was therefore inheriting the
+# cluster AdmissionConfiguration default rather than declaring one — the same
+# invisible posture the block above was written to end, except here it applied
+# to the one namespace on the cluster where arbitrary third-party PHP is
+# executed on purpose. A plugin that ships a privileged sidecar or a hostPath
+# mount had nothing stopping it at admission.
+#
+# LEVEL: enforce baseline / audit+warn restricted. Deliberately NOT restricted
+# at enforce. WordPress site pods do not currently set runAsNonRoot,
+# capabilities.drop or seccompProfile, so `enforce: restricted` would refuse
+# admission to every site pod on its next restart — a fleet outage dressed up as
+# a hardening commit. baseline blocks what actually matters here (privileged,
+# hostPath, host namespaces, host ports) and takes effect with zero restarts;
+# audit+warn restricted makes the remaining gap show up in the audit log and in
+# `kubectl apply` warnings so it can be closed workload by workload.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wordpress
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ═════════════════════════════════════════════════════════════════════════════
+# `game-hub` AND `game-servers` ARE MISSING FROM THIS FILE ON PURPOSE
+# ═════════════════════════════════════════════════════════════════════════════
+# They need PSA labels at least as badly as wordpress does — they execute
+# third-party game mods — and they still have none. They are NOT added here
+# because doing so would fire the exact SSA fieldset collision this file's
+# header documents at length:
+#
+#   game-hub      declared by kubernetes/catalog/game-hub/namespace.yaml
+#                 (labels: app.kubernetes.io/part-of: infraweaver)
+#   game-servers  declared by kubernetes/catalog/infraweaver-console/base/
+#                 game-servers-namespace.yaml
+#                 (labels: app.kubernetes.io/managed-by: infraweaver)
+#
+# Every Application applies through the ONE shared `argocd-controller` field
+# manager, which owns a single fieldset per object. Declaring these Namespaces
+# in a second Application makes the two syncs take turns pruning each other's
+# labels — so the PSA labels would appear and disappear on a cycle, which is
+# strictly worse than absent because it reads as fixed. `app.kubernetes.io/
+# part-of: infraweaver` is not cosmetic either: it is the entire match set of
+# set-default-memory-limits (see resource-governance-policies.yaml), so pruning
+# it would silently move that policy's scope too.
+#
+# THE FIX IS THREE LINES IN THE TWO FILES NAMED ABOVE, not a block here:
+#     pod-security.kubernetes.io/enforce: baseline
+#     pod-security.kubernetes.io/audit: restricted
+#     pod-security.kubernetes.io/warn: restricted
+# baseline, not restricted, for the same reason as wordpress above: enforcing
+# restricted would refuse admission to running game servers at their next
+# restart, and evicting somebody's game world is not a change to make from a
+# security sweep.
+---
 # ── Manually-labeled leftover, brought under GitOps ──────────────────────────
 # apps-grafana carries privileged PSA applied by hand (field manager
 # `kubectl-label`, an Update op with no ArgoCD Application behind it) and has

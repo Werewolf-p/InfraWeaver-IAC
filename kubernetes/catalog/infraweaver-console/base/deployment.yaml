@@ -405,6 +405,20 @@ spec:
               name: infraweaver-console-secret
               key: game-hub-power-cron-token
               optional: true
+        # The placement rebalancer's OWN token. It used to ride
+        # GAME_HUB_POWER_CRON_TOKEN, and it is the exception that broke that
+        # sharing rule: `sweepRebalance` evicts pods by their own namespace from
+        # a CLUSTER-WIDE inventory, so the "same namespace maintenance"
+        # justification does not hold for it. Sharing meant the most widely
+        # thought-of cron secret on the platform also authorized pod eviction in
+        # every namespace ArgoCD delivers. Split, for the same reason the
+        # replica-floor sweep already has its own.
+        - name: PLACEMENT_REBALANCE_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: placement-rebalance-cron-token
+              optional: true
         # The wake credential Sleep Fleet hands a doorman so it can wake the
         # server it is parked in front of. This is the PRECONDITION of
         # GAME_HUB_SLEEP_ENABLED above, not a nicety: feature-defaults.ts refuses

@@ -21,6 +21,9 @@
 #   ArgoCD        → ArgoCDAppDegraded, ArgoCDSyncFailed
 #   etcd          → EtcdHighCommitDuration, EtcdMemberDown, and the whole
 #                   kube-prometheus-stack etcd rule group
+#   console reqs  → ConsoleHighLatency, ConsoleHighErrorRate  (ADDED 2026-08-12;
+#                   see that rule for why this file's own omission was the
+#                   costliest one in it)
 #
 # There is no ServiceMonitor for Longhorn, ArgoCD, OpenBao, cert-manager or
 # Kyverno in this cluster. The kube-etcd ServiceMonitor DOES exist but produces
@@ -86,6 +89,51 @@ spec:
               certmanager_certificate_expiration_timestamp_seconds has no
               series; CertificateExpiringSoon/Critical can never fire. Fix:
               cert-manager prometheus.servicemonitor.enabled=true.
+
+        - alert: AlertInputMissingConsoleRequests
+          # ADDED 2026-08-12. This file guarded five families and missed the one
+          # that mattered most: ConsoleHighLatency and ConsoleHighErrorRate were
+          # keyed on `nginx_ingress_controller_*` on a cluster that runs TRAEFIK,
+          # so both had been permanently green since they were written and
+          # NOTHING on this platform could tell that the console was serving
+          # errors. Exactly the shape this file exists to catch, sitting one
+          # directory away from it.
+          #
+          # Two families in one alert because they are one condition — "the
+          # console's request telemetry does not exist" — and `or` fires if
+          # EITHER half is missing, so disabling only the histogram (a bucket or
+          # addServicesLabels change in traefik/values.yaml) is caught too.
+          #
+          # The selector is intentionally the FULL one the alert rules use,
+          # prefix hash and all, not a bare metric-name check. A rename of the
+          # `infraweaver-console-int` IngressRoute, a move out of the `traefik`
+          # namespace, or a provider-suffix change would leave both metric
+          # families healthy while both console rules quietly matched nothing —
+          # a dead rule that looks alive, which is the more dangerous variant
+          # this file already names for kube-etcd.
+          expr: |
+            absent(traefik_service_requests_total{service=~"traefik-infraweaver-console-int-.+@kubernetescrd"})
+            or absent(traefik_service_request_duration_seconds_bucket{service=~"traefik-infraweaver-console-int-.+@kubernetescrd"})
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console request metrics absent — ConsoleHighErrorRate/HighLatency are dead"
+            description: >-
+              No traefik_service_requests_total or
+              traefik_service_request_duration_seconds_bucket series matches the
+              infraweaver-console IngressRoute, so the platform's ONLY signal
+              that the console is answering 5xx or answering slowly cannot fire.
+              Everything else that watches the console watches liveness: the
+              pod-count alert, the Gatus check and all three kubelet probes assert
+              only that /api/ping returns its hardcoded literal. Fix, in order of
+              likelihood: (1) the metrics block in
+              kubernetes/core/traefik/values.yaml was removed or
+              addServicesLabels turned off; (2) manifests/podmonitor.yaml no
+              longer selects the Traefik pods; (3) the IngressRoute
+              traefik/infraweaver-console-int was renamed or moved, which changes
+              the service label and needs the selector in
+              alerts/console-availability.yaml updated in the SAME commit.
 
         - alert: AlertInputMissingEtcd
           expr: absent(up{job="kube-etcd"})

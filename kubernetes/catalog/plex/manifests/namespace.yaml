@@ -1,10 +1,25 @@
 ---
+# PSA: enforce STAYS privileged, audit/warn tightened 2026-08-12.
+#
+# enforce cannot move to baseline while the Deployment sets hostNetwork: true —
+# baseline forbids host namespaces, so tightening it would refuse admission to
+# the only pod in this namespace. The hostNetwork decision and its replacement
+# (a MetalLB LoadBalancer Service) are documented on the pod spec in
+# deployment.yaml; enforce follows that change, it cannot lead it.
+#
+# What DOES move now, at zero admission risk: audit privileged -> restricted and
+# warn baseline. `privileged` on all three meant this namespace was exempt from
+# even being LOOKED at — the one namespace on the cluster running a root,
+# full-capability, host-networked media transcoder was also the one that
+# produced no audit-log entries and no apply-time warnings about it. Now every
+# apply prints the baseline violation and every pod creation records the
+# restricted gap, so the remaining distance is measurable instead of invisible.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: plex
   labels:
     pod-security.kubernetes.io/enforce: privileged
-    pod-security.kubernetes.io/warn: privileged
-    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: restricted
     infraweaver.io/source: community-apps

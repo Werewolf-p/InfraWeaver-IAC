@@ -30,10 +30,27 @@ data:
       },
       "log": { "level": "info" },
       "extensions": {
-        "search": { "enable": true },
-        "ui": { "enable": true }
+        "search": { "enable": false },
+        "ui": { "enable": false }
       }
     }
+# ── Why search/ui are DISABLED (changed 2026-08-12) ──────────────────────────
+# Zot's `ui` extension is a browsable web console and `search` is the GraphQL
+# API behind it. Between them they enumerate the complete image inventory —
+# every repository name, every tag, every CVE report — to anything that gets
+# past the single shared htpasswd credential. That inventory is a map of the
+# platform's internals and of which images are behind on patches, which is
+# reconnaissance handed over for free, and `ui` cannot run without `search`.
+#
+# Nothing in the platform needs them: BuildKit pushes and containerd pulls speak
+# the OCI distribution API on /v2/, which is unaffected. This costs a
+# human-facing convenience and removes an information-disclosure surface from a
+# host whose only authentication is one password shared by every client.
+#
+# Re-enabling is a one-line change if the browser UI is wanted — it is a more
+# defensible one now that the route is gated by `lan-only` (see the IngressRoute
+# at the bottom of this file), because the UI is then LAN-reachable rather than
+# internet-reachable.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -141,9 +158,36 @@ spec:
       port: 5000
       targetPort: http
 ---
-# Browser/API route: registry.int.${BASE_DOMAIN} → Zot. No forward-auth (clients
-# can't SSO); secure-headers only. Lives in the traefik ns (cross-namespace
-# service ref is allowed: traefik runs with allowCrossNamespace=true).
+# Browser/API route: registry.int.${BASE_DOMAIN} → Zot. Lives in the traefik ns
+# (cross-namespace service ref is allowed: traefik runs with allowCrossNamespace=true).
+#
+# ── WHY THIS ROUTE NOW CARRIES lan-only (added 2026-08-12) ───────────────────
+# It could not use forward-auth — docker/buildkit/containerd cannot complete an
+# SSO redirect — and that fact was allowed to stand in for a decision. The
+# result: registry.int is a publicly RESOLVABLE hostname (the cloudflare-proxied
+# annotation below is deliberately "false", so the A record points straight at
+# the origin), with no edge authentication and no rate limit, in front of the
+# registry that serves this platform's own production images.
+#
+# The consequence is not information disclosure, it is code execution. Zot's
+# only gate was one shared htpasswd credential exposed to the entire internet
+# for unlimited guessing; a single successful PUSH over an existing tag means
+# the next pull of that tag runs attacker-chosen code as infraweaver-api. The
+# blast radius is the platform, not the registry.
+#
+# `lan-only` is the control the platform already had and had never wired up —
+# 01-middlewares.yaml defines it and its own comment names "Docker registry
+# pulls" as the intended consumer. It is FIRST in the chain on purpose: deny
+# non-LAN sources before spending any other middleware on the request.
+#
+# rate-limit-public (not -public-cf) is the correct variant precisely BECAUSE
+# cloudflare-proxied is false: with no proxy in front, Traefik sees the real
+# client IP directly, so the limiter buckets per real client. Read the header of
+# core/traefik/manifests/middleware-rate-limit.yaml before changing either.
+#
+# cloudflare-proxied STAYS "false" — see the annotation's own note; proxying
+# mangles OCI chunked blob uploads. lan-only is what compensates for that, and
+# the two must be changed together or not at all.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -165,6 +209,11 @@ spec:
     - match: Host(`registry.int.${BASE_DOMAIN}`)
       kind: Rule
       middlewares:
+        # Order matters: reject non-LAN sources before anything else runs.
+        - name: lan-only
+          namespace: traefik
+        - name: rate-limit-public
+          namespace: traefik
         - name: secure-headers
           namespace: traefik
       services:

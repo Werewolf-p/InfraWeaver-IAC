@@ -58,7 +58,7 @@ spec:
                   valueFrom:
                     secretKeyRef:
                       name: infraweaver-console-secret
-                      key: game-hub-power-cron-token
+                      key: placement-rebalance-cron-token
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -1,0 +1,104 @@
+---
+# Scoped-authorization rollout signal — LogQL, and INERT TODAY.
+#
+# ── READ THIS FIRST: THIS RULE IS NOT RUNNING ────────────────────────────────
+# This platform has NO Loki ruler. kubernetes/monitoring/loki/values.yaml
+# deploys the loki-stack chart with `compactor`, `limits_config` and
+# `table_manager` configured and no `ruler` block at all: no rule storage, no
+# alertmanager_url, no rules ConfigMap mounted, and no LokiRule/PrometheusRule
+# equivalent that can evaluate LogQL. A PrometheusRule cannot hold this
+# expression — Prometheus does not speak LogQL — so the rule is committed here in
+# the ruler's OWN format, inside a ConfigMap, where it is valid Kubernetes YAML,
+# passes the IaC gate, and is one mount away from being live.
+#
+# It is deliberately NOT registered in alerts/alert-pipeline-selfcheck.yaml. That
+# file's guards fire immediately and stay firing, which is right for a control
+# somebody believes is running; this one is labelled unrunnable in its own first
+# paragraph, so a permanent page would add noise rather than honesty. If the
+# ruler is wired up and this rule is NOT loaded, that changes — add a guard then.
+#
+# TO ADOPT IT, three steps, all in kubernetes/monitoring/loki/values.yaml:
+#   1. loki.config.ruler:
+#        storage: { type: local, local: { directory: /rules } }
+#        rule_path: /tmp/loki-rules
+#        ring: { kvstore: { store: inmemory } }
+#        enable_api: true
+#        alertmanager_url: http://kube-prometheus-stack-alertmanager.monitoring:9093
+#   2. mount THIS ConfigMap at /rules/fake (the ruler expects a tenant directory;
+#      `fake` is the tenant id when auth_enabled is false) via
+#      loki.extraVolumes / extraVolumeMounts.
+#   3. confirm delivery end to end before trusting it — the ruler is a separate
+#      Alertmanager client from Prometheus, and an unreachable alertmanager_url
+#      fails silently, which is the failure mode this whole alerting tree exists
+#      to stop.
+#
+# ── WHY THE RULE IS WORTH HAVING ─────────────────────────────────────────────
+# apps/infraweaver-console/src/lib/route-utils.ts logs one JSON line, type
+# "scope-shadow", ONLY when the scoped authorization answer differs from the
+# root answer. Silence is therefore a positive result: a `family` that emits
+# nothing over a long window is provably a no-op under enforcement, which is the
+# completion signal the SCOPED_ENFORCEMENT rollout does not otherwise have. The
+# line has been shipping to Loki via promtail since the seam was written and
+# NOTHING has ever consumed it.
+#
+# Only flip="deny-to-allow" is alerted. It is the alarming direction — scoping
+# would GRANT something the cluster-wide check refuses, i.e. a privilege
+# escalation waiting for a feature flag — and the console already logs it at
+# console.error while the other two go to console.warn. "allow-to-deny" and
+# "unresolved" are rollout findings to read, not to be woken for; query them with
+# the same selector minus the flip filter.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-alerting-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: infraweaver-alerting
+    infraweaver.io/status: not-loaded
+data:
+  scope-enforcement.yaml: |
+    groups:
+      - name: console.scope.enforcement
+        # 1m, matching the shortest evaluation the ruler is useful at. The
+        # count window below is what actually sets sensitivity.
+        interval: 1m
+        rules:
+          - alert: ScopeShadowDenyToAllow
+            # Stream selector uses namespace + container only. Both are set by
+            # promtail on every pod in this cluster and are what the console's
+            # own /api/logs/search queries with; the `app` pod label also
+            # survives into Loki but is one relabel away from not doing so.
+            #
+            # `> 0` with no rate threshold is deliberate, and it is the one
+            # place in this tree where a single occurrence is the right
+            # trigger: this line is emitted only on a DIVERGENCE, so the
+            # healthy value is exactly zero. Any non-zero count means the
+            # scoped resolver would hand out access the root check denies, and
+            # a second occurrence tells an operator nothing the first did not.
+            expr: |
+              sum by (family) (
+                count_over_time(
+                  {namespace="infraweaver-console", container="console"}
+                    | json
+                    | type = "scope-shadow"
+                    | flip = "deny-to-allow"
+                  [15m]
+                )
+              ) > 0
+            # 0m, not the 15m this repo uses elsewhere: count_over_time already
+            # carries a 15-minute window, so a `for` would only delay a signal
+            # that is already smoothed.
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Scoped authorization would GRANT what the root check denies (family {{ $labels.family }})"
+              description: >-
+                The scoped-permission shadow log recorded a deny-to-allow flip
+                for route family {{ $labels.family }}: with SCOPED_ENFORCEMENT on
+                for that family, a request the cluster-wide RBAC check REFUSES
+                would be allowed through. Enforcement must not be switched on for
+                this family until the resolver is fixed. Read the lines with:
+                {namespace="infraweaver-console", container="console"} | json |
+                type = "scope-shadow" — each carries route, method, actor,
+                permissions, scope and both decisions.

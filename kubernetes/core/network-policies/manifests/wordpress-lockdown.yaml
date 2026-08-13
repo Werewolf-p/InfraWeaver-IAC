@@ -20,7 +20,20 @@ metadata:
   namespace: wordpress
   labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}
 spec:
-  endpointSelector: {matchLabels: {"infraweaver.io/component": wordpress}}
+  # WIDENED 2026-08-12 from matchLabels {component: wordpress} to In
+  # [wordpress, wordpress-slot-b]. The old selector matched the BLUE slot only,
+  # so during every zero-downtime core update the freshly-rolled
+  # `wordpress-slot-b` pods were selected by NO policy in this namespace at all
+  # — and under Cilium, an endpoint no policy selects is default-allow in BOTH
+  # directions. The airgap was therefore OFF for the entire duration of each
+  # update, which is precisely the window in which new plugin and core code is
+  # being downloaded and executed. The value set is the real one, not a guess:
+  # infraweaver-foyer's listFleet() selects on
+  # `infraweaver.io/component in (wordpress,wordpress-slot-b)` — see
+  # kubernetes/catalog/infraweaver-foyer/base/rbac.yaml.
+  endpointSelector:
+    matchExpressions:
+      - {key: "infraweaver.io/component", operator: In, values: [wordpress, wordpress-slot-b]}
   ingress:
     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]

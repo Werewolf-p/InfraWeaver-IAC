@@ -47,6 +47,36 @@ api:
 ping:
   entryPoint: "traefik"
 
+# ── Prometheus metrics — DECLARED, not inherited ─────────────────────────────
+# Every value below is already the chart default. Writing them down is the point:
+# manifests/podmonitor.yaml and the console's Cluster Vitals widget both depend
+# on this exposition, and alerts/console-availability.yaml now keys the console's
+# only error/latency signal on traefik_service_*. Until this block existed, all
+# of that rested on a default that a chart bump can flip silently — which is the
+# exact failure class alerts/alert-pipeline-selfcheck.yaml was written for. An
+# undeclared dependency that disappears without a diff is how a control dies.
+#
+#   addEntryPointsLabels  → traefik_entrypoint_requests_total (Cluster Vitals)
+#   addServicesLabels     → traefik_service_requests_total and
+#                           traefik_service_request_duration_seconds_bucket
+#                           (ConsoleHighErrorRate / ConsoleHighLatency)
+#   addRoutersLabels is left at its `false` default: routers carry the same
+#   traffic as their services here, at ~44 IngressRoutes' worth of extra series.
+#
+# BUCKETS ARE THE LOAD-BEARING CHANGE. The chart default is "0.1,0.3,1.2,5.0",
+# and histogram_quantile() returns the highest FINITE bucket bound once the
+# quantile falls in +Inf — so under the default buckets a p95 can never evaluate
+# above 5.0, and `ConsoleHighLatency ... > 5` would have been a second dead rule
+# that merely looked alive. 10.0 and 30.0 make the 5s threshold expressible with
+# room above it. Cost is stated rather than assumed: 5 series per
+# (service, code, method, protocol) becomes 7, ~40% more duration series.
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addServicesLabels: true
+    buckets: "0.1,0.3,1.2,5.0,10.0,30.0"
+
 providers:
   kubernetesCRD:
     enabled: true

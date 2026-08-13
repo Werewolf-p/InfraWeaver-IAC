@@ -6,6 +6,21 @@
 # Mirrors what is LIVE on the cluster. To airgap a new namespace, copy a block
 # (or ../_TEMPLATE.yaml) and change the two namespace references.
 # anchors keep this DRY and readable.
+#
+# ⚠️ THIS FILE IS NO LONGER THE ONLY WAY A NAMESPACE GETS AIRGAPPED, and relying
+# on it as such is what caused the gap it now shares with a policy. "One block
+# per application namespace" was true the day it was written and then quietly
+# stopped being true: hand-writing a block is a step nobody is on the hook for,
+# so the 31 namespaces created since — every on-demand catalog install,
+# vaultwarden and qbittorrent among them — arrived with no policy at all and
+# therefore default-ALLOW in both directions.
+#
+# `generate-default-deny-cnp` in kubernetes/core/kyverno/manifests/
+# resource-governance-policies.yaml now emits this exact shape into every
+# namespace automatically, with synchronize: true. The blocks below stay because
+# each one is independently auditable and several differ from the template; a
+# namespace that appears here MUST also appear in that policy's exclude list, or
+# it ends up with two default-deny policies and two places to change it.
 ---
 # Reusable rule sets (YAML anchors) — defined once, referenced per namespace below.
 # (Comment-only; the blocks below are fully expanded so each is independently auditable.)
@@ -107,6 +122,14 @@ spec:
     - toEntities: [kube-apiserver]
 ---
 # ─────────────────────────────── game-hub ──────────────────────────────────
+# `toEntities: [kube-apiserver]` REMOVED from this catch-all 2026-08-12. It gave
+# every pod in the namespace — including third-party game mods — a live network
+# path to the API server. Token automount is correctly off on the namespace
+# default SA, so there is no credential to use TODAY; but the path is the half
+# of the exploit that persists. Any token obtained by another route (a mounted
+# projected volume, a leaked kubeconfig, a mod that reads one out of a shared
+# volume) becomes immediately usable the moment it exists, with no second
+# control in the way. Re-added below for a labelled subset only.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata: {name: airgap-baseline, namespace: game-hub, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
@@ -120,11 +143,49 @@ spec:
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-hub}}]
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
       toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+---
+# apiserver egress for game-hub, opt-in by label. The documented way to get the
+# path back: put `infraweaver.io/needs-apiserver: "true"` on the POD TEMPLATE
+# that needs it, and say in the same commit why it does. Nothing carries this
+# label today, so this policy currently selects zero endpoints — which is the
+# intended steady state, not an oversight.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: apiserver-egress-labelled, namespace: game-hub, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}}
+spec:
+  endpointSelector: {matchLabels: {"infraweaver.io/needs-apiserver": "true"}}
+  egress:
+    - toEntities: [kube-apiserver]
+---
+# THE ONE MEASURED CONSUMER, granted by name rather than by the catch-all.
+#
+# kubernetes/catalog/game-hub/scale-schedule.yaml runs a CronJob
+# (`game-hub-scale-down`, SA `game-hub-scale-scheduler`) whose entire job is to
+# PATCH statefulsets/scale — it cannot work without apiserver egress. It was
+# relying on the blanket rule removed above, so deleting that rule without this
+# one would have stopped the nightly scale-down silently: the CronJob would time
+# out, `concurrencyPolicy: Forbid` would start skipping runs, and the only
+# symptom would be game servers quietly never scaling down.
+#
+# It is granted here, in a file this package owns, rather than by labelling the
+# pod template — that file belongs to another Application. When someone adds
+# `infraweaver.io/needs-apiserver: "true"` to that CronJob's pod template, delete
+# this policy; the labelled one above will already cover it.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: apiserver-egress-scale-scheduler, namespace: game-hub, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": game-hub-scale-down}}
+  egress:
     - toEntities: [kube-apiserver]
 ---
 # ─────────── game-servers ─────────── (NOTE: game servers also need direct
 # UDP/TCP from the internet for players — add those ports to allowlists.yaml
 # when game pods are deployed; this baseline currently only opens Traefik ingress.)
+#
+# `toEntities: [kube-apiserver]` REMOVED 2026-08-12, same reasoning as game-hub
+# above, and it matters more here: this namespace runs nothing BUT third-party
+# game mods, and not one of them has any reason to reach the Kubernetes API.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata: {name: airgap-baseline, namespace: game-servers, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
@@ -138,4 +199,49 @@ spec:
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": game-servers}}]
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
       toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+---
+# apiserver egress for game-servers, opt-in by label. Selects nothing today and
+# should stay that way — a game server that needs the Kubernetes API is a design
+# question, not a networking one.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: apiserver-egress-labelled, namespace: game-servers, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}}
+spec:
+  endpointSelector: {matchLabels: {"infraweaver.io/needs-apiserver": "true"}}
+  egress:
     - toEntities: [kube-apiserver]
+---
+# ─────────────────────────────── wordpress ─────────────────────────────────
+# THE FAIL-CLOSED FLOOR FOR THIS NAMESPACE, added 2026-08-12.
+#
+# Before this block the wordpress namespace held exactly two policies —
+# wordpress-lockdown.yaml and wordpress-oidc-backchannel.yaml — and both select
+# `infraweaver.io/component in (wordpress, wordpress-slot-b)`. Everything else in
+# the namespace was selected by NOTHING, and under Cilium an endpoint no policy
+# selects is default-allow in both directions. That "everything else" is the
+# site DATABASES: wordpress-lockdown's own egress rule
+# (`toEndpoints: {infraweaver.io/component: db}` on 3306) is the proof they are
+# there. So the WordPress pods were airgapped and the MySQL instances holding
+# every site's content and credentials were wide open to the whole cluster.
+#
+# `endpointSelector: {}` selects every endpoint in the namespace, so anything
+# unlabelled — a DB, a sidecar, a migration job, a pod class that does not exist
+# yet — is default-deny from the moment it starts. Cilium policies are additive,
+# so this takes nothing away from the WordPress pods; they keep every allow in
+# wordpress-lockdown.yaml on top of these.
+#
+# No `toEntities: [kube-apiserver]`: nothing in this namespace calls the
+# Kubernetes API. The console reads the fleet from OUTSIDE, with its own SA.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: airgap-baseline, namespace: wordpress, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": wordpress}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": wordpress}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]

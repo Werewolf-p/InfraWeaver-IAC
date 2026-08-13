@@ -12,8 +12,46 @@ spec:
     - name: oom.kills
       rules:
         - alert: PodOOMKilled
+          # CORRECTED 2026-08-12. This was
+          # `increase(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[10m]) > 0`,
+          # and it could not fire. That series is a GAUGE that is pinned at 1 for
+          # as long as OOMKilled remains the last termination reason, so its
+          # delta over any window is 0 and increase() returns 0 — `> 0` is
+          # unreachable. Dead since it was written, in the same file whose comment
+          # explains why a portable OOM signal was needed.
+          #
+          # max_over_time() alone is the obvious replacement and is also wrong in
+          # the other direction: last_terminated_reason does not reset, so a
+          # container that OOMed once would hold the alert firing until it
+          # terminated again for some other reason or the pod was deleted.
+          #
+          # The pair is what makes it an EVENT. `changes(restarts_total)` is a
+          # real counter and moves exactly once per restart, so the conjunction
+          # reads "OOMKilled is the last thing that happened to this container
+          # AND it restarted inside the window" — it fires once per actual kill
+          # and self-resolves ~10m later. Window matched to the original 10m so
+          # the alert's meaning is unchanged; only its ability to fire is.
+          #
+          # Distinct from NodeOOMKillDetected (node.oom in
+          # alerts/manifests/prometheus-rules.yaml), which reads the kernel
+          # counter and names a NODE. This one names the pod and container, which
+          # is the attribution an operator needs, and it catches cgroup-limit
+          # kills where a single container exceeded its own limit on a node with
+          # memory to spare.
+          #
+          # Both sides are aggregated to (namespace, pod, container) before they
+          # meet. Without that, the left side still carries `reason`, `uid`,
+          # `job` and `instance` and the join is a many-to-many the moment
+          # kube-state-metrics runs more than one replica — which fails the whole
+          # rule at evaluation time rather than degrading quietly.
           expr: |
-            increase(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[10m]) > 0
+            max by (namespace, pod, container) (
+              max_over_time(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[10m])
+            ) > 0
+            and on (namespace, pod, container)
+            max by (namespace, pod, container) (
+              changes(kube_pod_container_status_restarts_total[10m])
+            ) > 0
           for: 0m
           labels:
             severity: warning

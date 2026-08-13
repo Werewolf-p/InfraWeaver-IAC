@@ -78,6 +78,13 @@ secrets:
     replica-floor-cron-token:
       type: password
       length: 64
+    # The placement rebalancer's own token, split out of the Game Hub power
+    # token because that sweep evicts pods cluster-wide rather than in one
+    # namespace. Declared here for the same Retain reason as every key above:
+    # undeclared, it aborts the ENTIRE console secret on first sync.
+    placement-rebalance-cron-token:
+      type: password
+      length: 64
     # Dedicated token for the per-minute alerts-dispatch CronJob. Undeclared, it
     # hit the same Retain hazard every key above documents: ESO aborts the ENTIRE
     # infraweaver-console-secret when any one key is missing from OpenBao, so this

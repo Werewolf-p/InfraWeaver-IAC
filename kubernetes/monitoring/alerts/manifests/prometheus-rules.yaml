@@ -130,6 +130,44 @@ spec:
             summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is in {{ $labels.phase }}"
             description: "Pod has been in {{ $labels.phase }} state for more than 5 minutes."
 
+        # PENDING is the phase PodNotRunning above does not match, and it is the
+        # one a stuck pod actually sits in. A pod that cannot schedule, cannot
+        # pull its image, or is waiting on a volume that will not detach never
+        # reaches Failed or Unknown — it stays Pending indefinitely, and nothing
+        # in this cluster said so. The concrete case: infraweaver-backup is
+        # replicas 1 + strategy Recreate on an RWO longhorn-retain PVC, so losing
+        # its node parks the replacement pod in Pending on Multi-Attach until the
+        # old attachment is cleaned up. That is a total outage of the WordPress
+        # backup datastore presenting as complete silence.
+        #
+        # 15m is derived, not chosen: kube-controller-manager waits
+        # default-not-ready-toleration-seconds (300s) before evicting pods off a
+        # NotReady node, and the Longhorn detach/reattach that follows takes
+        # several minutes more — call it ~10m for a recovery that IS working.
+        # 15m is past that and far short of the hourly sweeps. Scheduling a pod
+        # normally takes seconds, so this is loose by an order of magnitude for
+        # every other cause.
+        #
+        # No namespace exclusion, unlike PodNotRunning: the volume-attachment and
+        # unschedulable cases this exists for are namespace-agnostic, and a pod
+        # pending for a quarter of an hour is worth a look wherever it is.
+        - alert: PodPendingSustained
+          expr: |
+            kube_pod_status_phase{phase="Pending"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} has been Pending for 15 minutes"
+            description: >-
+              Pod {{ $labels.pod }} has not started for 15 minutes, which is
+              longer than any healthy schedule, image pull or volume reattach on
+              this cluster. `kubectl -n {{ $labels.namespace }} describe pod
+              {{ $labels.pod }}` names the cause in Events: FailedScheduling
+              (no node fits, or a DoNotSchedule topology spread cannot be
+              satisfied with a node down), Multi-Attach / FailedAttachVolume (an
+              RWO volume still attached to a lost node), or ImagePullBackOff.
+
     # ── etcd health ──────────────────────────────────────────────────────────────
     - name: etcd.health
       rules:
@@ -328,7 +366,7 @@ spec:
         # hourly, so 3h without a success is at minimum two consecutive misses.
         - alert: ConsoleAutomationCronJobMissedSuccess
           expr: |
-            time() - kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob!~"openbao-token-renew|wordpress-connector-rotation-sweep|wordpress-patch-sweep"} > 10800
+            time() - kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob!~"openbao-token-renew|wordpress-connector-rotation-sweep|wordpress-patch-sweep|alerts-dispatch|wordpress-backup-sweep"} > 10800
               unless on(namespace, cronjob)
             kube_cronjob_spec_suspend{namespace="infraweaver-console"} == 1
           for: 15m
@@ -337,6 +375,40 @@ spec:
           annotations:
             summary: "Console CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not succeeded recently"
             description: "Console automation CronJob {{ $labels.cronjob }} has not reported a successful run in over 3 hours. Its schedule is hourly or faster, so this is at least two consecutive missed runs."
+
+        # alerts-dispatch runs `* * * * *`. Against the 3h threshold above that is
+        # 180 CONSECUTIVE FAILED TICKS before a warning — a cadence and a
+        # threshold three orders of magnitude apart, which is not a loose alert,
+        # it is an absent one. And of every CronJob in this namespace it is the
+        # worst one to be slow about: it is the ONLY thing that turns the
+        # console's own firing alerts into notifications. While it is down the
+        # product is a well-organised list of things nobody has been told about,
+        # and nothing about that state looks wrong from the outside.
+        #
+        # 900s is derived from what the product promises, not from the schedule
+        # doubled (2 minutes would flap on a single slow tick). The smallest
+        # timer the notification policy exposes is group_interval = 5 minutes, so
+        # 15 minutes is three whole delivery intervals and fifteen consecutive
+        # missed ticks. `for: 5m` is short on purpose: the threshold already
+        # encodes fifteen failures, so the `for` only has to cover a
+        # kube-state-metrics scrape gap, not flapping. Total time to page ~20
+        # minutes, against the 180 this job used to get.
+        #
+        # This rule reaching an operator does not depend on the job it watches:
+        # it rides Prometheus → Alertmanager → Discord, which is a separate path
+        # from the console's own dispatcher. A rule about the notifier that
+        # needed the notifier would be worthless.
+        - alert: ConsoleAlertDispatchMissedSuccess
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="infraweaver-console",cronjob="alerts-dispatch"} > 900
+              unless on(namespace, cronjob)
+            kube_cronjob_spec_suspend{namespace="infraweaver-console"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Console alert dispatch has not succeeded in 15 minutes"
+            description: "alerts-dispatch runs every minute and has not reported a success for over 15 minutes — fifteen consecutive missed ticks, three full group_intervals. Nothing is delivering the console's alerts: routes, silences, quiet hours, timers and escalation are all evaluated by this sweep. Inbound alerts keep accumulating in the console and no one is told. Check: kubectl -n infraweaver-console get jobs --sort-by=.metadata.creationTimestamp | tail, then that pod's logs."
 
         # The daily pair (openbao-token-renew is deliberately NOT here — see the
         # group comment). 28h = one full missed run plus 4h of margin, rather than
@@ -355,9 +427,14 @@ spec:
 
         # Scoped away from openbao-token-renew, which OpenBaoTokenRenewCronSuspended
         # in alerts/openbao-token.yaml already covers with a better runbook.
+        # wordpress-backup-sweep excluded alongside openbao-token-renew: it moved
+        # to the CRITICAL cronjob.backup.chain group in alerts/cronjob-health.yaml,
+        # which owns its suspended, missed-success, never-succeeded and absent
+        # cases. Two rules on one condition reach Discord twice and Alertmanager
+        # cannot inhibit across differing alertnames.
         - alert: ConsoleAutomationCronJobSuspended
           expr: |
-            kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob!="openbao-token-renew"} == 1
+            kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob!~"openbao-token-renew|wordpress-backup-sweep"} == 1
           for: 15m
           labels:
             severity: warning
@@ -380,7 +457,7 @@ spec:
         # checking their alerts. A data-driven window survives the restart.
         - alert: ConsoleAutomationCronJobNeverSucceeded
           expr: |
-            kube_cronjob_spec_suspend{namespace="infraweaver-console"} == 0
+            kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob!="wordpress-backup-sweep"} == 0
               unless on(namespace, cronjob)
             kube_cronjob_status_last_successful_time{namespace="infraweaver-console"}
               and on(namespace, cronjob)
@@ -391,3 +468,48 @@ spec:
           annotations:
             summary: "Console CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has NEVER succeeded"
             description: "CronJob {{ $labels.cronjob }} was created over 26 hours ago, is not suspended, and has no recorded successful run at all. The missed-success alerts cannot fire for it because the metric they subtract from does not exist yet. Check the job template, image tag, and RBAC."
+
+        # THE GAP EVERY RULE ABOVE SHARES. All four subtract from, or filter on,
+        # a kube_cronjob_* series — and a deleted or ArgoCD-pruned CronJob emits
+        # NO series at all. `time() - <absent>` returns nothing, `== 0` matches
+        # nothing, and the whole group goes green the instant the object it
+        # watches stops existing. The doctrine was already written down one file
+        # away, in BackupCronJobAbsent ("a prune silently disarms every rule
+        # above"), and then applied only to the four Longhorn names — never to
+        # the fifteen CronJobs in this namespace, which is where the automation
+        # that runs this platform actually lives.
+        #
+        # kube_cronjob_spec_suspend exists from the moment a CronJob is created,
+        # so its absence means the OBJECT is gone, not that a run was missed.
+        # One absent() per name because absent() cannot be aggregated — this is
+        # the one place in this repo where an explicit list is unavoidable, and
+        # the failure direction is the safe one: a CronJob added tomorrow and
+        # forgotten here is merely unguarded against deletion, never falsely
+        # green. Deleting one of these on purpose means deleting its line here in
+        # the SAME commit.
+        #
+        # wordpress-backup-sweep is deliberately NOT in this list — it is
+        # absent-guarded at CRITICAL by BackupCronJobAbsent in
+        # alerts/cronjob-health.yaml, with the rest of the backup chain.
+        - alert: ConsoleAutomationCronJobAbsent
+          expr: |
+            absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="alerts-dispatch"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="openbao-token-renew"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="users-reconcile"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="roster-drift"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="replica-floor-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="placement-rebalance"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="game-hub-power-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="game-hub-capacity-retry"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wiki-atlas-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-connector-health-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-connector-rotation-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-manage-snapshot-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-patch-sweep"})
+            or absent(kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-sandbox-sweep"})
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A console automation CronJob no longer exists"
+            description: "kube-state-metrics reports no CronJob object for infraweaver-console/{{ $labels.cronjob }}. It was deleted or ArgoCD-pruned, and every other console automation alert is now blind to it — a missing object produces no series, so the missed-success, never-succeeded and suspended rules all read as healthy. Check the infraweaver-console ArgoCD application and git history for the deletion. If it was removed on purpose, delete its absent() line here in the same commit."

@@ -11,3 +11,27 @@ categories:
 ingressroute:
   host: vaultwarden.int.${BASE_DOMAIN}
 installed_at: 2026-05-17T22:56:32.156Z
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Read by scripts/seed-catalog-secrets.sh → secret/data/platform/vaultwarden,
+# then pulled into admin-token-secret[value] by manifests/secrets.yaml.
+#
+# Declaring the key here is what makes it EXIST. The seeder generates only what
+# catalog.yaml declares, so an undeclared property means OpenBao never holds it,
+# ESO has nothing to sync, and the pod never receives its env — silently, on
+# every fresh install. The console's catalog.yaml documents the sharper edge of
+# the same rule: under `deletionPolicy: Retain` ESO aborts the ENTIRE secret
+# when any single referenced property is missing rather than skipping that one
+# key, so one undeclared token takes every other key down with it. The
+# ExternalSecret beside this file deliberately does not set Retain, but the
+# declaration is what makes a fresh install work either way.
+secrets:
+  path: platform/vaultwarden
+  keys:
+    # Token for Vaultwarden's /admin panel. Random per install and never in git:
+    # the value this replaced was the literal `change-me`, live since 2026-05-17
+    # on the admin surface of a password vault. Treat that one as compromised —
+    # it is in git history — and this key as its replacement, not its patch.
+    admin-token:
+      type: password
+      length: 48

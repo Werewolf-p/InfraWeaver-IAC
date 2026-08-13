@@ -301,12 +301,14 @@ tests:
         values: '86400+0x3000'
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
         values: '0+0x3000'
-      # the other three backup CronJobs exist, so BackupCronJobAbsent is silent
+      # the other four backup CronJobs exist, so BackupCronJobAbsent is silent
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
         values: '0+0x3000'
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
         values: '0+0x3000'
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-backup-sweep"}'
         values: '0+0x3000'
     alert_rule_test:
       - eval_time: 47h
@@ -370,7 +372,37 @@ tests:
   - interval: 1m
     name: absent backup cronjob fires critical
     input_series:
-      # three of four exist; truenas-backup-daily is missing entirely
+      # four of five exist; truenas-backup-daily is missing entirely
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
+        values: '0+0x120'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
+        values: '0+0x120'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
+        values: '0+0x120'
+      - series: 'kube_cronjob_spec_suspend{namespace="infraweaver-console",cronjob="wordpress-backup-sweep"}'
+        values: '0+0x120'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BackupCronJobAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: longhorn-system
+              cronjob: truenas-backup-daily
+            exp_annotations:
+              summary: 'A backup-chain CronJob no longer exists'
+              description: 'kube-state-metrics reports no CronJob object for longhorn-system/truenas-backup-daily. It was deleted or pruned; every other backup alert is now blind to it. Check the owning ArgoCD application (longhorn, infraweaver-console) and git history.'
+
+  # ── The gap that motivated the promotion: a pruned wordpress-backup-sweep ──
+  # Before 2026-08-12 this CronJob had no absent guard anywhere, so deleting it
+  # took the WordPress fleet's entire backup schedule off the air in silence —
+  # every rule watching it keys on a kube_cronjob_* series that vanishes with the
+  # object. It is the one asserted here because it is the one that was missing.
+  - interval: 1m
+    name: absent wordpress backup sweep fires critical
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-daily"}'
+        values: '0+0x120'
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="truenas-backup-weekly"}'
         values: '0+0x120'
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="local-snapshot-daily"}'
@@ -383,8 +415,17 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
-              namespace: longhorn-system
-              cronjob: truenas-backup-daily
+              namespace: infraweaver-console
+              cronjob: wordpress-backup-sweep
             exp_annotations:
               summary: 'A backup-chain CronJob no longer exists'
-              description: 'kube-state-metrics reports no CronJob object for longhorn-system/truenas-backup-daily. It was deleted or pruned; every other backup alert is now blind to it. Check the longhorn / monitoring-alerts ArgoCD applications and git history.'
+              description: 'kube-state-metrics reports no CronJob object for infraweaver-console/wordpress-backup-sweep. It was deleted or pruned; every other backup alert is now blind to it. Check the owning ArgoCD application (longhorn, infraweaver-console) and git history.'
+      # ConsoleAutomationCronJobAbsent is deliberately NOT asserted here. It
+      # names 14 other console CronJobs, none of which this fixture declares, so
+      # it fires on the fixture's own emptiness rather than on anything the case
+      # is testing. The no-double-page property that matters is the reverse one,
+      # and it is structural: wordpress-backup-sweep does not appear in that
+      # rule's list at all.
+      - eval_time: 35m
+        alertname: ConsoleAutomationCronJobSuspended   # console guard must NOT double-fire
+        exp_alerts: []

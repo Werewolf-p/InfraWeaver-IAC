@@ -153,6 +153,173 @@ spec:
                   memory: 32Mi
 ---
 # -----------------------------------------------------------------------------
+# RULE 1b — the same trick, applied to the thing that had a much bigger hole.
+#
+# THE GAP THIS CLOSES: 31 namespaces with running workloads had NO
+# NetworkPolicy and NO CiliumNetworkPolicy of any kind, which under Cilium means
+# default-ALLOW in both directions. Among them:
+#
+#   vaultwarden   a password vault, reachable from every pod on the cluster
+#   velero        holds the MinIO credentials and every cluster backup
+#   qbittorrent   fetches attacker-controlled content by design
+#   jackett       same, and talks to whatever indexer it is pointed at
+#
+# kubernetes/core/network-policies/manifests/airgap-baseline.yaml opens with
+# "one block per application namespace" and covers eleven. It was accurate the
+# day it was written. Every namespace created since — every on-demand catalog
+# install — arrived with nothing, because the block is hand-written and nobody
+# is on the hook to write one. Exactly the failure mode RULE 1 above fixed for
+# LimitRanges, in a place where the consequence is lateral movement rather than
+# a noisy neighbour.
+#
+# So: same mechanism, same `synchronize: true` self-healing. The generated
+# policy is a byte-for-byte copy of the shape that is already live and
+# Hubble-verified in airgap-baseline.yaml — intra-namespace, cluster DNS,
+# Traefik ingress, monitoring scrape, nothing else — with ONE deliberate
+# subtraction: no `toEntities: [kube-apiserver]`. A freshly installed catalog
+# app has no business talking to the API server, and handing it that path by
+# default is how a stolen token stops being harmless. Namespaces that genuinely
+# need it get an explicit CNP, the way argocd/authentik/kyverno already do in
+# network-policies/manifests/apiserver-egress.yaml.
+#
+# `fromEndpoints: [{}]` / `toEndpoints: [{}]` in a NAMESPACED CiliumNetworkPolicy
+# means "any endpoint in this policy's own namespace" — the same idiom
+# apiserver-egress.yaml uses for the argocd->redis allow. It avoids templating
+# the namespace name into the selector.
+#
+# ⚠️ EXPECTED AND INTENDED CONSEQUENCE, READ BEFORE SYNCING: every namespace not
+# excluded below LOSES OUTBOUND INTERNET on first sync. That is the control
+# working, and it is the whole point for qbittorrent and jackett — but it also
+# means jellyfin metadata lookups, nextcloud app-store traffic, the *arr stack's
+# indexer calls and any catalog app that phones home will stop until a hole is
+# added. Holes go in network-policies/manifests/allowlists.yaml as toFQDNs
+# entries, scoped per app, NOT by widening this template.
+#
+# VERIFY AFTER SYNC — a generate rule that lacks RBAC fails SILENTLY, which is
+# the one failure mode that would leave all 31 namespaces exposed while the
+# policy reads as healthy in git:
+#     kubectl get cnp -A | grep auto-default-deny
+#     kubectl get clusterpolicy generate-default-deny-cnp -o jsonpath='{.status}'
+# The ClusterRole granting ciliumnetworkpolicies to the background controller is
+# at the bottom of this file, next to the LimitRange one.
+# -----------------------------------------------------------------------------
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-default-deny-cnp
+  annotations:
+    policies.kyverno.io/title: Auto-provision Default-Deny CiliumNetworkPolicy
+    policies.kyverno.io/category: Network Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Every namespace gets a default-deny CiliumNetworkPolicy allowing only
+      intra-namespace traffic, cluster DNS, Traefik ingress and monitoring
+      scrape, so no namespace can ever be created into a default-allow posture
+      simply because nobody remembered to hand-write an airgap block for it.
+      Self-healing via synchronize.
+spec:
+  admission: true
+  background: true
+  rules:
+    - name: add-default-deny-cnp
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          # ── Would break the cluster, not harden it ──────────────────────────
+          # Talos static pods, the CNI itself, the storage data plane, and the
+          # LoadBalancer speakers all predate or bypass pod networking.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - cilium-secrets
+                - longhorn-system
+                - metallb-system
+                - local-path-storage
+                - kyverno
+          # ── Legitimately need far more than this template allows ────────────
+          # traefik must reach a backend in EVERY namespace; monitoring must
+          # scrape every namespace; gatus probes every service; velero must
+          # reach MinIO plus every PVC data path. Default-denying any of these
+          # takes out ingress, observability, health and backups respectively.
+          - resources:
+              namespaces:
+                - traefik
+                - monitoring
+                - gatus
+                - velero
+          # ── Already carry a hand-written, Hubble-verified airgap block ──────
+          # kubernetes/core/network-policies/manifests/{airgap-baseline,
+          # infra-airgap,wordpress-lockdown}.yaml. Excluded so each namespace has
+          # exactly one default-deny policy and one place to change it.
+          - resources:
+              namespaces:
+                - build
+                - dns-system
+                - game-hub
+                - game-servers
+                - infraweaver
+                - infraweaver-system
+                - n8n-prod
+                - private-test
+                - registry
+                - tradesphere
+                - wordpress
+          # ── Already run default-deny + an explicit apiserver egress CNP ─────
+          # network-policies/manifests/apiserver-egress.yaml. These are
+          # controllers and operators; the template below would cut them off
+          # from the API server and stop reconciliation cluster-wide.
+          - resources:
+              namespaces:
+                - argocd
+                - authentik
+                - cert-manager
+                - external-dns
+                - external-secrets
+                - falco
+                - infraweaver-console
+                - openbao
+          # ── Structural namespaces that hold no pods ─────────────────────────
+          - resources:
+              namespaces:
+                - default
+                - bootstrap
+                - crds
+      generate:
+        apiVersion: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        name: auto-default-deny
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          metadata:
+            labels:
+              app.kubernetes.io/managed-by: gitops
+              infraweaver.io/posture: airgapped
+              infraweaver.io/governance: auto-default-deny
+          spec:
+            endpointSelector: {}
+            ingress:
+              # Same namespace.
+              - fromEndpoints: [{}]
+              - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+              - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+            egress:
+              - toEndpoints: [{}]
+              - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+                toPorts:
+                  - ports:
+                      - {port: "53", protocol: UDP}
+                      - {port: "53", protocol: TCP}
+                    rules:
+                      dns: [{matchPattern: "*"}]
+---
+# -----------------------------------------------------------------------------
 # RULE 2 — bound the memory burst ratio cluster-wide.
 #
 # This is the direct structural answer to "limits at 494% of allocatable".
@@ -340,6 +507,53 @@ rules:
   - apiGroups: [""]
     resources:
       - limitranges
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+      - get
+      - list
+      - watch
+---
+# -----------------------------------------------------------------------------
+# RBAC for RULE 1b.
+#
+# CiliumNetworkPolicy is a CRD, so it is nowhere in Kyverno's default permission
+# set — unlike LimitRange, there is no chart-provided `:core` role quietly
+# covering for a missing grant here. Without this ClusterRole the generate rule
+# fails SILENTLY and all 31 unprotected namespaces stay default-allow while the
+# policy reads as healthy in git. That is the worst possible failure shape for a
+# security control, so it gets its own role rather than an appended verb.
+#
+# AGGREGATION SELECTS ON THE THREE app.kubernetes.io LABELS BELOW — measured
+# live 2026-08-07, do not copy this from documentation:
+#   kubectl get clusterrole kyverno:background-controller -o jsonpath='{.aggregationRule}'
+#   -> matchLabels: app.kubernetes.io/component=background-controller,
+#                   app.kubernetes.io/instance=kyverno,
+#                   app.kubernetes.io/part-of=kyverno
+# `rbac.kyverno.io/aggregate-to-background-controller: "true"` does NOT match
+# that selector and on its own is inert — that mistake is documented in full
+# above the LimitRange role. It is kept only because it is the label Kyverno's
+# own docs use, so removing it would invite someone to "restore" it.
+#
+# PROOF THAT THIS TOOK EFFECT:
+#   kubectl get clusterrole kyverno:background-controller -o json \
+#     | jq '[.rules[] | select((.apiGroups // []) | index("cilium.io"))]'
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:background-controller:ciliumnetworkpolicies
+  labels:
+    app.kubernetes.io/component: background-controller
+    app.kubernetes.io/instance: kyverno
+    app.kubernetes.io/part-of: kyverno
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+rules:
+  - apiGroups: ["cilium.io"]
+    resources:
+      - ciliumnetworkpolicies
     verbs:
       - create
       - update
