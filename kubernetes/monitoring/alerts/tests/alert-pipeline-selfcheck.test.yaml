@@ -120,31 +120,34 @@ tests:
           - exp_labels:
               severity: warning
               namespace: monitoring
-              secret: alertmanager-healthchecks-url
+              configmap: deadman-watcher-heartbeat
             exp_annotations:
-              summary: 'Dead-man watcher is not provisioned (step 1 of 2)'
-              description: 'No dead-man watcher is provisioned, so the ABSENCE of the heartbeat from this platform is not detected by anything. The public healthchecks.io endpoint this once pointed at was withdrawn on purpose: alert content must not leave this network. The constraint that remains is physics, not preference — a heartbeat that stops when the cluster dies cannot be judged BY the cluster. It does not have to leave the NETWORK, only the CLUSTER: a watcher on the Proxmox host or the ops VM satisfies both. Until one exists, a dead pipeline is something an operator must NOTICE rather than be told about. Do NOT clear this by pointing at a public endpoint; that trades a visible gap for an invisible data leak.'
+              summary: 'Dead-man watcher has never checked in'
+              description: 'The ops-host dead-man watcher has never written its heartbeat ConfigMap, so nothing outside this cluster is checking whether the cluster still answers — and the ABSENCE of a heartbeat is the one failure the cluster cannot report about itself. Fix on the ops host: scripts/deadman-watch.sh in the infrastructure repo, installed to /usr/local/sbin with /etc/infraweaver/deadman.env (0600) and /etc/cron.d/infraweaver-deadman. Verify with `deadman-watch.sh --status` and prove the mail path with `--test`, which exits non-zero if SMTP refused it. Do NOT clear this by pointing at a public endpoint such as healthchecks.io: alert content must not leave this network, and that trade swaps a visible gap for an invisible data leak.'
 
   # ── Escalation step 1 done: the guard clears on its own ───────────────────
-  # A neighbouring Secret in the same namespace must NOT satisfy it — that is
-  # the whole difference between "a secret exists" and "this secret exists".
+  # A neighbouring ConfigMap in the same namespace must NOT satisfy it — that is
+  # the whole difference between "a configmap exists" and "THIS one exists", and
+  # the watcher's heartbeat is the only one that proves somebody is watching.
   - interval: 1m
-    name: escalation secret present clears the guard
+    name: watcher heartbeat present clears the guard
     input_series:
-      - series: 'kube_secret_info{namespace="monitoring",secret="alertmanager-healthchecks-url"}'
+      - series: 'kube_configmap_info{namespace="monitoring",configmap="deadman-watcher-heartbeat"}'
         values: '1+0x120'
     alert_rule_test:
       - eval_time: 90m
         alertname: AlertEscalationSecretMissing
         exp_alerts: []
 
-  # ── Escalation transport, step 2: receiver count still at today's 5 -> page,
-  # and reaching 6 (critical-push added) clears it ──────────────────────────
+  # ── Receiver guard: a REMOVED receiver pages, and restoring it clears ─────
+  # Re-derived 6 -> 5 on 2026-08-13: the sixth receiver was critical-push (ntfy),
+  # and that endpoint was withdrawn on purpose, so `< 6` could only ever fire.
+  # What is still worth guarding is a receiver DISAPPEARING.
   - interval: 1m
-    name: escalation receiver not wired pages until the sixth receiver exists
+    name: a removed receiver pages until it is restored
     input_series:
       - series: 'alertmanager_receivers{namespace="monitoring",pod="alertmanager-kube-prometheus-stack-alertmanager-0"}'
-        values: '5+0x89 6+0x60'
+        values: '4+0x89 5+0x60'
     alert_rule_test:
       - eval_time: 65m
         alertname: AlertEscalationReceiverNotWired
@@ -152,33 +155,27 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
-              summary: 'External alert escalation receiver is not wired (step 2 of 2)'
-              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the matching Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
-      # receiver count goes to 6 at t=90m -> guard clears immediately
+              summary: 'An Alertmanager receiver has been removed'
+              description: 'Alertmanager is running with fewer receivers than the escalation design has: null, discord, email-admin, deadmansswitch and infraweaver-console. One has been removed or failed to load, so some class of alert now has nowhere to go — and Alertmanager exports no per-receiver series, so the count is the only signal there is. Compare the running config against kubernetes/monitoring/kube-prometheus-stack/values.yaml. If the removal was intended, re-derive this threshold in the SAME commit; a guard nobody updates goes quiet on its own.'
+      # receiver count returns to 5 at t=90m -> guard clears immediately
       - eval_time: 95m
         alertname: AlertEscalationReceiverNotWired
         exp_alerts: []
 
-  # ── REGRESSION: the count that disarmed this guard once already ────────────
-  # On 2026-08-09 an unrelated fifth receiver (infraweaver-console, the alert
-  # inbox) was added and the then-current `< 5` stopped firing on its own, while
-  # the escalation leg was still unwired. Five receivers is TODAY's reality and
-  # must still page: the guard is about the escalation receiver existing, not
-  # about receivers existing.
+  # ── REGRESSION: today's real count must be SILENT ─────────────────────────
+  # The old threshold demanded a sixth receiver that the design had deleted, so
+  # this guard fired permanently and taught the mailbox to ignore it. Five is
+  # TODAY's reality — null, discord, email-admin, deadmansswitch,
+  # infraweaver-console — and today's reality must not page.
   - interval: 1m
-    name: five receivers is today's baseline and must still page
+    name: five receivers is today's baseline and must stay silent
     input_series:
       - series: 'alertmanager_receivers{namespace="monitoring",pod="alertmanager-kube-prometheus-stack-alertmanager-0"}'
         values: '5+0x120'
     alert_rule_test:
       - eval_time: 65m
         alertname: AlertEscalationReceiverNotWired
-        exp_alerts:
-          - exp_labels:
-              severity: warning
-            exp_annotations:
-              summary: 'External alert escalation receiver is not wired (step 2 of 2)'
-              description: 'Alertmanager has fewer receivers than the escalation design requires, so the critical-push (ntfy) receiver and the healthchecks.io dead-man leg are not in the running config. Critical alerts are still Discord-only. Enable the staged block in kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only after the matching Secret exists, or the Alertmanager pod will hang in ContainerCreating.'
+        exp_alerts: []
 
   # ── REGRESSION: a DOWN etcd target must not silence the guard's neighbours,
   # and must not be confused with "no target at all". `up == 0` still means the

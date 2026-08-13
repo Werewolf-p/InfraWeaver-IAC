@@ -242,17 +242,38 @@ spec:
           # which is worse than never having had it.
           # Today: null, discord, email-admin, deadmansswitch, infraweaver-console
           # = 5. It becomes 6 when critical-push is added.
-          expr: max(alertmanager_receivers) < 6
+          #
+          # RE-DERIVED 6 -> 5 on 2026-08-13, and this time because the sixth
+          # receiver is never coming. `critical-push` was an ntfy.sh webhook, and
+          # that endpoint was withdrawn ON PURPOSE — alert bodies name namespaces,
+          # nodes and workloads, and ntfy.sh is somebody else's server. See
+          # kube-prometheus-stack/manifests/externalsecret.yaml. Its replacement
+          # is the console's own in-network notifier (ALERT-MANAGER-PLAN.md
+          # Phase 2), which is the `infraweaver-console` receiver ALREADY counted
+          # in the five.
+          #
+          # So `< 6` was demanding a receiver the design had deleted. It could
+          # only ever fire, and an alert that cannot be satisfied is not a guard —
+          # it is training to ignore alerts, which is the same failure this file
+          # was written to prevent. What is still worth guarding is that nobody
+          # REMOVES a receiver, so the threshold tracks the real set.
+          #
+          # The LIMITATION above still stands and is now the only thing keeping
+          # this honest: change the receiver set in values.yaml and re-derive this
+          # number IN THE SAME COMMIT, or it silently stops guarding anything.
+          expr: max(alertmanager_receivers) < 5
           for: 1h
           labels:
             severity: warning
           annotations:
-            summary: "External alert escalation receiver is not wired (step 2 of 2)"
+            summary: "An Alertmanager receiver has been removed"
             description: >-
-              Alertmanager has fewer receivers than the escalation design
-              requires, so the critical-push (ntfy) receiver and the
-              healthchecks.io dead-man leg are not in the running config.
-              Critical alerts are still Discord-only. Enable the staged block in
-              kubernetes/monitoring/kube-prometheus-stack/values.yaml — but only
-              after the matching Secret exists, or the Alertmanager pod will hang
-              in ContainerCreating.
+              Alertmanager is running with fewer receivers than the escalation
+              design has: null, discord, email-admin, deadmansswitch and
+              infraweaver-console. One has been removed or failed to load, so
+              some class of alert now has nowhere to go — and Alertmanager
+              exports no per-receiver series, so the count is the only signal
+              there is. Compare the running config against
+              kubernetes/monitoring/kube-prometheus-stack/values.yaml. If the
+              removal was intended, re-derive this threshold in the SAME commit;
+              a guard nobody updates goes quiet on its own.
