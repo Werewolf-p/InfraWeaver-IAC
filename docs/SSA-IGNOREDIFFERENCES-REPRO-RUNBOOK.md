@@ -1,5 +1,17 @@
 # Runbook: reproduce the silent SSA payload strip (2026-08-07)
 
+> **SUPERSEDED 2026-08-13 — DO NOT RUN THIS FOR THE 2026-08-07 INCIDENT.**
+> **H1 was confirmed in production**, and H2 ruled out, by the 2026-08-12
+> admission-coverage commit: five **validate-only** policies (no mutate shape at
+> all) showed the full signature in one sync, while newly-created policies and
+> policies without a real rules change synced correctly in that same sync — H1's
+> exact predicted trigger. The fix from §4 is applied: `skipBackgroundRequests`
+> is pinned on every rule, and `.spec.rules[].skipBackgroundRequests` is gone from
+> `kubernetes/bootstrap/core-kyverno-policies.yaml`. Evidence and the full
+> rule-out list are in [`gitops-operating-model.md` §7.1](./gitops-operating-model.md).
+> Keep this document for the *next* in-list-ignore suspicion — the §3 phase
+> structure and the §1 safety envelope are the reusable parts.
+
 **Status: WRITTEN, NOT RUN.** This creates live ArgoCD Applications and live
 ClusterPolicies. It is deliberately not bundled with any production sync.
 Execute it as its own attended session, then tear it down in the same session.

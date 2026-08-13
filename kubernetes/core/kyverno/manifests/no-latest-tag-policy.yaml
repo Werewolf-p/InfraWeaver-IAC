@@ -20,6 +20,7 @@ spec:
   background: true
   rules:
     - name: require-image-tag
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
@@ -94,6 +95,7 @@ spec:
   background: true
   rules:
     - name: require-image-tag-wide
+      skipBackgroundRequests: true
       match:
         any:
           - resources:

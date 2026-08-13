@@ -67,6 +67,7 @@ spec:
   background: true
   rules:
     - name: validate-image-registry
+      skipBackgroundRequests: true
       match:
         any:
           - resources:

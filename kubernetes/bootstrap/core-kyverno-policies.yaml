@@ -34,10 +34,29 @@ spec:
       - CreateNamespace=true
       - ServerSideApply=true
       - RespectIgnoreDifferences=true
+  # NEVER add a jqPathExpression that reaches INSIDE .spec.rules here.
+  #
+  # `ClusterPolicy.spec.rules` is an ATOMIC list — the CRD schema declares only
+  # description/items/type, no `x-kubernetes-list-type` — so it cannot be edited
+  # field-by-field. Under `RespectIgnoreDifferences=true` + `ServerSideApply=true`
+  # an ignore path inside that list makes ArgoCD normalise the WHOLE list out of
+  # the desired object and send the live rules back instead. The sync then reports
+  # `serverside-applied` and Succeeded, the object does not move, and the app sits
+  # OutOfSync forever. `argocd app diff` and selfHeal are both blind to it: they
+  # run the same normalisation that built the bad payload.
+  #
+  # It cost two incidents. 2026-08-07: a second rule on mutate-default-sa-automount
+  # never landed. 2026-08-12/13: the opt-out namespaceSelector on the five
+  # `=()`-anchored Enforce policies never landed, leaving wordpress, game-hub and
+  # game-servers — the namespaces running third-party code — outside every
+  # admission rule while the app claimed a successful sync.
+  #
+  # Scalar ignores are fine and stay. `skipBackgroundRequests` is now pinned
+  # explicitly on every rule in git instead (see the preceding commit), so it needs
+  # no ignore at all. See docs/gitops-operating-model.md §7.1.
   ignoreDifferences:
     - group: kyverno.io
       kind: ClusterPolicy
       jqPathExpressions:
         - '.status'
         - '.spec.admission'
-        - '.spec.rules[].skipBackgroundRequests'

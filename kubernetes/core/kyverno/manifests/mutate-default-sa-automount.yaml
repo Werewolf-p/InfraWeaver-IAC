@@ -142,6 +142,7 @@ spec:
     # would make it report nothing until someone happened to edit one.
     # -------------------------------------------------------------------------
     - name: default-sa-must-disable-automount
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
@@ -180,6 +181,7 @@ spec:
     # require-pod-probes.
     # -------------------------------------------------------------------------
     - name: pods-should-not-use-default-sa-token
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
@@ -280,6 +282,7 @@ spec:
   mutateExistingOnPolicyUpdate: false
   rules:
     - name: set-automount-false
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
@@ -335,6 +338,7 @@ spec:
     # pods are untouched and each workload picks it up at its next restart.
     # -------------------------------------------------------------------------
     - name: set-pod-automount-false
+      skipBackgroundRequests: true
       match:
         any:
           - resources:

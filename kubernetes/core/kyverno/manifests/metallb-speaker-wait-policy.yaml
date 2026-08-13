@@ -33,6 +33,7 @@ metadata:
 spec:
   rules:
     - name: inject-wait-for-apiserver
+      skipBackgroundRequests: true
       match:
         any:
           - resources:

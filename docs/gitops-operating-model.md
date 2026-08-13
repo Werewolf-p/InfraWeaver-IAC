@@ -207,17 +207,46 @@ of the fields it was supposed to change **did not send them**. (Had the payload
 carried `spec.rules` at all, even unchanged, ArgoCD would have gained `f:rules`.
 Had it conflicted with another owner, the sync would have failed loudly.)
 
-**Prime suspect (not yet proven** — discriminate it with
-[`SSA-IGNOREDIFFERENCES-REPRO-RUNBOOK.md`](./SSA-IGNOREDIFFERENCES-REPRO-RUNBOOK.md)
-*before* changing any `ignoreDifferences`**).** The app's `ignoreDifferences` includes
-`.spec.rules[].skipBackgroundRequests` — a path reaching *inside* an atomic
-list. `ClusterPolicy.spec.rules` has no `x-kubernetes-list-type: map` (measured:
-the CRD's `spec.rules` schema declares only `description`, `items`, `type`), so
-it is atomic and cannot be surgically edited. Under `RespectIgnoreDifferences`,
-removing an ignored path from inside an atomic list plausibly drops the entire
-list from the payload. This trap has existed since the repo's first commit; it
+**CAUSE — H1 CONFIRMED 2026-08-13. Fixed; do not re-add the in-list ignore.**
+The app's `ignoreDifferences` included `.spec.rules[].skipBackgroundRequests` —
+a path reaching *inside* an atomic list. `ClusterPolicy.spec.rules` has no
+`x-kubernetes-list-type: map` (measured: the CRD's `spec.rules` schema declares
+only `description`, `items`, `type`), so it is atomic and cannot be surgically
+edited. Under `RespectIgnoreDifferences` + `ServerSideApply`, ArgoCD normalises
+the whole list out of the desired object and sends the **live** rules back, so
+the apply writes nothing. This trap existed since the repo's first commit; it
 only detonates when a *real* rules change is pending — the worst possible
 failure shape, because it engages exactly when it matters.
+
+**How it was settled without running the repro.** The 2026-08-12 admission-coverage
+commit reproduced it in production on a *second, independent* shape, which is
+stronger evidence than the synthetic harness would have produced:
+
+- **H2 (mutate-policy-specific) is dead.** All five stuck policies —
+  `require-non-root`, `disallow-host-namespaces`, `disallow-hostpath-volumes`,
+  `disallow-privilege-escalation`, `disallow-privileged-containers` — are
+  **validate-only**. No `mutate.targets`, no `mutateExistingOnPolicyUpdate`,
+  no Kyverno policy-mutating-webhook involvement.
+- **H1's conditionality is confirmed by the same sync.** In that one operation the
+  three newly-created `-wide` policies and `generate-default-deny-cnp` landed
+  perfectly (no live object → no normalisation), and the 21 policies with no real
+  rules change stayed Synced. Only the 5 with a genuine rules diff were dropped.
+  That is exactly H1's predicted trigger, and it also explains why
+  `audit-default-sa-automount` looked like a counter-example on 2026-08-07: it had
+  no real rules change pending, so the strip never engaged.
+- **Everything else was ruled out by measurement**, not by argument: the CMP
+  renders correctly (40/40 docs, selector present, doc set identical to the app's
+  tracked resources); the API server *accepts* the exact payload from the
+  `argocd-controller` field manager (`kubectl apply --server-side
+  --field-manager=argocd-controller --dry-run=server` returns the new selector),
+  so no webhook, RBAC denial or ownership conflict is involved; and no second
+  Application claims these objects (`core` at `kubernetes/core` is non-recursive
+  and manages zero resources). ArgoCD's *diff* path sees the change and reports
+  OutOfSync — only the *apply* path loses it, and the sole transform unique to the
+  apply path is the `RespectIgnoreDifferences` normalisation.
+
+The repro harness in `SSA-IGNOREDIFFERENCES-REPRO-RUNBOOK.md` was therefore never
+run. It is kept for the next in-list-ignore suspicion, not for this one.
 
 **`argocd app diff` IS NOT A DETECTOR FOR THIS. Do not let anyone verify a fix
 with it.** With or without `--server-side-generate`, it applies the app's

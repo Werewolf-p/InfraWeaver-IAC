@@ -88,6 +88,7 @@ spec:
   background: true
   rules:
     - name: add-baseline-limitrange
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
@@ -222,6 +223,7 @@ spec:
   background: true
   rules:
     - name: add-default-deny-cnp
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
@@ -358,6 +360,7 @@ spec:
   background: true
   rules:
     - name: memory-limit-request-ratio
+      skipBackgroundRequests: true
       match:
         any:
           - resources:
