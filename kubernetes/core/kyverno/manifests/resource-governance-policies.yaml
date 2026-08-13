@@ -190,11 +190,43 @@ spec:
 #
 # ⚠️ EXPECTED AND INTENDED CONSEQUENCE, READ BEFORE SYNCING: every namespace not
 # excluded below LOSES OUTBOUND INTERNET on first sync. That is the control
-# working, and it is the whole point for qbittorrent and jackett — but it also
-# means jellyfin metadata lookups, nextcloud app-store traffic, the *arr stack's
-# indexer calls and any catalog app that phones home will stop until a hole is
-# added. Holes go in network-policies/manifests/allowlists.yaml as toFQDNs
+# working. Holes go in network-policies/manifests/allowlists.yaml as toFQDNs
 # entries, scoped per app, NOT by widening this template.
+#
+# THE BLAST RADIUS ABOVE WAS WRITTEN FROM A NAMESPACE LIST THAT IS NOT THIS
+# CLUSTER'S — measured 2026-08-13, `kubectl get ns` returns 37 namespaces and
+# the exclude list below now covers 36 of them. The in-scope set is exactly:
+#     apps-grafana   (holds no pods; standalone grafana is application.yaml
+#                     .disabled and no grafana pod runs anywhere on the cluster)
+# and that is the whole of it. vaultwarden, qbittorrent, jackett, sonarr,
+# radarr, lidarr and prowlarr DO NOT EXIST as namespaces here, so none of the
+# "31 namespaces" above, and none of the *arr-stack breakage predicted in the
+# original text, is reachable from this repo's state. Jellyfin metadata and the
+# Nextcloud app store were never at risk either: both namespaces already run an
+# egress baseline that permits world:443, and both are now excluded below for
+# the ingress reason documented there. Do not re-derive scope from this header
+# — re-measure. The gap this rule really closes today is future namespaces.
+#
+# WHERE THE ORIGINAL LIST CAME FROM, because the mistake is worth naming: those
+# names are kubernetes/catalog/ entries, not namespaces. vaultwarden,
+# qbittorrent, jackett, sonarr, radarr, lidarr and prowlarr are all INSTALLABLE
+# on demand and none is installed. So the predicted breakage is real but in the
+# FUTURE TENSE — it lands the day someone installs one, because the namespace is
+# created then and this rule fires on that admission.
+#
+# NO HOLE IS PRE-GRANTED FOR ANY OF THEM, deliberately:
+#   qbittorrent / jackett  are the workloads this lockdown exists for. They
+#     fetch attacker-controlled content, and default-deny is the correct and
+#     intended posture. Do not widen them to make a download work.
+#   sonarr / radarr / lidarr / prowlarr  need whatever indexers and metadata
+#     providers THAT operator configures at runtime. The hostnames are user
+#     data, not a property of this repo, so there is no honest toFQDNs list to
+#     write in advance — writing a guessed one, or reaching for
+#     `toEntities: [world]` to avoid guessing, would hand the *arr stack the
+#     exact broad egress this rule was built to remove.
+# The correct move on first install is to read the real destinations out of
+# Hubble (`hubble observe --namespace <ns> --verdict DROPPED`) and add a scoped
+# toFQDNs block to allowlists.yaml from measured hostnames.
 #
 # VERIFY AFTER SYNC — a generate rule that lacks RBAC fails SILENTLY, which is
 # the one failure mode that would leave all 31 namespaces exposed while the
@@ -272,6 +304,36 @@ spec:
                 - registry
                 - tradesphere
                 - wordpress
+          # ── Already EGRESS-airgapped, and must stay ingress default-ALLOW ───
+          # These two also carry a hand-written baseline, but it lives in
+          # allowlists.yaml rather than airgap-baseline.yaml, which is why they
+          # were missed above. Both are ALREADY egress default-deny today —
+          # jellyfin-egress and nextcloud-egress each select their pods for
+          # egress — so this template adds NO egress protection here. What it
+          # would add is `ingress:`, and both policies omit ingress ON PURPOSE:
+          # a namespace with no ingress rule is ingress default-ALLOW, and the
+          # comments on both blocks call that out as the design, not an
+          # oversight. Selecting these pods for ingress breaks, specifically:
+          #   jellyfin  native/TV clients — NodePort 8920 and LAN discovery
+          #             7359/1900 UDP arrive from world/host, which the
+          #             template's traefik+monitoring ingress does not cover.
+          #   jellyfin  console RBAC account provisioning (console→8096) and
+          #             the nextcloud media-notify sidecar's library refresh
+          #             (nextcloud→8096). Both have an EGRESS hole in
+          #             allowlists.yaml and no ingress hole, because none was
+          #             ever needed — the hole comments say so explicitly.
+          #   nextcloud user offboard's OCS delete (console→80), same shape.
+          # Excluding is narrower than re-granting all of that: reproducing the
+          # DLNA path alone would mean `fromEntities: [world, host]` on four
+          # ports, which is wider than simply not enforcing ingress. If these
+          # ever should go ingress default-deny, that is a deliberate change
+          # with Hubble evidence for the DLNA clients — not a side effect of a
+          # template. See the postgresql-nextcloud egress block added to
+          # allowlists.yaml, which closes the one real gap this exclusion left.
+          - resources:
+              namespaces:
+                - jellyfin
+                - nextcloud
           # ── Already run default-deny + an explicit apiserver egress CNP ─────
           # network-policies/manifests/apiserver-egress.yaml. These are
           # controllers and operators; the template below would cut them off

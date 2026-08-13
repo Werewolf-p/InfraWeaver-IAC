@@ -333,3 +333,32 @@ spec:
   ingress:
     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": infraweaver-console}}]
       toPorts: [{ports: [{port: "3100", protocol: TCP}]}]
+---
+# WHY: this one is a DENY, not a hole — it closes the single real gap left by
+# excluding nextcloud from generate-default-deny-cnp (kubernetes/core/kyverno/
+# manifests/resource-governance-policies.yaml).
+#
+# nextcloud-egress above selects `app.kubernetes.io/name: nextcloud`, which is
+# the app pod ONLY. Measured 2026-08-13: the namespace also runs
+# postgresql-nextcloud (label `app: postgresql-nextcloud`, postgres:15-alpine,
+# single container, no sidecar), and NOTHING selected it for egress — so the
+# database has been egress default-ALLOW since the namespace was created. The
+# Kyverno template would have covered it incidentally; the exclusion means we
+# cover it deliberately instead, which is the narrower fix anyway because it
+# leaves the app pod's carefully-scoped rules untouched.
+#
+# EGRESS ONLY, and that is load-bearing: nextcloud→postgres:5432 is INGRESS to
+# this pod and is unaffected by an egress rule, so the app keeps its database.
+# Postgres itself dials nothing outbound — no replica, no backup sidecar, no
+# archive_command — so intra-namespace plus cluster DNS is its whole real need.
+# Deliberately no `toEntities: [world]`: a database that can reach the internet
+# is an exfiltration path, and this one has never used it.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: nextcloud-postgres-egress, namespace: nextcloud, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: egress-airgapped}}
+spec:
+  endpointSelector: {matchLabels: {"app": postgresql-nextcloud}}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": nextcloud}}]
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
+      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]

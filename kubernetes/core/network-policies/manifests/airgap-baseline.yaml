@@ -11,9 +11,14 @@
 # on it as such is what caused the gap it now shares with a policy. "One block
 # per application namespace" was true the day it was written and then quietly
 # stopped being true: hand-writing a block is a step nobody is on the hook for,
-# so the 31 namespaces created since — every on-demand catalog install,
-# vaultwarden and qbittorrent among them — arrived with no policy at all and
-# therefore default-ALLOW in both directions.
+# so a namespace created by an on-demand catalog install arrives with no policy
+# at all and is therefore default-ALLOW in both directions.
+#
+# The "31 namespaces, vaultwarden and qbittorrent among them" this paragraph
+# used to claim is NOT this cluster — measured 2026-08-13, `kubectl get ns`
+# returns 37 namespaces and none of them is vaultwarden, qbittorrent, jackett
+# or any *arr app. The real unpolicied set today is one empty namespace
+# (apps-grafana). Re-measure before citing a number here.
 #
 # `generate-default-deny-cnp` in kubernetes/core/kyverno/manifests/
 # resource-governance-policies.yaml now emits this exact shape into every
@@ -21,6 +26,11 @@
 # each one is independently auditable and several differ from the template; a
 # namespace that appears here MUST also appear in that policy's exclude list, or
 # it ends up with two default-deny policies and two places to change it.
+#
+# ⚠️ THAT RULE APPLIES TO allowlists.yaml TOO, and that is exactly how jellyfin
+# and nextcloud were missed: their baselines (jellyfin-egress, nextcloud-egress)
+# live there, not here, so neither appeared in the exclude list. Both are now
+# excluded. When you add a namespace baseline to EITHER file, add the exclude.
 ---
 # Reusable rule sets (YAML anchors) — defined once, referenced per namespace below.
 # (Comment-only; the blocks below are fully expanded so each is independently auditable.)
