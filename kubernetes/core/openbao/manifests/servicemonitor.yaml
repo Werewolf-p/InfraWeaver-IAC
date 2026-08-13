@@ -1,0 +1,45 @@
+# Scrapes OpenBao so the OpenBao alert family has an input.
+#
+# WHY THIS EXISTS: `vault_core_unsealed` had no series at all, so `OpenBaoSealed`
+# could never fire. A sealed OpenBao freezes every ExternalSecret on the platform
+# — the console's 35 tokens, every catalog app's credentials — and the alert
+# written to catch that would have stayed silent. The rule was present and looked
+# like coverage; nothing was behind it. `AlertInputMissingOpenBao` in
+# kubernetes/monitoring/alerts/alert-pipeline-selfcheck.yaml is what surfaced it,
+# and it stays as the guard against this regressing. Exactly the same shape, and
+# the same fix, as the Longhorn ServiceMonitor next door.
+#
+# TWO HALVES ARE REQUIRED and only one of them is this file: OpenBao emits no
+# metrics at all without a `telemetry` stanza, and /v1/sys/metrics demands a
+# token without `unauthenticated_metrics_access`. Both live in ../values.yaml,
+# with the reasoning for why exposing them carries no secret material.
+#
+# ⚠️ Applying the values change RESTARTS the pod, and OpenBao SEALS on restart.
+# The unseal key is in secret openbao/openbao-unseal; unseal immediately after,
+# and check `bao status` rather than assuming. Existing Secrets keep serving
+# while it is sealed — what stops is refresh.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: openbao
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+      app.kubernetes.io/instance: openbao
+  namespaceSelector:
+    matchNames:
+      - openbao
+  endpoints:
+    # The chart's `openbao` Service, not `openbao-internal`: the headless one
+    # resolves to the pod directly and would produce a target per replica, which
+    # on a standalone single-node Raft install is the same pod counted twice.
+    - port: http
+      path: /v1/sys/metrics
+      params:
+        format: ["prometheus"]
+      interval: 30s
+      scrapeTimeout: 10s

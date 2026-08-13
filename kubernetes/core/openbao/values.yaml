@@ -61,6 +61,31 @@ server:
         tls_disable = 1
         address = "[::]:8200"
         cluster_address = "[::]:8201"
+
+        # WITHOUT THIS, `OpenBaoSealed` CAN NEVER FIRE.
+        # `vault_core_unsealed` had no series at all, which the alert pipeline's
+        # own self-check has been reporting as AlertInputMissingOpenBao — a
+        # sealed OpenBao freezes every ExternalSecret on the platform and would
+        # have paged nothing. Metrics are only emitted when a `telemetry` stanza
+        # exists, and /v1/sys/metrics otherwise demands a token, which a
+        # Prometheus scrape has no good way to hold.
+        #
+        # `unauthenticated_metrics_access` exposes counters and gauges — seal
+        # state, request rates, storage latency — and no secret material. The
+        # listener it sits on is ClusterIP-only and already tls_disable = 1 for
+        # in-cluster traffic, so nothing new is reachable from outside.
+        telemetry {
+          unauthenticated_metrics_access = true
+        }
+      }
+
+      # Prometheus scrapes on an interval, so the retention has to outlive it.
+      # disable_hostname keeps the pod name out of every metric NAME (it is
+      # already a label), which otherwise makes a restarted pod look like a new
+      # series and breaks `absent()` — the very function the self-check uses.
+      telemetry {
+        prometheus_retention_time = "30s"
+        disable_hostname = true
       }
 
       storage "raft" {

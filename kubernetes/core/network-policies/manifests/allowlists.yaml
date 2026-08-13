@@ -279,6 +279,24 @@ spec:
     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": gatus}}]
       toPorts: [{ports: [{port: "8200", protocol: TCP}]}]
 ---
+# openbao /v1/sys/metrics — the OTHER half of making OpenBaoSealed able to fire.
+#
+# openbao is on the exclude list of the generate-default-deny-cnp Kyverno policy,
+# so it gets no auto-generated block and its ingress is exactly what is written
+# here: console and gatus, and nothing else. A CiliumNetworkPolicy selecting an
+# endpoint makes that endpoint default-deny for everything it does not name, so
+# adding the ServiceMonitor without this line produces a target that is scraped,
+# times out, and reports OpenBao as down — the same "looks like coverage, is not"
+# failure the ServiceMonitor exists to end.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-monitoring-scrape, namespace: openbao, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+      toPorts: [{ports: [{port: "8200", protocol: TCP}]}]
+---
 # Prometheus /-/healthy (pod port 9090).
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
