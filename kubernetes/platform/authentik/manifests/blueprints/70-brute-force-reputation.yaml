@@ -9,7 +9,8 @@
 # ║  ⚠️ ONE GATE REMAINS AND IT IS NOT OPTIONAL — see §3c. Cloudflare         ║
 # ║  APPENDS to a caller-supplied X-Forwarded-For and Authentik reads the     ║
 # ║  FIRST entry, so the client IP this policy scores is caller-controlled    ║
-# ║  until a Cloudflare Transform Rule overwrites that header at the edge.    ║
+# ║  until a Cloudflare Transform Rule REMOVES that header at the edge — see  ║
+# ║  §3c, "set" is refused by Cloudflare and only "remove" works.             ║
 # ║  Until then this control is both evadable and weaponisable. Do not        ║
 # ║  merge/sync this file before §3c is done.                                ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -112,12 +113,41 @@
 #     administrator's home address. That is a NEW remote DoS on login — exactly
 #     the failure class this file was deferred to avoid.
 #
-# CLOSE IT AT THE EDGE, then this file is safe. Cloudflare Transform Rule →
-# Modify Request Header → Set dynamic: `X-Forwarded-For` = `ip.src` (or remove
-# the visitor-supplied header). That makes XFF single-valued and authoritative,
-# so ips[0] is the real caller. It is Cloudflare config and is not expressible
-# in this repo — there is no Cloudflare provider in terraform/ (DNS is
-# external-dns only), so it is an operator action with no IaC representation.
+# RE-MEASURED 2026-08-13 through the edge rather than reasoned about, because
+# the internal path proves nothing — split-horizon DNS answers auth.<domain>
+# with the Traefik VIP, and over THAT path the same probe was recorded correctly
+# as its LAN source. Forced through Cloudflare with --resolve:
+#
+#   curl --resolve auth.<domain>:443:<cf-edge> \
+#        -H 'X-Forwarded-For: 203.0.113.77' https://auth.<domain>/if/flow/…
+#   → authentik-server: {"remote": "203.0.113.77", …}
+#
+# CLOSE IT AT THE EDGE, then this file is safe — but NOT the way the previous
+# revision of this comment said. ⚠️ CORRECTED 2026-08-13: "Set dynamic
+# `X-Forwarded-For` = `ip.src`" is REFUSED by Cloudflare. Transform Rules may not
+# write the headers that identify the visitor (x-forwarded-for, true-client-ip,
+# x-real-ip, x-forwarded-proto). Anyone following the old instruction would have
+# spent the attempt discovering that.
+#
+# What works is REMOVE. A remove acts on the request as it ARRIVES, so it drops
+# the visitor-supplied header and Cloudflare then writes its own containing the
+# real client IP — single-valued and authoritative, which is what ips[0] needs.
+# Cloudflare's own docs claimed removal was impossible too; that is a
+# documentation bug, cloudflare/cloudflare-docs#27811 (fix PR #28088).
+#
+#   scripts/cloudflare-xff-transform.sh --check | --apply | --verify
+#
+# The rule itself is Cloudflare config with no IaC representation — there is no
+# Cloudflare provider in terraform/ (DNS is external-dns only) — so that script
+# is the closest this repo gets: it applies the rule from an API token minted for
+# the purpose, and, more importantly, PROBES the result.
+#
+# ⚠️ The probe is not a formality. If the removal were applied AFTER Cloudflare
+# adds its own header, the origin would receive NO X-Forwarded-For, Traefik would
+# rewrite it from the TCP peer, and every visitor would again share one Cloudflare
+# edge address — with an IP-reputation lockout on top of it this time. The script
+# treats "recorded an address that is neither the spoof nor the real caller" as a
+# FAILURE for exactly that reason.
 # Cloudflare's own guidance is to prefer CF-Connecting-IP, which cannot be
 # spoofed; that is already what the rate limiters in
 # core/traefik/manifests/middleware-rate-limit.yaml bucket on, which is why
@@ -137,10 +167,15 @@
 # ── §4 ARMING PROCEDURE ─────────────────────────────────────────────────────
 #   0. [DONE 2026-08-13] Fix Traefik `forwardedHeaders.trustedIPs` (Cloudflare
 #      ranges) on web/websecure only.
-#   0b. [OUTSTANDING] Apply the Cloudflare Transform Rule in §3c, then CONFIRM a
-#      real client IP appears in Authentik's event log — including that a
-#      request sent with a bogus `X-Forwarded-For:` is recorded under the real
-#      caller, not the bogus value. This is now the gate.
+#   0b. [OUTSTANDING] Apply the Cloudflare Transform Rule in §3c — Modify
+#      Request Header → REMOVE `X-Forwarded-For` (not Set; see §3c) — then
+#      CONFIRM a real client IP appears in Authentik's event log, including that
+#      a request sent with a bogus `X-Forwarded-For:` is recorded under the real
+#      caller, not the bogus value. This is now the gate. One command:
+#          bash scripts/cloudflare-xff-transform.sh --apply    # needs CF_TRANSFORM_TOKEN
+#          bash scripts/cloudflare-xff-transform.sh --verify   # needs neither token nor rule
+#      Measured 2026-08-13 with --verify: SPOOFABLE. Do not close this line on
+#      anything less than that command printing AUTHORITATIVE.
 #   1. [PARTIAL] Break-glass is armed but not exercised (last_login NULL).
 #      Verify a real login with it before relying on any lockout.
 #   2. [DONE] `git mv 70-brute-force-reputation.yaml.DEFERRED 70-brute-force-reputation.yaml`

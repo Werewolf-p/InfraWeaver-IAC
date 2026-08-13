@@ -158,9 +158,14 @@ logs:
 # caller sending `X-Forwarded-For: 1.2.3.4` produces `1.2.3.4, <real client>` at
 # the origin and Authentik records 1.2.3.4. This change makes the recorded IP
 # per-client instead of per-edge, which is a strict improvement, but it does NOT
-# make it trustworthy. Closing that requires a Cloudflare Transform Rule that
-# overwrites the request header X-Forwarded-For with `ip.src` (or removes the
-# visitor-supplied one) — edge config, not expressible in this repo. Cloudflare's
+# make it trustworthy. ⚠️ CORRECTED 2026-08-13: closing it requires a Cloudflare
+# Transform Rule that REMOVES the visitor-supplied X-Forwarded-For. Cloudflare
+# refuses to SET that header (nor true-client-ip / x-real-ip / x-forwarded-proto),
+# so the "overwrite with ip.src" this comment used to recommend cannot be applied
+# at all; a remove runs against the arriving request, after which Cloudflare
+# writes its own single authoritative value. Apply and PROVE it with
+# `scripts/cloudflare-xff-transform.sh`. Edge config, not expressible in this
+# repo beyond that script. Measured 2026-08-13: still SPOOFABLE. Cloudflare's
 # own guidance is to prefer CF-Connecting-IP, which cannot be spoofed; that is
 # already what the rate limiters in manifests/middleware-rate-limit.yaml bucket
 # on, and it is why they are safe today and this is not yet.

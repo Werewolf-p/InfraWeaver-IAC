@@ -208,11 +208,19 @@ blueprints:
     #     is a NEW remote DoS on login, created by adding a security control.
     #
     # WHY IT COULD NOT SIMPLY BE FIXED TODAY, measured rather than assumed:
-    #   * The Cloudflare token this platform holds (console secret
-    #     `cloudflare-api-token`) verifies as active but is DNS-scoped: reading
+    #   * The Cloudflare token this platform holds is DNS-scoped: reading
     #     zones/<id>/rulesets/phases/http_request_late_transform/entrypoint
-    #     returns "Authentication error". The Transform Rule needs a token with
-    #     Zone → Transform Rules → Edit, or a hand edit in the dashboard.
+    #     returns "Authentication error". Re-checked 2026-08-13 — the console's
+    #     `cloudflare-api-token` and external-dns's are the SAME token (identical
+    #     digest), so there is no second, broader one to reach for. The Transform
+    #     Rule needs a token with Zone → Transform Rules → Edit, or a hand edit in
+    #     the dashboard.
+    #   * ⚠️ AND THE PLANNED RULE WAS THE WRONG ONE. "Set dynamic X-Forwarded-For
+    #     = ip.src" is refused by Cloudflare — Transform Rules may not WRITE the
+    #     visitor-identifying headers. Only REMOVE works, after which Cloudflare
+    #     writes its own single authoritative value. Corrected in the blueprint's
+    #     §3c; `scripts/cloudflare-xff-transform.sh` applies the remove and probes
+    #     the result end-to-end through the edge.
     #   * Reading CF-Connecting-IP instead is not available: grepped on the
     #     running pod, /authentik/root/middleware.py:198 consults exactly one
     #     header, HTTP_X_FORWARDED_FOR. `listen.trusted_proxy_cidrs` in
@@ -227,7 +235,9 @@ blueprints:
     # attribution, and it is exactly why the lockout may not be armed on top of
     # it. Re-arm by restoring this line ONLY after §3c is confirmed live, per
     # step 0b of the blueprint's arming procedure — the check is that a request
-    # sent with a bogus X-Forwarded-For is recorded under the real caller.
+    # sent with a bogus X-Forwarded-For is recorded under the real caller, and it
+    # is one command: `bash scripts/cloudflare-xff-transform.sh --verify`, which
+    # must print AUTHORITATIVE. It printed SPOOFABLE on 2026-08-13.
     # `scripts/validate-iac.sh` gate 6 fails the build if this line comes back
     # while the blueprint still marks §3c outstanding.
     #   - authentik-blueprint-brute-force
