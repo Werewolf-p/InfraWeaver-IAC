@@ -1,9 +1,38 @@
+# PSA labels live HERE, not in kubernetes/core/psa/namespace-labels.yaml. This
+# Application declares the `game-servers` Namespace, and all Applications share
+# the one `argocd-controller` SSA field manager, which owns a single fieldset
+# per object — declaring this Namespace in a second Application would make the
+# two syncs take turns pruning each other's labels, including
+# `app.kubernetes.io/managed-by: infraweaver`. See the block in
+# core/psa/namespace-labels.yaml that prescribes exactly this change.
+#
+# Measured against the live cluster 2026-08-13:
+#
+#   $ kubectl label ns game-servers pod-security.kubernetes.io/enforce=baseline \
+#       --dry-run=server --overwrite
+#   namespace/game-servers labeled (server dry run)   # ← no warnings
+#
+# The namespace holds no workloads today; the console provisions game servers
+# into it on demand. baseline is the right ceiling for that: the console reaches
+# players through MetalLB LoadBalancer Services out of vlan3-pool (see
+# game-servers-pool.yaml), NOT hostNetwork or hostPort, so nothing in the
+# provisioning path needs a control that baseline withholds.
+#
+# enforce is deliberately NOT restricted. Game server images are third-party mod
+# stacks that overwhelmingly run a root init to chown their data volume before
+# dropping privilege — the same shape that already fails restricted in the
+# sibling `game-hub` namespace. Enforcing it here would make the console's
+# provisioning fail at admission for most images with no operator-visible cause.
+# audit/warn=restricted records the gap on every pod create instead.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: game-servers
   labels:
     app.kubernetes.io/managed-by: infraweaver
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
 ---
 # Disable token automount on the namespace default SA. Fails closed for any pod
 # that does not explicitly opt in. Applies to pods created after this is synced.

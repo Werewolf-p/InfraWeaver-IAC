@@ -68,7 +68,7 @@ tests:
               namespace: infraweaver-console
             exp_annotations:
               summary: 'Console Authentik API token expires in under 60 days'
-              description: "The console's Authentik API token `iw-console-api-token` has less than 60 days left (59d 0h 0m 0s remaining) and nothing renews it. Rotate it on a day you choose, not on the day it lapses: the procedure is manual and needs the OpenBao root token, so it cannot be done in the five minutes before a demo. Follow the rotation record in docs/BREAK-GLASS.md §10 (\"Resolved 2026-08-07 — `iw-admin-token` ROTATED and deleted\"), which is the exact sequence that minted this token. The replacement MUST keep the identifier `iw-console-api-token` or this metric stops existing and you get an Unobservable page instead."
+              description: "The console's Authentik API token `iw-console-api-token` has less than 60 days left (59d 0h 0m 0s remaining) and nothing renews it. Rotate it on a day you choose, not on the day it lapses: run `bash scripts/rotate-authentik-console-token.sh` (`--check` first to see where you stand, `--dry-run` for the plan). It rotates the existing token's KEY in place, so the identifier this metric looks up cannot drift. It still needs kubectl-admin and it restarts the console, so it is not a five-minutes-before-a-demo job. Background and the manual fallback: docs/BREAK-GLASS.md §10."
       # 60d/14d are two thresholds, not one: crossing the first must not page.
       - eval_time: 1h
         alertname: AuthentikConsoleTokenExpiryImminent
@@ -103,7 +103,7 @@ tests:
               namespace: infraweaver-console
             exp_annotations:
               summary: 'Console Authentik API token expires in under 14 days'
-              description: "The console's Authentik API token `iw-console-api-token` has less than 14 days left (13d 0h 0m 0s remaining; a negative value means it has ALREADY lapsed). Once it lapses every Authentik call the console makes returns 401 — user provisioning, invitations, group sync, RBAC assignment and every WordPress per-site access grant stop, quietly, because they fail one request at a time rather than all at once. Rotate NOW, following docs/BREAK-GLASS.md §10, keeping the identifier `iw-console-api-token`."
+              description: "The console's Authentik API token `iw-console-api-token` has less than 14 days left (13d 0h 0m 0s remaining; a negative value means it has ALREADY lapsed). Once it lapses every Authentik call the console makes returns 401 — user provisioning, invitations, group sync, RBAC assignment and every WordPress per-site access grant stop, quietly, because they fail one request at a time rather than all at once. Rotate NOW: `bash scripts/rotate-authentik-console-token.sh --yes`. It preserves the identifier `iw-console-api-token` by rotating the existing token's key in place. Manual fallback: docs/BREAK-GLASS.md §10."
       - eval_time: 1h
         alertname: AuthentikConsoleTokenExpiringSoon
         exp_alerts:
@@ -113,7 +113,7 @@ tests:
               namespace: infraweaver-console
             exp_annotations:
               summary: 'Console Authentik API token expires in under 60 days'
-              description: "The console's Authentik API token `iw-console-api-token` has less than 60 days left (13d 0h 0m 0s remaining) and nothing renews it. Rotate it on a day you choose, not on the day it lapses: the procedure is manual and needs the OpenBao root token, so it cannot be done in the five minutes before a demo. Follow the rotation record in docs/BREAK-GLASS.md §10 (\"Resolved 2026-08-07 — `iw-admin-token` ROTATED and deleted\"), which is the exact sequence that minted this token. The replacement MUST keep the identifier `iw-console-api-token` or this metric stops existing and you get an Unobservable page instead."
+              description: "The console's Authentik API token `iw-console-api-token` has less than 60 days left (13d 0h 0m 0s remaining) and nothing renews it. Rotate it on a day you choose, not on the day it lapses: run `bash scripts/rotate-authentik-console-token.sh` (`--check` first to see where you stand, `--dry-run` for the plan). It rotates the existing token's KEY in place, so the identifier this metric looks up cannot drift. It still needs kubectl-admin and it restarts the console, so it is not a five-minutes-before-a-demo job. Background and the manual fallback: docs/BREAK-GLASS.md §10."
 
   # ── State 1, already lapsed: the gauge goes NEGATIVE, not absent ───────────
   # This is the case a naive `> 0` guard would swallow. The exporter keeps
@@ -138,7 +138,7 @@ tests:
               namespace: infraweaver-console
             exp_annotations:
               summary: 'Console Authentik API token expires in under 14 days'
-              description: "The console's Authentik API token `iw-console-api-token` has less than 14 days left (-1d 0h 0m 0s remaining; a negative value means it has ALREADY lapsed). Once it lapses every Authentik call the console makes returns 401 — user provisioning, invitations, group sync, RBAC assignment and every WordPress per-site access grant stop, quietly, because they fail one request at a time rather than all at once. Rotate NOW, following docs/BREAK-GLASS.md §10, keeping the identifier `iw-console-api-token`."
+              description: "The console's Authentik API token `iw-console-api-token` has less than 14 days left (-1d 0h 0m 0s remaining; a negative value means it has ALREADY lapsed). Once it lapses every Authentik call the console makes returns 401 — user provisioning, invitations, group sync, RBAC assignment and every WordPress per-site access grant stop, quietly, because they fail one request at a time rather than all at once. Rotate NOW: `bash scripts/rotate-authentik-console-token.sh --yes`. It preserves the identifier `iw-console-api-token` by rotating the existing token's key in place. Manual fallback: docs/BREAK-GLASS.md §10."
       # An expired token is still a MEASURED token: it must not read as blind.
       - eval_time: 3h
         alertname: AuthentikConsoleTokenUnobservable

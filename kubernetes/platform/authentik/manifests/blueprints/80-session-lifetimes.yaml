@@ -1,0 +1,117 @@
+---
+# ── Session lifetime — put an ABSOLUTE cap on authenticated sessions ─────────
+#
+# Closes the "no absolute cap" half of the lifetimes audit finding. All four
+# user_login stages on this instance ran with the Authentik model default,
+# `session_duration: seconds=0`, which is not a policy — it is the absence of
+# one.
+#
+# ── WHAT seconds=0 ACTUALLY DID, read from the running pod ──────────────────
+# `UserLoginStage.set_session_duration` (authentik/stages/user_login/stage.py)
+# branches on the value:
+#
+#     delta == 0  ->  self.request.session.set_expiry(0)
+#     delta != 0  ->  self.request.session.set_expiry(delta)
+#
+# `set_expiry(0)` means "browser-close cookie". Django then has no stored
+# expiry for the session, so `get_expiry_date()` falls back to
+# SESSION_COOKIE_AGE — measured live at 86400.0 (24h) — and authentik's session
+# engine (authentik/core/sessions.py) writes `"expires": self.get_expiry_date()`
+# on every save. The expiry is therefore RECOMPUTED as now+24h each time the
+# session is written, i.e. it slides. Nothing bounds the total age of an
+# authenticated session; a browser that keeps its cookie renews forever.
+#
+# `set_expiry(delta)` is the opposite: Django stores an absolute datetime in
+# the session, `get_expiry_date()` returns that fixed datetime, and
+# SESSION_SAVE_EVERY_REQUEST is False on this instance — so the value below is
+# a HARD cap measured from login, not an idle timeout, and it does not slide.
+#
+# ── WHY 12 HOURS, AND NOT LESS ──────────────────────────────────────────────
+# The console depends on the live Authentik SSO session to make its own
+# re-authentication SILENT. Measured from 30 days of `authorize_application`
+# events, the cadence is:
+#
+#     InfraWeaver Console               ~every 30 min
+#     InfraWeaver Console (forward-auth) ~every 60 min   (= access_token_validity)
+#
+# Each of those is a redirect that is invisible to the user only for as long as
+# the Authentik session behind it is still valid. The console additionally
+# fails closed at GROUP_STALENESS_MAX_MS = 1h
+# (InfraWeaver-platform apps/infraweaver-console/src/lib/auth.ts:26), so any
+# session_duration at or below ~1h converts a silent redirect into a real login
+# prompt on an hourly clock, fleet-wide.
+#
+# 12h clears that floor by 12x, and covers a full working day: one interactive
+# login in the morning and none before the next. 8h would put the prompt in the
+# middle of the afternoon for anyone who starts early; 24h would only restate
+# the ceiling that already exists by accident.
+#
+# ── remember_me_offset STAYS AT 0, DELIBERATELY ─────────────────────────────
+# A non-zero offset renders a "remember me" checkbox whose whole function is to
+# extend the session PAST the cap set here. Adding one would hand the user a
+# button that undoes this file.
+#
+# ── DELIVERY ────────────────────────────────────────────────────────────────
+# Mounted into the authentik *worker* at
+# /blueprints/mounted/cm-authentik-blueprint-session-lifetimes/ because it is
+# listed in `blueprints.configMaps` in ../../values.yaml. A ConfigMap that is
+# not in that list is never mounted and never applied — it would look like
+# config-as-code while doing nothing.
+#
+# ── ROLLBACK ────────────────────────────────────────────────────────────────
+# Revert this file and drop the values.yaml list entry. Sessions already issued
+# keep the expiry they were stamped with at login; the change only affects
+# logins after the blueprint applies. There is no data migration either way.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-session-lifetimes
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  session-lifetimes.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Session Lifetimes
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Absolute 12h cap on authenticated sessions. Replaces the
+          seconds=0 default, which left session expiry sliding on every
+          write with no ceiling on total session age.
+    entries:
+      # All four stages are UPDATED, not created — each was verified to exist
+      # live before this file was written. `state: present` with a `name`
+      # identifier updates only the attrs listed here and leaves every other
+      # field on the stage untouched.
+      #
+      # All four are covered on purpose. Capping only the password path would
+      # leave the source, enrolment and invitation paths issuing uncapped
+      # sessions — the same session cookie, reached by a different door.
+      - model: authentik_stages_user_login.userloginstage
+        state: present
+        identifiers:
+          name: default-authentication-login
+        attrs:
+          session_duration: hours=12
+
+      - model: authentik_stages_user_login.userloginstage
+        state: present
+        identifiers:
+          name: default-source-authentication-login
+        attrs:
+          session_duration: hours=12
+
+      - model: authentik_stages_user_login.userloginstage
+        state: present
+        identifiers:
+          name: default-source-enrollment-login
+        attrs:
+          session_duration: hours=12
+
+      - model: authentik_stages_user_login.userloginstage
+        state: present
+        identifiers:
+          name: default-invitation-login
+        attrs:
+          session_duration: hours=12

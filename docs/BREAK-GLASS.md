@@ -383,7 +383,7 @@ it means you cannot fix Authentik through anything that depends on Authentik.
 
 | Target | How to reach it without Authentik |
 | --- | --- |
-| Authentik itself | `kubectl -n authentik logs/exec/rollout`; check `authentik-postgresql-0` and `authentik-redis-master-0` first — the server is healthy far more often than its dependencies |
+| Authentik itself | `kubectl -n authentik logs/exec/rollout`; check `authentik-postgresql-0` first — the server is healthy far more often than its dependency. (There is only ONE dependency now: `authentik-redis-master-0` was deleted 2026-08-13, unused since Authentik dropped Redis in 2025.10.) |
 | ArgoCD | No UI login exists. Operate on CRs: `kubectl -n argocd get applications`, `kubectl -n argocd patch application <name> --type merge -p '{"spec":{"syncPolicy":null}}'` to stop auto-sync fighting a manual fix |
 | Longhorn, Traefik dashboard, Homepage, console | `kubectl port-forward` to the service; forward-auth only guards the ingress path |
 | OpenBao | `kubectl -n openbao port-forward svc/openbao 8200:8200`, then `BAO_ADDR=http://127.0.0.1:8200 bao login` with the offline root token. Seal is Shamir, 1 share, threshold 1, with an autounseal sidecar backed by the `openbao-unseal` Secret in the `openbao` namespace — if that Secret is lost, the offline unseal key is the only way back |
@@ -641,9 +641,61 @@ none of which a hardcoded date could ever see. The artifacts:
 
 Thresholds are 60d/14d, not the 30d/7d used for the OpenBao token next door.
 That is deliberate: OpenBao's token is renewed by a CronJob, so its warning
-means "an automated loop needs a nudge". This one has no automation, and
-replacing it needs the OpenBao **root** token (step 2 above) — scheduled
-operator time with a credential that lives offline. Two months' notice, not one.
+means "an automated loop needs a nudge". This one is not renewed by anything, and
+replacing it needs the OpenBao **root** token (step 2 above). Two months' notice,
+not one.
+
+### 10a. Rotating it — `scripts/rotate-authentik-console-token.sh` (added 2026-08-13)
+
+The five steps recorded above are now a script. It is the supported path; the
+manual sequence stays documented as the fallback and as the explanation of what
+the script does.
+
+```bash
+bash scripts/rotate-authentik-console-token.sh --check     # read-only: who owns it, expiry, key match
+bash scripts/rotate-authentik-console-token.sh --dry-run   # print the plan, change nothing
+bash scripts/rotate-authentik-console-token.sh             # rotate, with a confirmation prompt
+bash scripts/rotate-authentik-console-token.sh --yes --lifetime-days=365
+```
+
+**It rotates the KEY of the existing Token row in place** rather than minting a
+replacement and deleting the old one. That is what makes the rotation invariant
+below unbreakable by construction: identifier, intent, owner and description
+cannot drift because no new row is ever created, and there is never a moment
+with two tokens or with none.
+
+**Ordering is deliberate: OpenBao is written BEFORE Authentik is updated.** If
+the OpenBao write fails, Authentik still holds the old key and the running
+console is unaffected — retry and nothing was lost. The reverse order would
+401 every console→Authentik call the instant Authentik changed, regardless of
+whether the rest of the sequence succeeded.
+
+> ⚠️ **A CONSOLE RESTART IS REQUIRED, and the script always does one.** The
+> console consumes the token as an environment variable
+> (`kubernetes/catalog/infraweaver-console/base/deployment.yaml`:
+> `AUTHENTIK_TOKEN` ← `secretKeyRef infraweaver-console-secret/authentik-token`)
+> and reads `process.env.AUTHENTIK_TOKEN` at request time. Kubernetes injects
+> `secretKeyRef` env vars **once, at container start** — ESO re-syncing the
+> Secret updates the Secret but NOT the environment of a running pod. So the
+> ExternalSecret force-sync is necessary but not sufficient. The restart is a
+> zero-downtime rolling update; the only visible effect is a brief window where
+> console→Authentik calls fail.
+>
+> **To make rotation restart-free** the console would have to read the token
+> from a projected file at use-time instead of from `process.env` — a code
+> change across `lib/authentik.ts`, `lib/sso/authentik-client.ts`,
+> `lib/external-routes-server.ts` and `api/security/auth-events/route.ts`, plus
+> a volume mount. Deliberately NOT done as part of adding rotation: it
+> re-plumbs an auth-critical path, and a rolling restart is cheap.
+
+What the script verifies for you, in order: the token exists and is still owned
+by `svc-infraweaver-console`; Authentik's key and the live Kubernetes Secret
+agree *before* it starts; the OpenBao KV version actually incremented and all
+~30 sibling properties survived the `patch`; the Kubernetes Secret really
+carries the new value before it restarts anything; and finally
+`/core/users/me/` from inside a running console pod returns
+`svc-infraweaver-console`. It then prints the live token inventory so the
+two-token baseline below can be eyeballed in the same run.
 
 > **ROTATION INVARIANT — a replacement token MUST keep the identifier
 > `iw-console-api-token`.** The lookup matches that identifier exactly, and

@@ -258,7 +258,6 @@ Applications not Healthy at generation time:
 | Namespace | PVC | StorageClass | Size | Phase |
 |---|---|---|---|---|
 | authentik | data-authentik-postgresql-0 | local-path | 2Gi | Bound |
-| authentik | redis-data-authentik-redis-master-0 | local-path | 256Mi | Bound |
 | game-hub | gt-new-horizons-container | longhorn-game | 60Gi | Bound |
 | game-hub | gt-new-horizons-container-local | local-path-retain | 30Gi | Bound |
 | game-hub | gt-new-horizons-container-portable | longhorn | 60Gi | Bound |

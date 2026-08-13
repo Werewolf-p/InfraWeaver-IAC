@@ -89,6 +89,16 @@ def main():
         slug = f"{sub}-fwd"
         pname = f"{title(sub)} Forward-Auth Provider"
         policy = f"policy-{GROUP[sub]}" if sub in GROUP else "policy-admins-only"
+        # refresh_token_validity is pinned rather than left to Authentik's
+        # `days=30` model default. ProxyProvider subclasses OAuth2Provider, so
+        # it carries the field even though the forward-auth outpost does not
+        # request offline_access today and therefore holds no refresh token.
+        # It is set here because this template is the ONLY thing standing
+        # between a newly discovered *.int host and a live provider — a host
+        # added tomorrow must not inherit a 30-day credential ceiling by
+        # default. See the header of manifests/blueprint-apps.yaml for why
+        # days=30 is worse than it looks (refresh tokens outlive their session
+        # and rotation resets their expiry).
         e.append(f"""      - model: authentik_providers_proxy.proxyprovider
         state: present
         identifiers: {{ name: {pname} }}
@@ -98,6 +108,7 @@ def main():
           external_host: "https://{host}"
           authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
           invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+          refresh_token_validity: days=1
       - model: authentik_core.application
         state: present
         identifiers: {{ slug: {slug} }}

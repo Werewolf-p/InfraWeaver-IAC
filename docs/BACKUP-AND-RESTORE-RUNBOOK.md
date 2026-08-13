@@ -87,17 +87,23 @@ things and were themselves entirely unprotected:
 > shipped, and read back off the NAS — see §8 items 5–7 for the exact remaining
 > steps and who owns each.
 
-> ⚠️ **The two Authentik PVCs carry an annotation that protects nothing.**
-> `authentik/data-authentik-postgresql-0` (pinned to **talos-prod-cp2**) and
-> `authentik/redis-data-authentik-redis-master-0` (pinned to **talos-prod-cp3**)
-> both carry `recurring-job-group.longhorn.io/truenas-backup: "enabled"`. It is
-> inert twice over: they are `local-path` PVCs, not Longhorn volumes; and PVC
+> ⚠️ **The Authentik PostgreSQL PVC carries an annotation that protects nothing.**
+> `authentik/data-authentik-postgresql-0` (pinned to **talos-prod-cp2**)
+> carries `recurring-job-group.longhorn.io/truenas-backup: "enabled"`. It is
+> inert twice over: it is a `local-path` PVC, not a Longhorn volume; and PVC
 > annotations never propagate to a Longhorn `Volume` CR anyway (only a
 > StorageClass `recurringJobSelector` or a label on the Volume enrols anything —
 > see `core/longhorn/manifests/backup-jobs.yaml`).
 >
+> **UPDATED 2026-08-13:** the second PVC that used to be named here,
+> `authentik/redis-data-authentik-redis-master-0`, is GONE. Authentik dropped
+> Redis upstream in 2025.10; the standalone StatefulSet was measured to be
+> serving nothing but its own liveness probes and was deleted along with
+> `manifests/redis.yaml`. Its PVC went with it, and nothing was lost because
+> nothing was ever stored (`dbsize` 0).
+>
 > The annotation is **left in place on purpose**, now with that written next to
-> it in `platform/authentik/values.yaml` and `manifests/redis.yaml`. It renders
+> it in `platform/authentik/values.yaml`. It renders
 > into each StatefulSet's `volumeClaimTemplates`, and Kubernetes forbids
 > updating any StatefulSet spec field other than `replicas`, `ordinals`,
 > `template`, `updateStrategy`, `persistentVolumeClaimRetentionPolicy` and

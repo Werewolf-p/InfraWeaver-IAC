@@ -1,0 +1,224 @@
+---
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  ARMED 2026-08-13 — brute-force / credential-stuffing lockout.           ║
+# ║                                                                          ║
+# ║  The prerequisite this file was deferred on (§3: Authentik could not see  ║
+# ║  real client IPs) is fixed — core/traefik/values.yaml now trusts          ║
+# ║  Cloudflare's published ranges on the web/websecure entrypoints only.     ║
+# ║                                                                          ║
+# ║  ⚠️ ONE GATE REMAINS AND IT IS NOT OPTIONAL — see §3c. Cloudflare         ║
+# ║  APPENDS to a caller-supplied X-Forwarded-For and Authentik reads the     ║
+# ║  FIRST entry, so the client IP this policy scores is caller-controlled    ║
+# ║  until a Cloudflare Transform Rule overwrites that header at the edge.    ║
+# ║  Until then this control is both evadable and weaponisable. Do not        ║
+# ║  merge/sync this file before §3c is done.                                ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# ── §1 THE FINDING ───────────────────────────────────────────────────────────
+# Measured 2026-08-13 on the live database:
+#   authentik_policies_reputation_reputationpolicy   0 rows
+# There is NO brute-force or lockout control of any kind on a login flow that
+# is reachable from the public internet, guarding the single administrator of
+# ArgoCD, the console, Nextcloud, Jellyfin and the WordPress fleet.
+#
+# Authentik is already SCORING every attempt — `authentik_policies_reputation_
+# reputation` holds live rows, -1 per failed login/identification and +1 per
+# success (policies/reputation/signals.py). The data exists; nothing consumes
+# it. This file is the consumer.
+#
+# ── §2 THE TRAP THAT MAKES A NAIVE VERSION OF THIS CATASTROPHIC ─────────────
+# Read this before touching the binding below. RE-VERIFIED 2026-08-13 by
+# reading the source out of the running pod, not from docs or memory:
+#   kubectl exec -n authentik deploy/authentik-server -- \
+#     cat /authentik/policies/reputation/models.py
+#
+#     passing = score <= self.threshold
+#     return PolicyResult(bool(passing))
+#
+# ReputationPolicy returns TRUE FOR A BAD ACTOR. It is a "this request smells"
+# matcher, not an "allow this request" check. A healthy user has score 0, which
+# is GREATER than a negative threshold, so the policy returns FALSE for them.
+#
+# Therefore a binding WITHOUT `negate: true` denies every legitimate user on
+# the first sync and locks the entire platform out instantly. The binding below
+# is negated. Do not "simplify" it.
+#
+# Truth table for threshold -20, as configured below:
+#   healthy user   score   0  →  0 <= -20 false → negate → TRUE  → allowed
+#   brute-forcer   score -25  → -25 <= -20 true → negate → FALSE → DENIED
+#
+# §2b — negate AND failure_result INTERACT, and the order is not obvious.
+# From /authentik/policies/process.py on this same running pod:
+#
+#     try:
+#         policy_result = self.binding.passes(self.request)
+#         # Invert result if policy.negate is set
+#         if self.binding.negate:
+#             policy_result.passing = not policy_result.passing
+#         …
+#     except PolicyException as exc:
+#         …
+#         policy_result = PolicyResult(self.binding.failure_result, str(src_exc))
+#
+# The negate happens INSIDE the try and BEFORE the except, and the except
+# REPLACES the result outright. So `failure_result` is NOT negated: with
+# `failure_result: true` an erroring policy yields passing=True → ALLOW. That
+# is the intended fail-open, and it is only true because of this ordering — had
+# negate been applied after the try/except, `failure_result: true` would mean
+# fail-CLOSED and a bug in the policy would take the whole platform's login
+# with it. Re-read this block if you ever change either field.
+#
+# ── §3 THE PREREQUISITE (FIXED 2026-08-13) ──────────────────────────────────
+# Measured 2026-08-13 on the live DB — every external client_ip on login /
+# login_failed / authorize_application events in the last 30 days was a
+# Cloudflare edge address:
+#     104.23.170.69  104.23.166.4   104.23.172.47   172.70.46.221
+#     172.71.103.155 162.159.113.153 141.101.76.72  …  (top 20, no exceptions)
+# and both live reputation rows are scored against 172.71.99.234.
+#
+# Root cause was upstream of Authentik, in Traefik — not in this chart:
+#   * ClientIPMiddleware._get_client_ip_from_meta (/authentik/root/middleware.py,
+#     read out of the running server pod) takes ips[0], the FIRST
+#     X-Forwarded-For entry, and explicitly documents that it does no
+#     validation because it trusts the proxy in front of it.
+#   * Traefik only preserves an inbound X-Forwarded-For from a peer it trusts.
+#     Its entrypoints listed no Cloudflare ranges in
+#     `forwardedHeaders.trustedIPs`, so it DISCARDED the client IP Cloudflare
+#     sent and rewrote XFF to its own peer — the Cloudflare edge.
+#
+# FIXED in kubernetes/core/traefik/values.yaml: `web` and `websecure` now carry
+# Cloudflare's published IPv4+IPv6 ranges. Deliberately NOT applied to the
+# registry / teleport-* / extra-port / metrics / traefik entrypoints. Trust is
+# matched on the TCP peer, not the Host header, so registry.int — which sets
+# cloudflare-proxied: "false" yet shares the websecure entrypoint — is still an
+# untrusted peer and still cannot forge its own source IP.
+#
+# ── §3c THE GATE THAT REPLACED IT: XFF[0] IS CALLER-CONTROLLED ──────────────
+# §3 was necessary but is NOT sufficient, and this was missed when this file
+# was first written. Cloudflare's documented behaviour is to APPEND to a
+# caller-supplied X-Forwarded-For, not replace it: "If the request already
+# includes an X-Forwarded-For header, Cloudflare appends the client IP to it."
+# Authentik reads ips[0] — the FIRST entry. So:
+#
+#     curl -H 'X-Forwarded-For: 1.2.3.4' https://auth.<domain>/…
+#       → origin sees `1.2.3.4, <real caller>`  → Authentik records 1.2.3.4
+#
+# With this policy armed and that hole open, the control is:
+#   * EVADABLE — rotate the spoofed first entry per attempt and no address ever
+#     reaches the threshold. Credential stuffing proceeds unimpeded.
+#   * WEAPONISABLE — 21 failed logins carrying `X-Forwarded-For: <victim>` deny
+#     the login flow to that address for the reputation expiry (24h default).
+#     Any unauthenticated caller can pick the victim, including the sole
+#     administrator's home address. That is a NEW remote DoS on login — exactly
+#     the failure class this file was deferred to avoid.
+#
+# CLOSE IT AT THE EDGE, then this file is safe. Cloudflare Transform Rule →
+# Modify Request Header → Set dynamic: `X-Forwarded-For` = `ip.src` (or remove
+# the visitor-supplied header). That makes XFF single-valued and authoritative,
+# so ips[0] is the real caller. It is Cloudflare config and is not expressible
+# in this repo — there is no Cloudflare provider in terraform/ (DNS is
+# external-dns only), so it is an operator action with no IaC representation.
+# Cloudflare's own guidance is to prefer CF-Connecting-IP, which cannot be
+# spoofed; that is already what the rate limiters in
+# core/traefik/manifests/middleware-rate-limit.yaml bucket on, which is why
+# they are safe today and this is not yet. Authentik offers no setting to read
+# CF-Connecting-IP: `listen.trusted_proxy_cidrs` in /authentik/lib/default.yml
+# only governs whether XFF is trusted from the pod's peer, not which header or
+# which index is read.
+#
+# ── §3b WHY NOT `check_username` INSTEAD ────────────────────────────────────
+# Because it is a remote lockout of a named account: anyone who can reach the
+# login page could hold `admin` below threshold indefinitely with failed
+# attempts. Break-glass has since been armed (measured 2026-08-13:
+# is_active=true, password set) but has NEVER been exercised — last_login is
+# NULL — so §4's "verify a real login with it" is still outstanding. It stays
+# false until break-glass has been armed AND exercised per docs/BREAK-GLASS.md.
+#
+# ── §4 ARMING PROCEDURE ─────────────────────────────────────────────────────
+#   0. [DONE 2026-08-13] Fix Traefik `forwardedHeaders.trustedIPs` (Cloudflare
+#      ranges) on web/websecure only.
+#   0b. [OUTSTANDING] Apply the Cloudflare Transform Rule in §3c, then CONFIRM a
+#      real client IP appears in Authentik's event log — including that a
+#      request sent with a bogus `X-Forwarded-For:` is recorded under the real
+#      caller, not the bogus value. This is now the gate.
+#   1. [PARTIAL] Break-glass is armed but not exercised (last_login NULL).
+#      Verify a real login with it before relying on any lockout.
+#   2. [DONE] `git mv 70-brute-force-reputation.yaml.DEFERRED 70-brute-force-reputation.yaml`
+#   3. [DONE] Add `authentik-blueprint-brute-force` to `blueprints.configMaps`
+#      in ../../values.yaml — WITHOUT this the ConfigMap is mounted nowhere and
+#      never applied, and this file is decoration.
+#   4. Verify: fail logins from a test address until the reputation row for
+#      that address is below -20, confirm the login flow is refused for it,
+#      confirm an unaffected address still logs in, then let it expire.
+#
+# ── §5 WHY THE BINDING TARGETS THE FLOW AND NOT A STAGE ─────────────────────
+# Policies on a FlowStageBinding decide whether that STAGE RUNS, not whether
+# the request is denied. Binding this to the password stage would SKIP the
+# password prompt for a bad-reputation request rather than refuse it — the
+# opposite of the intent, and a far worse bug than the one being fixed.
+# A Flow is itself a PolicyBindingModel; a policy bound to the flow denies
+# access to the flow, which is the actual lockout. Keep the target as the flow.
+#
+# Note this also means `check_username` could not work here even if it were
+# safe: at flow-access time the request is anonymous and no username exists
+# yet. Flow-level reputation is inherently IP-based, which is precisely why §3
+# is a hard prerequisite rather than a nice-to-have.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprint-brute-force
+  namespace: authentik
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+data:
+  brute-force.yaml: |
+    version: 1
+    metadata:
+      name: InfraWeaver Brute-force Reputation Lockout
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Denies the default authentication flow to sources whose Authentik
+          reputation has fallen below the threshold. Bound with negate=true
+          because ReputationPolicy returns true for BAD reputation.
+    entries:
+      - model: authentik_policies_reputation.reputationpolicy
+        state: present
+        id: policy-brute-force-reputation
+        identifiers:
+          name: policy-brute-force-reputation
+        attrs:
+          # IP-based only. check_username is a remote account-lockout vector —
+          # see §3b. Do not enable it while break-glass is dormant.
+          check_ip: true
+          check_username: false
+          # Authentik's default is -5. That is five fat-fingered passwords, and
+          # with a 24h reputation expiry it is a full-day lockout for a human
+          # who simply mistyped. -20 still stops credential stuffing (which
+          # makes hundreds of attempts) while leaving generous room for a real
+          # person having a bad morning. Tighten toward -5 only after §3 makes
+          # the score per-client rather than per-Cloudflare-edge.
+          threshold: -20
+          # Emit an event on every evaluation so a lockout is visible in the
+          # audit log instead of being reported as "the login page is broken".
+          execution_logging: true
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+          order: 0
+        attrs:
+          target: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+          policy: !Find [authentik_policies_reputation.reputationpolicy, [name, policy-brute-force-reputation]]
+          enabled: true
+          order: 0
+          # ⚠️ negate: true is LOAD-BEARING — see §2. The policy passes for BAD
+          # reputation; negating turns "this is a bad actor" into "deny". With
+          # negate: false this denies every good user on the first sync.
+          negate: true
+          # If the policy itself errors or times out, ALLOW. A brute-force
+          # control that fails CLOSED on its own bug takes the whole platform's
+          # login with it. Genuine low reputation still denies — failure_result
+          # only covers exceptions, not a policy that ran and returned false.
+          failure_result: true
+          timeout: 30

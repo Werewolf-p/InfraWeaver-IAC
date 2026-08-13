@@ -1,14 +1,16 @@
 ---
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  DEFERRED — this restricts who can reach six applications. It is not      ║
-# ║  GAP-C5 and it is not MFA. It ships written-but-unarmed so that a human   ║
-# ║  decides when to change access, rather than inheriting the change from    ║
-# ║  an MFA work package.                                                     ║
+# ║  ARMED. This file is LIVE — it is listed in `blueprints.configMaps` in    ║
+# ║  ../../values.yaml and applied on every sync. It restricts who can reach  ║
+# ║  the applications below. It is not GAP-C5 and it is not MFA.              ║
+# ║                                                                           ║
+# ║  History: shipped 2026-08-07 written-but-unarmed, armed the same day      ║
+# ║  once the lockout risk had been measured (see the note beside the         ║
+# ║  configMaps entry in ../../values.yaml). The banner that used to say      ║
+# ║  "DEFERRED / rename off .DEFERRED" was stale from that moment and is      ║
+# ║  corrected here — a file that says it is unarmed while it is applying on  ║
+# ║  every sync is worse than no comment at all.                              ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-#
-# Same two gates as the other DEFERRED files: rename off `.DEFERRED`, and add
-# `authentik-blueprint-app-access-backfill` to `blueprints.configMaps` in
-# ../../values.yaml.
 #
 # ── THE FINDING ──────────────────────────────────────────────────────────────
 # Measured live on 2026-08-07: 13 of 74 Authentik Applications have NO policy
@@ -183,6 +185,147 @@ data:
           order: 10
         attrs:
           target: !Find [authentik_core.application, [slug, infraweaver-console]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ══ SECOND WAVE, 2026-08-13 ═══════════════════════════════════════════
+      # Re-measured after the 08-07 wave applied: the unbound count read 8, not
+      # the 7 this file predicted. Seven are the dead applications listed above.
+      # The eighth is NEW, and it is the same bug as route-truenas.
+      #
+      # ── gatus-fwd: A LIVE, ROUTED, UNPROTECTED SURFACE ────────────────────
+      # `gatus-fwd` did not exist during the 08-07 audit; the status page was
+      # repaired on 08-11 and its forward-auth application shipped without a
+      # binding. Verified live 2026-08-13:
+      #   IngressRoute gatus/gatus  Host(`status.int.example.com`)
+      #                             middlewares: forward-auth, secure-headers
+      #   application gatus-fwd     policy bindings: 0
+      # So the forward-auth challenge in front of the live status page is
+      # answered by an unbound application and every authenticated account on
+      # this platform passes it — exactly the failure route-truenas had.
+      # Every other `-fwd` application on the cluster (20+ of them: grafana-fwd,
+      # jellyfin-fwd, n8n-fwd, …) is bound to policy-admins-only; this one is
+      # the sole exception, so binding it is consistency, not a policy decision.
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, gatus-fwd]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, gatus-fwd]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      # ── THE SEVEN DEAD APPLICATIONS: BOUND, NOT DELETED ───────────────────
+      # The header above says to DELETE these rather than bind them, on the
+      # grounds that binding a policy to an application with no reachable
+      # surface is housekeeping theatre. That reasoning is sound and the
+      # deletion is still the right end state — but deletion is destructive and
+      # irreversible (it takes the provider, its client credentials and its
+      # redirect URIs with it), and "unreachable" was measured on 2026-08-07,
+      # before gatus-fwd proved that a dead hostname on this platform can
+      # acquire a live route without anyone re-checking the IdP side.
+      #
+      # Binding them costs nothing, is reversible, and changes the failure mode
+      # from fail-OPEN to fail-CLOSED: if any of these hostnames is ever routed
+      # again — the exact thing that just happened to Gatus — it is admins-only
+      # from the first request instead of open to every WordPress and Nextcloud
+      # account on the platform. The deletion remains a reviewable operator
+      # action; this makes the interim safe rather than assuming there is none.
+      #
+      # Acceptance test (README.md): unbound application count reads 0 after
+      # this applies, and stays 0 whether or not the deletions ever happen.
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, forgejo]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, forgejo]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, gitea]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, gitea]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, wikijs]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, wikijs]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, onedev]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, onedev]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, vaultwarden]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, vaultwarden]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, wordpress-ssoe2e]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, wordpress-ssoe2e]]
+          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
+          enabled: true
+          order: 10
+          negate: false
+          timeout: 30
+
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !Find [authentik_core.application, [slug, wordpress-ssoe2e-gate]]
+          order: 10
+        attrs:
+          target: !Find [authentik_core.application, [slug, wordpress-ssoe2e-gate]]
           policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
           enabled: true
           order: 10

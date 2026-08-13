@@ -43,14 +43,72 @@ spec:
       # the only path. That is a change to how the owner's media server behaves,
       # not a security cleanup, and it is not this commit's to make.
       #
-      # THE REPLACEMENT WHEN SOMEONE DOES MAKE IT: a MetalLB LoadBalancer
-      # Service with a dedicated LAN IP, which keeps a stable address for
-      # clients and puts the pod back inside the policy layer. Do that, then
-      # tighten the namespace to baseline, then delete `plex` from the
-      # disallow-host-namespaces exclude list in
-      # kubernetes/core/kyverno/manifests/cluster-policies.yaml — all three, or
-      # the pod stops being admitted.
+      # ── THE MetalLB REPLACEMENT WAS INVESTIGATED 2026-08-13. IT DOES NOT WORK.
+      #
+      # An earlier revision of this comment told the next engineer that "a
+      # MetalLB LoadBalancer Service with a dedicated LAN IP" was the drop-in
+      # replacement. That instruction was wrong, and following it would have
+      # broken LAN discovery while appearing to be a pure security win. The
+      # measured reasons, against THIS cluster:
+      #
+      #   1. GDM (UDP 32410-32414) and DLNA/SSDP (239.255.255.250:1900) are
+      #      multicast/broadcast. A MetalLB L2-mode Service is announced by
+      #      gratuitous ARP for a single UNICAST VIP; the speaker joins no IGMP
+      #      group, and a Kubernetes Service has no concept of multicast group
+      #      membership at all. Multicast never reaches the VIP.
+      #
+      #   2. `kubectl -n kube-system get cm cilium-config` reports
+      #      routing-mode=tunnel, tunnel-protocol=vxlan, and NO multicast key of
+      #      any kind (Cilium v1.17.4 BPF multicast is off). Pods sit in a VXLAN
+      #      overlay, not on the LAN L2 segment, so LAN broadcast frames are
+      #      never encapsulated toward them. There is no path for the discovery
+      #      packet to arrive even in principle.
+      #
+      #   3. enable-ipv4-masquerade=true, so a pod's own outbound SSDP NOTIFY
+      #      would be SNAT'd to the node IP — the wrong source address for a
+      #      protocol whose entire mechanism is "reply from where you were seen".
+      #
+      # This is specifically a MULTICAST failure, not a UDP one: dns-system/
+      # coredns is a working UDP LoadBalancer on 10.0.0.201, so unicast UDP
+      # through MetalLB is fine here. Discovery is what cannot survive, exactly
+      # as the hostPort analysis above already found.
+      #
+      # Per the operator's standing instruction — a broken Plex is not an
+      # acceptable trade — hostNetwork STAYS, and this stays the largest known
+      # residual risk in the cluster. It is a deliberate, priced decision, not
+      # an oversight.
+      #
+      # IF SOMEONE REVISITS THIS, the honest options are, cheapest first:
+      #   a. Accept the loss of GDM/DLNA and move to a LoadBalancer anyway.
+      #      Signed-in Plex clients would still find the server via plex.tv's
+      #      published connection list if the VIP is added under Settings >
+      #      Network > "Custom server access URLs". Only unauthenticated LAN
+      #      clients and DLNA-only devices (some TVs) would break. FREE AND
+      #      UNRESERVED VIPs as of 2026-08-13: 10.0.0.203, .204, .205 —
+      #      vlan3-pool is ["10.0.0.200/32","10.0.0.202-10.0.0.210"], with
+      #      .200 traefik, .202 n8n, and .206-.210 reserved for game servers by
+      #      game-servers-pool.yaml. Do NOT template the VIP through envsubst:
+      #      authentik-ldap-outpost has sat <pending> for 60 days because its
+      #      loadBalancerIP is the literal string ${METALLB_LDAP_VIP}.
+      #   b. Enable Cilium BPF multicast (v1.17 feature, currently off) and
+      #      re-test GDM end to end. Datapath-wide change; needs its own commit.
+      #   c. Leave hostNetwork and buy back the network containment a different
+      #      way — a CiliumClusterwideNetworkPolicy with a nodeSelector, since a
+      #      hostNetwork pod carries `reserved:host` and only host-level policy
+      #      can see it. NOT done here: enable-host-firewall is unset, and
+      #      turning it on cluster-wide can lock every node out of the API
+      #      server if the baseline is wrong. That is a change that needs a
+      #      console and a rollback window, not a security sweep.
       hostNetwork: true
+      # A hostNetwork pod has node-local reach to the kubelet and the API server
+      # with no CiliumNetworkPolicy in front of it, so a mounted ServiceAccount
+      # token is the single cheapest path from "transcoder RCE" to "cluster
+      # credential". Plex makes no Kubernetes API calls whatsoever; this is a
+      # pure subtraction with no functional cost, and unlike readOnlyRootFilesystem
+      # it needs no runtime testing to be safe. It does not depend on the Kyverno
+      # default-SA automount mutation, which cannot apply to a namespace that
+      # does not exist yet.
+      automountServiceAccountToken: false
       securityContext:
         fsGroup: 1000
         # The single highest-value control for this workload, and it was absent.

@@ -150,23 +150,75 @@ spec:
                   set -o pipefail
                   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
                   OUT="/dumps/authentik-${STAMP}.dump"
+                  GLB="/dumps/authentik-${STAMP}.globals.sql"
 
+                  # ── WHY --create IS NOT OPTIONAL ────────────────────────────
+                  # This database carries `ALTER DATABASE authentik SET jit=off`,
+                  # which is the standing fix for the 2026-08-09 total login
+                  # outage (a PostgreSQL JIT segfault killed every auth query).
+                  # A database-level SET lives in pg_db_role_setting, NOT in the
+                  # table data — so a plain `pg_dump -Fc` does not contain it and
+                  # restoring that dump quietly rebuilds the outage.
+                  #
+                  # Measured on the live server 2026-08-13, not assumed:
+                  #   pg_dump --create --schema-only        → emits
+                  #       ALTER DATABASE authentik SET jit TO 'off';
+                  #   pg_dumpall --globals-only             → does NOT contain jit
+                  #       (it carries roles/tablespaces; per-DATABASE settings are
+                  #        outside its scope — so --globals-only alone is NOT a
+                  #        substitute for this flag)
+                  #   -Fc --create round-trip: `pg_restore --create` re-emits the
+                  #        ALTER DATABASE; `pg_restore` WITHOUT --create emits 0.
+                  #
+                  # ⚠️ RESTORE MUST THEREFORE USE `pg_restore --create`. Restoring
+                  # into a pre-made database drops the setting on the floor even
+                  # though this dump contains it. The server-level belt to this
+                  # braces is `jit = off` in postgresql.conf — see
+                  # postgresql.primary.extendedConfiguration in ../values.yaml.
                   pg_dump -h authentik-postgresql -p 5432 -U authentik -d authentik \
-                          -Fc --no-password -f "${OUT}"
+                          -Fc --create --no-password -f "${OUT}"
 
                   # A dump that cannot be listed is not a backup. pg_restore --list
                   # parses the whole custom-format archive, so a truncated or
                   # half-written file fails HERE rather than during an incident.
                   pg_restore --list "${OUT}" > /dev/null
 
+                  # Prove the jit setting actually made it into THIS archive.
+                  # Without this the flag could be dropped in a later edit and
+                  # nothing would notice until a restore during an incident.
+                  #
+                  # ⚠️ `grep -c … >/dev/null`, NOT `grep -q`. Measured 2026-08-13:
+                  # under `set -o pipefail` (set above) `grep -q` exits at the
+                  # FIRST match, pg_restore then dies on SIGPIPE, and the
+                  # pipeline returns 141 — so the guard "fails" on a perfectly
+                  # good dump and `set -e` aborts the job. That would have broken
+                  # the backup EVERY night while looking like a corruption alarm.
+                  # -c consumes the whole stream, so pg_restore exits 0.
+                  pg_restore --create -f - "${OUT}" \
+                    | grep -c "ALTER DATABASE authentik SET jit" > /dev/null \
+                    || { echo "FATAL: dump lacks ALTER DATABASE ... SET jit — refusing"; exit 1; }
+
+                  # Roles and their passwords live at CLUSTER scope and are in no
+                  # per-database dump. Restoring onto an empty cluster needs the
+                  # `authentik` role to exist first, or every object restores
+                  # ownerless. This does NOT carry jit (see above) — the two files
+                  # are complementary, not alternatives.
+                  pg_dumpall -h authentik-postgresql -p 5432 -U authentik \
+                             --globals-only --no-password > "${GLB}"
+
                   sha256sum "${OUT}" > "${OUT}.sha256"
+                  sha256sum "${GLB}" > "${GLB}.sha256"
 
-                  # Retention: newest 14 dumps. Longhorn keeps 7 daily + 4 weekly
-                  # images of the whole PVC on top of this, on the NAS.
+                  # Retention: newest 14 dumps, each with its globals sidecar.
+                  # Longhorn keeps 7 daily + 4 weekly images of the whole PVC on
+                  # top of this, on the NAS.
                   ls -1t /dumps/authentik-*.dump 2>/dev/null | tail -n +15 \
-                    | while read -r f; do rm -f "$f" "$f.sha256"; done
+                    | while read -r f; do
+                        b="${f%.dump}"
+                        rm -f "$f" "$f.sha256" "$b.globals.sql" "$b.globals.sql.sha256"
+                      done
 
-                  echo "OK ${OUT} $(stat -c%s "${OUT}") bytes; $(ls -1 /dumps/authentik-*.dump | wc -l) dumps retained"
+                  echo "OK ${OUT} $(stat -c%s "${OUT}") bytes + globals $(stat -c%s "${GLB}") bytes; $(ls -1 /dumps/authentik-*.dump | wc -l) dumps retained"
               volumeMounts:
                 - {name: dumps, mountPath: /dumps}
                 - {name: tmp, mountPath: /tmp}

@@ -161,8 +161,9 @@ spec:
 #
 # Ports 389 and 636 were removed 2026-08-07 with the dead LDAP outpost — they were
 # only ever there for `ldap-outpost ↔ server`. Verified before removal that NO pod
-# in this namespace declares a containerPort of 389 or 636 (the only pods here are
-# server, worker, postgresql and redis), so this narrows the egress surface without
+# in this namespace declares a containerPort of 389 or 636 (the only pods here were
+# server, worker, postgresql and redis; redis was deleted 2026-08-13), so this
+# narrows the egress surface without
 # narrowing any path that carries traffic.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

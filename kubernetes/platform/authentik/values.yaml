@@ -106,8 +106,21 @@ authentik:
     user: "authentik"
     password: ""  # supplied via AUTHENTIK_POSTGRESQL__PASSWORD env var
     port: 5432
-  redis:
-    host: "authentik-redis-master"
+  # NO `redis:` KEY — REMOVED 2026-08-13, and it must not come back.
+  #
+  # Authentik dropped Redis upstream in 2025.10; this instance runs 2026.5.6.
+  # The key was not merely unused, it was UNREADABLE: measured on the live
+  # worker, `[k for k in dir(settings) if 'REDIS' in k.upper()]` returns `[]`.
+  # There is no Redis setting left in the application to populate, so
+  # `authentik.redis.host` rendered an AUTHENTIK_REDIS__HOST env var that
+  # nothing ever read. What replaced it, all read from the same live settings:
+  #     SESSION_ENGINE  authentik.core.sessions          (PostgreSQL)
+  #     CACHES.default  django_postgres_cache…DatabaseCache
+  #     CHANNEL_LAYERS  django_channels_postgres…PostgresChannelLayer
+  #
+  # Re-adding this key does NOT re-enable anything. It only re-adds a dead env
+  # var — and, because the chart stamps `checksum/secret` on both pod
+  # templates, it restarts the server and worker to do it.
 
 # Blueprint ConfigMaps mounted into the WORKER pod at
 # /blueprints/mounted/cm-<name>/. This list is the only thing that mounts them:
@@ -123,6 +136,14 @@ blueprints:
     - authentik-blueprint-forward-auth
     - authentik-blueprint-invitation-flow
     - authentik-blueprint-recovery-email
+    # ── Session lifetime cap (manifests/blueprints/80-…) ─────────────────────
+    # Absolute 12h cap on every authenticated session, replacing the
+    # `session_duration: seconds=0` default under which expiry slid forward on
+    # every session write and nothing bounded total session age. Listed rather
+    # than deferred because it CANNOT lock anyone out: the worst case is an
+    # earlier login prompt, and 12h clears the console's 1h staleness floor by
+    # 12x. See the header of the blueprint for the measurements.
+    - authentik-blueprint-session-lifetimes
     # ── WP11 / GAP-C5 (manifests/blueprints/) ────────────────────────────────
     - authentik-blueprint-break-glass      # dormant recovery admin (stage 2)
     - authentik-blueprint-current-state    # no-op export of the auth path (stage 1)
@@ -159,6 +180,57 @@ blueprints:
     # an attended operator action, NOT a line in this list — see
     # docs/SECURITY-REMEDIATION-RUNBOOK.md §P1.4.
     - authentik-blueprint-console-scope
+    # ── WP11 / brute-force lockout (manifests/blueprints/70-…) ───────────────
+    # ARMED 2026-08-13, together with the Cloudflare trustedIPs fix in
+    # core/traefik/values.yaml that this depended on. Before that fix Authentik
+    # recorded a Cloudflare edge address as every caller's IP (measured: the top
+    # 20 external login client_ips over 30 days were all Cloudflare), so an
+    # IP-reputation lockout would have punished everyone behind an edge and
+    # missed the attacker.
+    #
+    # The binding is `negate: true` and that is LOAD-BEARING — ReputationPolicy
+    # returns TRUE for BAD reputation, so an un-negated binding denies EVERY
+    # user on first sync. Verified against the running pod's own source, not
+    # from memory; see §2 / §2b of the blueprint.
+    #
+    # ⚠️ DISARMED AGAIN 2026-08-13, BEFORE THIS EVER MERGED. §3c is still open
+    # and the line was going to ship anyway — the branch carrying it
+    # (fix/traefik-cloudflare-xff-arm-brute-force) put the mount and the warning
+    # in the same commit, so merging it would have armed the policy while the
+    # hole it warns about was wide open.
+    #
+    # Cloudflare APPENDS to a caller-supplied X-Forwarded-For and Authentik reads
+    # the FIRST entry, so with this mounted:
+    #   * a credential-stuffer rotates the spoofed first entry per attempt and no
+    #     address ever reaches the threshold — the control does nothing;
+    #   * 21 failed logins carrying `X-Forwarded-For: <victim>` deny login to that
+    #     address for 24h, and any unauthenticated caller picks the victim. That
+    #     is a NEW remote DoS on login, created by adding a security control.
+    #
+    # WHY IT COULD NOT SIMPLY BE FIXED TODAY, measured rather than assumed:
+    #   * The Cloudflare token this platform holds (console secret
+    #     `cloudflare-api-token`) verifies as active but is DNS-scoped: reading
+    #     zones/<id>/rulesets/phases/http_request_late_transform/entrypoint
+    #     returns "Authentication error". The Transform Rule needs a token with
+    #     Zone → Transform Rules → Edit, or a hand edit in the dashboard.
+    #   * Reading CF-Connecting-IP instead is not available: grepped on the
+    #     running pod, /authentik/root/middleware.py:198 consults exactly one
+    #     header, HTTP_X_FORWARDED_FOR. `listen.trusted_proxy_cidrs` in
+    #     /authentik/lib/default.yml governs whether XFF is trusted from the
+    #     pod's peer, not which header or which index is read.
+    #
+    # The Traefik trustedIPs half of that branch DOES stay. On its own it only
+    # changes what Authentik RECORDS — real client IPs for honest traffic instead
+    # of a Cloudflare edge for everyone — and with no policy consuming the score,
+    # nothing acts on a forged value. Note the trade honestly: a hostile caller
+    # can now poison the client_ip in the event log. That is worth it for
+    # attribution, and it is exactly why the lockout may not be armed on top of
+    # it. Re-arm by restoring this line ONLY after §3c is confirmed live, per
+    # step 0b of the blueprint's arming procedure — the check is that a request
+    # sent with a bogus X-Forwarded-For is recorded under the real caller.
+    # `scripts/validate-iac.sh` gate 6 fails the build if this line comes back
+    # while the blueprint still marks §3c outstanding.
+    #   - authentik-blueprint-brute-force
     # NOT listed, deliberately — these are the MFA enforcement flips, and they
     # can lock the sole administrator out of every admin surface at once.
     # Adding a name here is the second of two gates a human must open, and
@@ -177,6 +249,40 @@ postgresql:
       userPasswordKey: postgresql-password
   primary:
     priorityClassName: platform-high
+    # ── jit = off IS LOAD-BEARING. DO NOT DROP EITHER LINE BELOW. ────────────
+    # On 2026-08-09 every login failed: the PostgreSQL JIT compiler segfaulted
+    # the backend mid-query, so Authentik could not authenticate anyone and the
+    # whole platform — console, ArgoCD, Nextcloud, Jellyfin, the WordPress
+    # fleet — was locked out. The fix applied at the time was
+    #     ALTER DATABASE authentik SET jit = off;
+    # typed into psql. It worked, and it existed in NO manifest: measured
+    # 2026-08-13, `pg_settings.source` for jit read `database` with an empty
+    # `sourcefile`, i.e. the only copy of the fix lived in a system catalogue.
+    #
+    # Two independent ways that fix could evaporate, which is why it is here:
+    #   1. Restore. The nightly dump is a plain `pg_dump -Fc` of ONE database;
+    #      a database-level `ALTER DATABASE … SET` is not inside it. Restoring
+    #      it onto a fresh cluster silently reintroduced the outage. That half
+    #      is now fixed separately by `--create` in manifests/pg-backup.yaml.
+    #   2. Any rebuild of this StatefulSet onto an empty PGDATA.
+    # Setting it in postgresql.conf makes it a property of the SERVER, so it
+    # holds for every database and survives both paths regardless of the dump.
+    #
+    # ⚠️ max_connections MUST STAY. This key REPLACES the authentik chart's own
+    # default for extendedConfiguration, which is exactly `max_connections = 500`
+    # (verified against the live ConfigMap authentik-postgresql-extended-
+    # configuration). Setting only `jit = off` here would silently drop the
+    # connection ceiling back to Postgres' default of 100 and starve Authentik.
+    #
+    # ⚠️ APPLYING THIS ROLLS POSTGRES. The chart stamps
+    # `checksum/extended-configuration` onto the pod template, so the first sync
+    # after this change restarts authentik-postgresql-0 — a short, expected
+    # Authentik outage. Sync it deliberately, not incidentally. (`jit` itself is
+    # a USERSET GUC and would only need a reload; it is the chart's checksum,
+    # not Postgres, that forces the restart.)
+    extendedConfiguration: |
+      max_connections = 500
+      jit = off
     persistence:
       annotations:
         # ⚠️ THIS ANNOTATION IS INERT. IT BACKS NOTHING UP. Do not read it as
@@ -225,8 +331,11 @@ postgresql:
               - talos-prod-cp2
               - talos-prod-cp1
 
-# Redis is deployed as a standalone StatefulSet in manifests/redis.yaml
-# (authentik chart 2026.x dropped the bundled Redis subchart)
+# No Redis. The authentik chart dropped the bundled Redis subchart in 2026.x and
+# the application dropped Redis entirely in 2025.10; the standalone StatefulSet
+# that used to stand in for it (manifests/redis.yaml) was deleted 2026-08-13
+# after measuring that it served nothing but its own liveness probes. See the
+# note on the absent `authentik.redis` key above.
 
 server:
   replicas: 1  # Memory-optimised: single replica saves ~800Mi; requiredAntiAffinity is trivially satisfied

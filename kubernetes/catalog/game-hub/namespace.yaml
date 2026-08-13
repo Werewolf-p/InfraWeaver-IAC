@@ -1,9 +1,50 @@
+# PSA labels live HERE, not in kubernetes/core/psa/namespace-labels.yaml, and
+# that placement is the whole point. This Application declares the `game-hub`
+# Namespace, and every Application applies through the ONE shared
+# `argocd-controller` field manager, which owns a single fieldset per object.
+# Declaring this Namespace in a second Application would make the two syncs take
+# turns pruning each other's labels — the PSA labels would flicker on a sync
+# cycle (worse than absent, because it reads as fixed) and, more seriously, it
+# would prune `app.kubernetes.io/part-of: infraweaver`, which is the ENTIRE
+# match set of the set-default-memory-limits Kyverno policy. See the block in
+# core/psa/namespace-labels.yaml that prescribes exactly this change.
+#
+# WHY enforce=baseline AND NOT restricted — measured against the live cluster
+# on 2026-08-13, not assumed:
+#
+#   $ kubectl label ns game-hub pod-security.kubernetes.io/enforce=baseline \
+#       --dry-run=server --overwrite
+#   namespace/game-hub labeled (server dry run)      # ← no warnings, admits all
+#
+#   $ kubectl label ns game-hub pod-security.kubernetes.io/enforce=restricted \
+#       --dry-run=server --overwrite
+#   Warning: existing pods in namespace "game-hub" violate the new PodSecurity
+#            enforce level "restricted:latest"
+#   Warning: gt-new-horizons-674fb99d99-cvhnm: allowPrivilegeEscalation != false,
+#            unrestricted capabilities, runAsNonRoot != true, runAsUser=0,
+#            seccompProfile
+#
+# The API server evaluates existing pods when an enforce label changes, so that
+# is authoritative, not a guess. `restricted` would refuse admission to the
+# running GregTech: New Horizons server at its next restart — its linuxserver-
+# style init containers run as uid 0 to chown the data volume before dropping
+# privilege. Evicting somebody's game world is not a change to make from a
+# security sweep. audit/warn=restricted keeps that remaining gap measurable.
+#
+# baseline is not a token level here: it blocks privileged, hostPath, host
+# namespaces, hostPort, and non-default capability adds — the controls that
+# actually matter for a namespace that executes third-party game mods. Verified
+# every workload template in the namespace (1 Deployment, 2 CronJobs, 4 Jobs)
+# is already baseline-clean, so this takes effect with zero restarts.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: game-hub
   labels:
     app.kubernetes.io/part-of: infraweaver
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
   annotations:
     # Never let a git change or app-delete cascade into deleting this namespace
     # (and every game-server PVC inside it). Deletion must be a deliberate manual act.

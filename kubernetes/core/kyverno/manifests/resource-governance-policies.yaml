@@ -235,6 +235,37 @@ spec:
 #     kubectl get clusterpolicy generate-default-deny-cnp -o jsonpath='{.status}'
 # The ClusterRole granting ciliumnetworkpolicies to the background controller is
 # at the bottom of this file, next to the LimitRange one.
+#
+# CHANGING THE EXCLUDE LIST BELOW REQUIRES DELETING THIS POLICY FIRST.
+# Kyverno's own admission webhook rejects EVERY update that touches a generate
+# rule's immutable fields — `exclude` is one of them:
+#     admission webhook "validate-policy.kyverno.svc" denied the request:
+#     change of immutable fields for a generate rule is disallowed
+# Renaming the RULE does not help (measured with --dry-run=server: denied
+# identically), and neither does Replace=true, because `kubectl replace` is still
+# an update. Only delete-then-create is accepted.
+#
+# WHAT THAT COSTS IF NOBODY NOTICES, measured on 2026-08-13. Adding the
+# jellyfin/nextcloud exclusion left `core-kyverno-policies` permanently
+# OutOfSync: ArgoCD retried 5 times, gave up, and — because a child in a failed
+# sync operation drags its parent down — reported the `bootstrap` app-of-apps as
+# Degraded with no message and no unhealthy resource under it. Two apps looked
+# broken, the cause was in neither's resource list, and real drift in this app
+# would have been invisible behind the permanent OutOfSync.
+#
+# THE PROCEDURE:
+#     kubectl get clusterpolicy generate-default-deny-cnp -o yaml > /tmp/cp.bak
+#     kubectl get cnp -A -l infraweaver.io/governance=auto-default-deny   # note them
+#     kubectl delete clusterpolicy generate-default-deny-cnp
+#     # ArgoCD does NOT recreate it on its own once the operation has failed its
+#     # retry limit — selfHeal will not re-enter a failed sync. Trigger one:
+#     kubectl patch app core-kyverno-policies -n argocd --type merge \
+#       -p '{"operation":{"initiatedBy":{"username":"<you>"},"sync":{"revision":"HEAD"}}}'
+# Deleting the policy does NOT cascade to the CiliumNetworkPolicies it already
+# generated (verified: apps-grafana/auto-default-deny survived untouched), so the
+# window is limited to namespaces created during it. If one is lost anyway, a
+# no-op label change on its namespace re-triggers the rule — this matches
+# Namespace admission, not a background scan, so nothing backfills on its own.
 # -----------------------------------------------------------------------------
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy

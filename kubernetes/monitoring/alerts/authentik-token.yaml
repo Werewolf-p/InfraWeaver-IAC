@@ -33,7 +33,11 @@
 # in alerts/openbao-token.yaml. DO NOT "harmonise" them; the two tokens are not
 # the same kind of problem. OpenBao's token is renewed by the
 # `openbao-token-renew` CronJob, so its 30-day warning is 30 days in which an
-# automated loop needs a nudge. THIS rotation is MANUAL and ROOT-TOKEN-GATED:
+# automated loop needs a nudge. THIS rotation is SCRIPTED BUT ATTENDED —
+# `scripts/rotate-authentik-console-token.sh` performs the whole sequence, but
+# nothing schedules it, it needs kubectl-admin (which is what "root token"
+# reduces to here — the OpenBao root token is a Kubernetes Secret), and it
+# restarts the console. The wider window is for a human to find a moment:
 # replacing the token means minting a new one in Authentik, writing it to
 # OpenBao `secret/platform/infraweaver-console` — which the console's own
 # OpenBao token deliberately CANNOT do (it holds only ["list","read"] on that
@@ -69,12 +73,12 @@ spec:
               The console's Authentik API token `iw-console-api-token` has less than
               60 days left ({{ $value | humanizeDuration }} remaining) and nothing
               renews it. Rotate it on a day you choose, not on the day it lapses:
-              the procedure is manual and needs the OpenBao root token, so it cannot
-              be done in the five minutes before a demo. Follow the rotation record
-              in docs/BREAK-GLASS.md §10 ("Resolved 2026-08-07 — `iw-admin-token`
-              ROTATED and deleted"), which is the exact sequence that minted this
-              token. The replacement MUST keep the identifier `iw-console-api-token`
-              or this metric stops existing and you get an Unobservable page instead.
+              run `bash scripts/rotate-authentik-console-token.sh` (`--check` first
+              to see where you stand, `--dry-run` for the plan). It rotates the
+              existing token's KEY in place, so the identifier this metric looks up
+              cannot drift. It still needs kubectl-admin and it restarts the console,
+              so it is not a five-minutes-before-a-demo job. Background and the
+              manual fallback: docs/BREAK-GLASS.md §10.
 
         - alert: AuthentikConsoleTokenExpiryImminent
           expr: |
@@ -91,8 +95,9 @@ spec:
               the console makes returns 401 — user provisioning, invitations, group
               sync, RBAC assignment and every WordPress per-site access grant stop,
               quietly, because they fail one request at a time rather than all at
-              once. Rotate NOW, following docs/BREAK-GLASS.md §10, keeping the
-              identifier `iw-console-api-token`.
+              once. Rotate NOW: `bash scripts/rotate-authentik-console-token.sh --yes`.
+              It preserves the identifier `iw-console-api-token` by rotating the
+              existing token's key in place. Manual fallback: docs/BREAK-GLASS.md §10.
 
         # ── 2. Can we still see the expiry at all? ──────────────────────────
         # A dead exporter must not read as "healthy". `absent()` covers the console

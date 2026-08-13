@@ -1,14 +1,74 @@
 ---
 # ── Authentik Platform Users Blueprint ───────────────────────────────────────
-# Creates all platform users on first boot.
-# Passwords are injected via env vars (from ExternalSecret sourced from OpenBao).
 #
-# TO ADD A USER:
-#   1. Add entry to users.yaml (repo root) for documentation + sync
-#   2. Add an entry below for the Authentik user
-#   3. Add their password to OpenBao via seed-openbao-authentik.sh
-#   4. Add password mapping to externalsecret.yaml + env var to authentik/values.yaml
-#   (Group membership is set dynamically from users.yaml — no workflow changes needed)
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  THIS BLUEPRINT DELIBERATELY MANAGES NO USERS. DO NOT ADD ONE BACK       ║
+# ║  WITHOUT READING THE WHOLE HEADER — the last entry here created a live   ║
+# ║  account literally named "${ADMIN_USERNAME}".                            ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# ── WHAT WENT WRONG (measured 2026-08-13 against the live DB) ────────────────
+# This file used to carry one entry:
+#
+#     identifiers: {username: "${ADMIN_USERNAME}"}
+#     attrs:       {name: "${ADMIN_NAME}", email: "${ADMIN_EMAIL}",
+#                   password: !Env AUTHENTIK_ADMIN_PASSWORD, is_active: true}
+#
+# There are TWO renderers for these placeholders, and only one of them defines
+# the variables:
+#
+#   1. scripts/deploy/configure-authentik.sh runs
+#        envsubst '${ADMIN_USERNAME} ${ADMIN_NAME} ${ADMIN_EMAIL}'
+#      over the REPO-ROOT users.yaml — correct, but a different file.
+#
+#   2. ArgoCD renders THIS ConfigMap through the envsubst CMP sidecar, which
+#      passes `$ALLOWED_VARS` — built from the keys of the ConfigMap
+#      argocd/argocd-cmp-substitutions — to envsubst as its shell-format
+#      allowlist. An allowlisted envsubst leaves every NON-listed name
+#      LITERAL rather than blanking it.
+#
+# That ConfigMap defines ADMIN_EMAIL and BASE_DOMAIN. It does NOT define
+# ADMIN_USERNAME or ADMIN_NAME. So the rendered blueprint reached the worker as
+# `username: "${ADMIN_USERNAME}"` with a correctly-substituted email, and
+# Authentik faithfully created a real, is_active, pbkdf2-hashed account named
+# `${ADMIN_USERNAME}` carrying the operator's own email address
+# (date_joined 2026-08-12). The literal ConfigMap on the cluster still showed
+# the unexpanded name, which is how this was confirmed rather than inferred.
+#
+# ── WHY THE ENTRY IS GONE RATHER THAN REPAIRED ───────────────────────────────
+# The two obvious repairs are both worse than deletion:
+#
+#   ADMIN_USERNAME=admin  → every ArgoCD sync would reassert
+#                           `password: !Env AUTHENTIK_ADMIN_PASSWORD` onto the
+#                           LIVE operator superuser. A blueprint that can reset
+#                           the only administrator's password from OpenBao on
+#                           every sync is an availability risk on the single
+#                           lock in front of ArgoCD, the console, Nextcloud,
+#                           Jellyfin and the WordPress fleet.
+#   ADMIN_USERNAME=admin  → mints a SECOND privileged account instead of
+#                           removing the stray one.
+#
+# Nothing needs this entry, and that was checked, not assumed:
+#   * Bootstrap is Authentik's own, not this file. AUTHENTIK_BOOTSTRAP_PASSWORD
+#     / _TOKEN / _EMAIL are all wired in ../values.yaml and present on both
+#     Deployments, and they create the `akadmin` superuser on an empty database.
+#     (Live DB has no `akadmin`: it is the account since renamed to `admin`,
+#     date_joined 2026-06-14, hours after the default blueprints ran.)
+#   * Group membership and is_superuser are set imperatively by
+#     scripts/deploy/configure-authentik.sh from the repo-root users.yaml —
+#     never by this file.
+#   * Disaster recovery is covered by blueprints/00-break-glass-account.yaml.
+#
+# ── THE RULE THIS FILE NOW ENCODES ───────────────────────────────────────────
+# A blueprint must never carry BOTH a `password:` and an identifier that is
+# subject to envsubst. Get the variable wrong and you either create a phantom
+# privileged account or reset a real one — and both failure modes are silent,
+# because Authentik reports a successful apply either way.
+#
+# TO ADD A USER: do NOT add it here. Add it to users.yaml at the repo root;
+# scripts/deploy/configure-authentik.sh provisions it and sets its groups. If a
+# future user genuinely must be blueprint-managed, use a LITERAL username and
+# omit `password:` entirely, then set the credential out of band.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,18 +79,14 @@ data:
     version: 1
     metadata:
       name: Platform Users Setup
-    entries:
-      # ── Platform admin user ───────────────────────────────────────────────────
-      # Username = admin (from .env). sub_mode=user_username means
-      # this username is also the ArgoCD principal ID.
-      - model: authentik_core.user
-        state: present
-        identifiers:
-          username: "${ADMIN_USERNAME}"
-        attrs:
-          name: "${ADMIN_NAME}"
-          email: "${ADMIN_EMAIL}"
-          password: !Env AUTHENTIK_ADMIN_PASSWORD
-          is_active: true
+      labels:
+        blueprints.goauthentik.io/description: >-
+          Intentionally empty. The admin entry that lived here rendered as a
+          literal "${ADMIN_USERNAME}" account because that variable is not
+          defined in argocd/argocd-cmp-substitutions. Users are provisioned
+          from the repo-root users.yaml by scripts/deploy/configure-authentik.sh;
+          the superuser is bootstrapped by AUTHENTIK_BOOTSTRAP_*. See the file
+          header before adding anything here.
+    entries: []
 
 

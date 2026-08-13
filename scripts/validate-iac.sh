@@ -19,13 +19,27 @@
 #                         selfHeal re-asserts it, so it is the live credential,
 #                         not a TODO. Narrow per-secret exemptions only, via
 #                         PLACEHOLDER_EXEMPT below.
-#   4. cron-secret seed gate — every secret key an in-cluster CronJob depends on,
-#                         when sourced (via its ExternalSecret) from a catalog
-#                         app's OpenBao path, must be declared in that app's
-#                         catalog.yaml `secrets.keys`. Otherwise seed-catalog-
-#                         secrets.sh never seeds it on a fresh install, ESO can't
-#                         sync the key, and the CronJob (and any Deployment that
-#                         shares the key) fails to start — silently, forever.
+#   4. cron-secret seed gate — a secret key a workload names has to survive TWO
+#                         hops, and this gate checks both:
+#                           catalog.yaml `secrets.keys` → the value exists in OpenBao
+#                           ExternalSecret `spec.data`  → it reaches the k8s Secret
+#                         Miss the first and seed-catalog-secrets.sh never seeds it
+#                         on a fresh install. Miss the second and ESO never puts it
+#                         in the Secret at all — creationPolicy: Owner means no
+#                         other writer exists. Either way the CronJob (and any
+#                         Deployment sharing the key) fails to start, silently and
+#                         forever; `optional: true` converts that into starting
+#                         with the value EMPTY, which is quieter still.
+#   5. alerting rules  — promtool check/test, plus a scan for duplicate
+#                         alertnames and identical expressions across
+#                         PrometheusRules.
+#   6. armed-blueprint gate — the Authentik IP-reputation lockout may not be
+#                         mounted while its own arming procedure still marks the
+#                         Cloudflare X-Forwarded-For prerequisite outstanding.
+#                         Armed early it is not a weak control, it is a remote
+#                         DoS on login: any caller can pick a victim address. The
+#                         warning and the mount shipped in the same commit once
+#                         already, which is why this is a gate and not a comment.
 #
 # Usage: scripts/validate-iac.sh [--repo-root <path>]
 # Exit non-zero on any failure (CI-friendly).
@@ -69,7 +83,7 @@ SECRET_BASELINE=()
 # credential and needs no entry.
 PLACEHOLDER_EXEMPT=()
 
-echo "── 1/5 kustomize build (overlays) ───────────────────────────────────────"
+echo "── 1/6 kustomize build (overlays) ───────────────────────────────────────"
 mapfile -t OVERLAYS < <(find kubernetes -type f -path '*/overlays/*/kustomization.yaml' -printf '%h\n' | sort -u)
 if [[ ${#OVERLAYS[@]} -eq 0 ]]; then
   echo "  (no overlays yet — skipping)"
@@ -87,7 +101,7 @@ for d in "${OVERLAYS[@]}"; do
   fi
 done
 
-echo "── 2/5 kubeconform (flat manifest dirs without overlays) ─────────────────"
+echo "── 2/6 kubeconform (flat manifest dirs without overlays) ─────────────────"
 if command -v kubeconform >/dev/null 2>&1; then
   mapfile -t FLAT < <(find kubernetes -type d -name manifests | sort)
   for d in "${FLAT[@]}"; do
@@ -99,7 +113,7 @@ else
   echo "  kubeconform not installed — skipping (CI installs it)"
 fi
 
-echo "── 3/5 secret-leak gate ──────────────────────────────────────────────────"
+echo "── 3/6 secret-leak gate ──────────────────────────────────────────────────"
 LEAKS="$(BASELINE="${SECRET_BASELINE[*]}" EXEMPT="${PLACEHOLDER_EXEMPT[*]}" python3 - << 'PY'
 import glob, yaml, os
 baseline = set(os.environ.get("BASELINE","").split())
@@ -149,7 +163,7 @@ else
   echo "  ✓ no committed secrets or write-me placeholders (baseline: ${#SECRET_BASELINE[@]}, exempt: ${#PLACEHOLDER_EXEMPT[@]})"
 fi
 
-echo "── 4/5 cron-secret seed gate ─────────────────────────────────────────────"
+echo "── 4/6 cron-secret seed gate ─────────────────────────────────────────────"
 CRON_GAPS="$(python3 - << 'PY'
 import glob, yaml
 
@@ -160,15 +174,29 @@ def load(f):
         return []
 
 # 1. ExternalSecret map: k8s Secret name -> { secretKey: (openbao_key, property) }
+#
+# `es_opaque` records the targets whose final key set this file cannot enumerate,
+# so §3 must not claim a key is missing from them:
+#   - `spec.target.template.data` RENAMES the fetched values. bookstack fetches
+#     `secretKey: appKey` and the template emits a key literally called `value`
+#     (`base64:{{ .appKey | trunc 32 | b64enc }}`), which deployment.yaml is what
+#     reads. Judging that target by spec.data alone reports a live, working app as
+#     unable to start.
+#   - `spec.dataFrom` (extract/find) pulls an entire OpenBao path, so the produced
+#     keys are whatever the store holds and are not knowable from the manifest.
 es = {}
+es_opaque = set()
 es_retain_refs = []  # (target, openbao_key, property) for every Retain-policy ES data entry
 for f in glob.glob('kubernetes/**/*.yaml', recursive=True):
     for d in load(f):
         if not isinstance(d, dict) or d.get('kind') not in ('ExternalSecret', 'ClusterExternalSecret'):
             continue
         spec = d.get('spec', {})
+        if d.get('kind') == 'ClusterExternalSecret':
+            spec = (spec.get('externalSecretSpec') or spec)
         target = (spec.get('target') or {}).get('name') or (d.get('metadata') or {}).get('name')
         deletion_policy = (spec.get('target') or {}).get('deletionPolicy')
+        template = ((spec.get('target') or {}).get('template') or {})
         mapping = {}
         for item in (spec.get('data') or []):
             rr = item.get('remoteRef', {}) or {}
@@ -178,6 +206,8 @@ for f in glob.glob('kubernetes/**/*.yaml', recursive=True):
                 es_retain_refs.append((target, rr.get('key'), rr.get('property') or sk))
         if target:
             es[target] = mapping
+            if template.get('data') or template.get('templateFrom') or spec.get('dataFrom'):
+                es_opaque.add(target)
 
 # 2. Catalog apps that own an OpenBao path via their declared secrets: section.
 #    Normalise: catalog `path: platform/x` == ExternalSecret `key: secret/platform/x`.
@@ -200,27 +230,66 @@ for f in glob.glob('kubernetes/catalog/*/catalog.yaml'):
     if p:
         owned[p] = (d.get('name', f.split('/')[-2]), set((s.get('keys') or {}).keys()))
 
-# 3. Every CronJob secretKeyRef whose backing key comes from an owned path must be
+# 3. Every workload secretKeyRef whose backing key comes from an owned path must be
 #    a declared key (else bootstrap never seeds it and the job can't start).
+#
+#    TWO chains have to hold, and this gate used to check only the second half of
+#    the first one:
+#      catalog.yaml secrets.keys  →  the value exists in OpenBao
+#      ExternalSecret spec.data   →  the value reaches the k8s Secret
+#    `placement-rebalance-cron-token` was declared in catalog.yaml and named by the
+#    CronJob and the Deployment — and by no ExternalSecret entry. The lookup below
+#    returned None, the old code read that as "raw/generated Secret, out of scope"
+#    and skipped it, and the gate reported PASSED while the CronJob sat in
+#    CreateContainerConfigError on every schedule for as long as it existed.
+#    A Secret produced by an ExternalSecret with creationPolicy: Owner has no other
+#    writer, so a key missing from spec.data can never appear: that is a MISSING
+#    ENTRY, not an out-of-scope one. Only a Secret name no ExternalSecret produces
+#    at all is genuinely out of scope.
+#
+#    `optional: true` does not excuse it either — that flag is what let the console
+#    Deployment start with an EMPTY token and hid the same defect on its other half.
+#    An env var that can never be populated is dead config, so it is reported too,
+#    with its own wording.
+WORKLOAD_PODSPEC = {
+    'CronJob': lambda d: d['spec']['jobTemplate']['spec']['template']['spec'],
+    'Deployment': lambda d: d['spec']['template']['spec'],
+    'StatefulSet': lambda d: d['spec']['template']['spec'],
+    'DaemonSet': lambda d: d['spec']['template']['spec'],
+    'Job': lambda d: d['spec']['template']['spec'],
+}
 violations = []
 for f in glob.glob('kubernetes/**/*.yaml', recursive=True):
     for d in load(f):
-        if not isinstance(d, dict) or d.get('kind') != 'CronJob':
+        if not isinstance(d, dict) or d.get('kind') not in WORKLOAD_PODSPEC:
             continue
-        job = (d.get('metadata') or {}).get('name', '?')
+        kind = d['kind']
+        job = f"{kind}/{(d.get('metadata') or {}).get('name', '?')}"
         try:
-            pod = d['spec']['jobTemplate']['spec']['template']['spec']
+            pod = WORKLOAD_PODSPEC[kind](d)
         except Exception:
             continue
-        for c in pod.get('containers', []):
+        containers = (pod.get('containers') or []) + (pod.get('initContainers') or [])
+        for c in containers:
             for e in (c.get('env') or []):
                 skr = (e.get('valueFrom') or {}).get('secretKeyRef')
                 if not skr:
                     continue
                 sec, key = skr.get('name'), skr.get('key')
-                src = es.get(sec, {}).get(key)
+                if sec not in es:
+                    continue  # no ExternalSecret produces this Secret — raw/generated, out of scope
+                if sec in es_opaque:
+                    continue  # a template/dataFrom decides the final key set — not enumerable here
+                src = es[sec].get(key)
                 if not src:
-                    continue  # not ExternalSecret-backed here (raw/generated) — out of scope
+                    how = ("declared optional, so the workload starts with the value EMPTY"
+                           if skr.get('optional')
+                           else "not optional, so the pod cannot start at all")
+                    violations.append(
+                        f"{job}: needs {sec}[{key}], but no ExternalSecret data entry produces "
+                        f"that key and creationPolicy: Owner leaves the Secret no other writer "
+                        f"({how})")
+                    continue
                 path, prop = norm(src[0]), src[1]
                 if path in owned:
                     app, keys = owned[path]
@@ -252,10 +321,10 @@ if [[ -n "$CRON_GAPS" ]]; then
   echo "$CRON_GAPS" | sed 's/^/      /'
   FAILED=1
 else
-  echo "  ✓ every CronJob secret key sourced from a catalog path is declared (bootstrap will seed it)"
+  echo "  ✓ every workload secret key is declared in its catalog.yaml AND produced by an ExternalSecret"
 fi
 
-echo "── 5/5 alerting rules (promtool + duplicate scan) ────────────────────────"
+echo "── 5/6 alerting rules (promtool + duplicate scan) ────────────────────────"
 # Alerting rules used to have no gate at all. Two real defects shipped through
 # that gap: a >85% node-memory alert existed twice under different alertnames in
 # two files (one condition, two Discord pages, un-inhibitable because
@@ -362,6 +431,46 @@ if command -v promtool >/dev/null 2>&1; then
   fi
 else
   echo "  promtool not installed — skipping check/test (CI installs it; see .github/workflows/validate-iac.yml)"
+fi
+
+echo "── 6/6 armed-blueprint gate ──────────────────────────────────────────────"
+# A security control that is WRONG is worse than one that is absent, and this
+# repo has already written the proof of it: manifests/blueprints/
+# 70-brute-force-reputation.yaml documents, in its own §3c, that arming the
+# Authentik IP-reputation lockout while Cloudflare still appends to a
+# caller-supplied X-Forwarded-For turns the control into a remote DoS — 21 failed
+# logins carrying `X-Forwarded-For: <victim>` deny that address login for 24h,
+# and any unauthenticated caller picks the victim.
+#
+# The mount and the warning shipped in the SAME commit on
+# fix/traefik-cloudflare-xff-arm-brute-force, so the warning could not stop it:
+# whoever merged the branch would have armed the policy and read the reason
+# afterwards. A comment is not a gate. This is.
+#
+# The rule: the blueprint may be listed in values.yaml `blueprints.configMaps`
+# only once its own arming procedure no longer marks step 0b OUTSTANDING.
+# Closing 0b means editing the blueprint, so the two cannot drift apart.
+BF_BLUEPRINT="kubernetes/platform/authentik/manifests/blueprints/70-brute-force-reputation.yaml"
+BF_VALUES="kubernetes/platform/authentik/values.yaml"
+if [[ -f "$BF_BLUEPRINT" && -f "$BF_VALUES" ]]; then
+  # An uncommented list entry only — the disarmed form is commented out.
+  if grep -qE '^[[:space:]]*-[[:space:]]*authentik-blueprint-brute-force[[:space:]]*$' "$BF_VALUES"; then
+    if grep -qE '0b\.[[:space:]]*\[OUTSTANDING\]' "$BF_BLUEPRINT"; then
+      echo "  ✗ authentik-blueprint-brute-force is MOUNTED while its own §4 step 0b is still [OUTSTANDING]."
+      echo "      Arming the IP-reputation lockout before the Cloudflare Transform Rule exists makes"
+      echo "      login remotely deniable for any address an attacker names. Close 0b in"
+      echo "      $BF_BLUEPRINT (and prove it: a request with a bogus X-Forwarded-For must be"
+      echo "      recorded under the real caller) before listing it in $BF_VALUES."
+      FAILED=1
+    else
+      echo "  ✓ brute-force blueprint is mounted and its §3c prerequisite is marked closed"
+    fi
+  else
+    echo "  ✓ brute-force blueprint is not mounted (§3c still open — see values.yaml)"
+  fi
+else
+  echo "  ✗ expected blueprint/values pair not found — this gate is not guarding anything"
+  FAILED=1
 fi
 
 echo "──────────────────────────────────────────────────────────────────────────"

@@ -105,7 +105,7 @@ it. Do not copy it out.
 | **A.8.32** | **Branch protection unavailable (RISK-02)** | `gh api repos/example-owner/InfraWeaver-infra/branches/main/protection` | **HTTP 403** `"Upgrade to GitHub Pro or make this repository public…"`. The single most important negative evidence in this pack |
 | A.8.32 | **Push-triggered apply (RISK-02/04)** | `grep -nE 'on:\|branches:\|make apply' <infrastructure>/.github/workflows/tofu.yml` | `push: branches: [main, ontwikkel]` … `run: ENV=… make apply` at line 151 |
 | A.8.29 | CI gate definitions | `ls -1 .github/workflows/ && grep -n 'name:' .github/workflows/validate-iac.yml \| head` | `validate-iac.yml`, `validate-code.yml`, `build-cmp-tools.yml`, `sync-to-public.yml` |
-| A.8.29 | 5-stage IaC gate | `grep -nE '── [0-9]/5' scripts/validate-iac.sh` | kustomize build · kubeconform · secret-leak gate · cron-secret seed gate · alert-rule (promtool) |
+| A.8.29 | 6-stage IaC gate | `grep -nE '── [0-9]/6' scripts/validate-iac.sh` | kustomize build · kubeconform · secret-leak gate · cron-secret seed gate · alert-rule (promtool) · armed-blueprint gate |
 | A.8.29 | Secret-leak baseline | `grep -A6 'Known pre-existing raw Secrets' scripts/validate-iac.sh` | Baseline list is **empty** — every previously committed raw Secret has been migrated to ExternalSecret/OpenBao |
 | A.8.29 | Incident-derived netpol gate | `head -30 scripts/validate-netpol-ports.sh` | Documents the `allow-traefik-ingress` SSO outage it exists to prevent |
 | A.8.29 | Infra security gates | `grep -nE 'checkov\|tfsec\|soft_fail\|sops' <infrastructure>/.github/workflows/security-scan.yml \| head` | Checkov `soft_fail: false` + fail-on-HIGH; tfsec fail on CRITICAL/HIGH; SOPS encryption validation; aggregate policy gate |

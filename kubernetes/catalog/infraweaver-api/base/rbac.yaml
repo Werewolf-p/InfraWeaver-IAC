@@ -216,13 +216,56 @@ rules:
   #
   # NOT create: this service never creates a pod anywhere, and cluster-wide
   # pod-create would re-open the escalation this change closes.
-  # NOT patch, still: see the namespace-cleanup entry in R4. The finalizer-strip
-  # branch wants `patch pods` and the job sweep wants `delete jobs`, but that
-  # handler cannot be reached from any UI — the client/server contract does not
-  # line up (evidence in R4), so granting two cluster-wide destructive verbs
-  # would change nothing an operator can actually do. Fix the contract first.
+  #
+  # NOT patch, and now permanently rather than pending a fix. The only caller
+  # that ever wanted `patch pods` was namespace-cleanup's finalizer-strip branch,
+  # and that branch has been REMOVED from the handler
+  # (apps/infraweaver-api/src/lib/namespace-cleanup.ts, `classifyPod`). A
+  # finalizer is a controller saying "I have not finished releasing this object's
+  # resources" — on this platform most often a Longhorn volume detach — so
+  # clearing one from a fleet sweep orphans whatever that controller was midway
+  # through. The preview NAMES those pods so an operator can clear them by hand
+  # after checking who owns the finalizer; the sweep leaves them alone. That is a
+  # smaller feature and one less cluster-wide destructive verb, deliberately.
   - apiGroups: [""]
     resources: ["pods"]
+    verbs: ["delete"]
+  # Job DELETE, cluster-wide — the other half of `POST /cluster/namespace-cleanup`,
+  # which removes Jobs that have finished (no active pods, and a succeeded or
+  # failed count) from the operator-named namespace.
+  #
+  # GRANTED NOW, AND NOT BEFORE, because the feature is finally reachable. R4
+  # withheld this on the grounds that the endpoint could not be invoked from any
+  # UI — the console POSTed `{ preview: true }` while the schema required
+  # `{ namespace }`, so every call 400'd. That contract is fixed: the handler has
+  # a real read-only preview mode, the page renders its candidates and offers a
+  # per-namespace sweep behind a hold-to-confirm, and the two request shapes are
+  # pinned from both sides
+  # (apps/infraweaver-api/src/lib/namespace-cleanup.test.ts and the console's
+  # tests/unit/namespace-cleanup-preview-and-failure.test.tsx). The grant now
+  # completes a path an operator can actually walk.
+  #
+  # WHY CLUSTER-WIDE: the namespace is a request field, exactly as for the pod
+  # delete directly above, so there is no fixed set for a Role to cover. The
+  # handler refuses kube-system / kube-public / kube-node-lease server-side —
+  # that is an application-layer bound, NOT RBAC, and RBAC cannot express it
+  # because RBAC has no deny.
+  #
+  # WHAT IT COSTS, honestly: this service can delete any Job in the cluster.
+  # That can destroy a completed Job's history and, for a Job still owned by a
+  # CronJob, remove the record the CronJob's concurrency policy reads. It cannot
+  # disclose anything — a Job object carries a pod template and status counters,
+  # no credential material — and it cannot CREATE a Job, so it does not become a
+  # way to run a workload. Deleting a running Job is possible in principle; the
+  # handler will not do it (`classifyJob` refuses anything with active pods), and
+  # that guard is application-layer too.
+  #
+  # NOT create/update/patch: no caller writes a Job anywhere in this service, and
+  # `create jobs` would be cluster-admin in one object for the same reason
+  # `create deployments` was — it schedules a pod with a ServiceAccount of the
+  # caller's choosing.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["delete"]
   # Node PATCH, cluster-wide — `PATCH /k8s/nodes/:name/cordon` (routes/nodes.ts),
   # which sets `spec.unschedulable`. Also the implicit cordon inside the /cluster
@@ -542,21 +585,35 @@ subjects:
 #        · `create namespaces`              → community-app install. The one that
 #          actually broke an operator-facing flow; justified inline above.
 #
+#        · `delete jobs` → /cluster/namespace-cleanup. GRANTED LATER THAN THE
+#          REST, and the delay was the point: it was withheld while the endpoint
+#          was unreachable, and granted once the contract was fixed and the
+#          feature demonstrably worked end to end. Justified inline above.
+#
 #        NOT GRANTED, deliberately:
-#        · `create pods/exec` — routes/exec.ts is now DISABLED in code and
-#          answers 501 with the reason. Exec exposes every Secret and the SA
-#          token of the target pod, and EXEC_ALLOWED_NAMESPACES pointed at
-#          infraweaver-console / infraweaver-system, i.e. at the platform's own
-#          credentials. Granting it would re-open by another door the disclosure
-#          escalation #1 closed. It has never worked, so nothing regresses.
-#        · `patch pods` + `delete jobs` — the other two halves of
-#          /cluster/namespace-cleanup. The feature is unreachable: the console
-#          page POSTs `{ preview: true }` and reads `data.namespaces`, while the
-#          handler's zod schema requires `{ namespace }` and has no preview mode
-#          at all, so every call from the UI 400s before touching the cluster.
-#          Granting two cluster-wide destructive verbs to complete a code path no
-#          operator can invoke buys nothing. The contract is the blocker; fix it
-#          first, then revisit this grant with the feature actually working.
+#        · `create pods/exec` — routes/exec.ts is DISABLED in code and answers
+#          501 with the reason, now pinned by routes/exec-disabled.test.ts (which
+#          also fails if any file in the service acquires a Kubernetes exec
+#          client or reads an EXEC_ALLOWED_NAMESPACES again).
+#          ONE CORRECTION to the earlier reasoning, because it changes what a
+#          future proposal has to argue: RBAC CAN bound exec by namespace — a
+#          Role granting `create pods/exec` is scoped to that namespace, and the
+#          CONSOLE ServiceAccount already relies on exactly that in ns/wordpress
+#          and ns/game-hub. What RBAC cannot bound is the COMMAND. So the
+#          surviving objections are (a) this identity is the wrong one to hold
+#          it — infraweaver-api has cluster-wide secret write and ArgoCD
+#          Application write, and exec makes the caller become the target pod;
+#          (b) a command allow-list is application-layer with nothing behind it,
+#          so any bypass is arbitrary code execution; and (c) every in-pod
+#          command the console genuinely runs is already run by a path that
+#          constructs it (execInWpPod, the Game Hub actions), so a generic shell
+#          removes a bound rather than adding a capability. The conditions for
+#          re-enabling are written out at the top of routes/exec.ts.
+#        · `patch pods` — was the finalizer-strip half of namespace-cleanup.
+#          That branch is now GONE from the handler rather than waiting on a
+#          grant: stripping a finalizer from a fleet sweep orphans whatever
+#          controller set it. Stuck pods are reported, not touched. See the
+#          `pods: delete` rule above.
 #  R5. RESOLVED. `GET /secrets` no longer calls listSecretForAllNamespaces. It
 #      reads secrets one namespace at a time: the default view is the inventory
 #      set (infraweaver-console + infraweaver-system — the namespaces a Role

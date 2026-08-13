@@ -110,6 +110,60 @@ logs:
           X-Forwarded-For: keep
           X-Real-Ip: keep
 
+# ── forwardedHeaders.trustedIPs — WHY, AND WHY ONLY ON web/websecure ─────────
+# Traefik strips inbound X-Forwarded-* from any peer NOT listed in trustedIPs and
+# rewrites XFF to the peer's address. With the list empty (the state until now)
+# every Cloudflare-proxied request reached the origin with XFF = the Cloudflare
+# edge, and Authentik — whose ClientIPMiddleware._get_client_ip_from_meta reads
+# X-Forwarded-For and returns ips[0] with, in its own words, "no additional
+# validation" — recorded that edge as the client. Measured on the live DB
+# 2026-08-13: every one of the top 20 external client_ip values on login /
+# login_failed / authorize_application events in the last 30 days is a Cloudflare
+# address (104.23.170.69, 172.70.46.221, 162.159.113.153, 141.101.76.72, …), and
+# both authentik_policies_reputation_reputation rows are scored against
+# 172.71.99.234. Per-user attribution, geo/ASN enrichment and any IP-based
+# reputation control are all reading the CDN, not the caller.
+#
+# TRUST IS PEER-BASED, NOT HOSTNAME-BASED. This is what makes the change safe for
+# the routes that deliberately bypass Cloudflare. trustedIPs is matched against
+# the TCP peer of the incoming connection, not against the Host header, so a
+# direct caller to registry.int (cloudflare-proxied: "false", and sharing THIS
+# websecure entrypoint) is still an untrusted peer: its XFF is discarded and
+# rewritten exactly as before. It cannot forge a source IP by sending its own
+# header. Only a connection genuinely originating from a Cloudflare edge has its
+# XFF preserved.
+#
+# The IP-based middlewares are unaffected either way: `lan-only` (ipAllowList)
+# and `rate-limit-public` (rateLimit) define no ipStrategy/sourceCriterion, and
+# Traefik's default for both is the remote address — the real peer under
+# externalTrafficPolicy: Local. grep confirms no `ipStrategy` anywhere in this
+# repo, so nothing silently switches to reading XFF because of this change.
+#
+# SCOPE. Only `web` and `websecure` carry Cloudflare-proxied HTTP. `registry`
+# (5005), `teleport-auth`/`teleport-node`/`teleport-proxy` and `extra-port` are
+# raw TCP or deliberately direct; `metrics` and `traefik` are internal-only.
+# None of them get trustedIPs — an entrypoint that trusts nobody keeps rewriting
+# XFF from the peer, which is the safe default and what they need.
+#
+# RANGES: Cloudflare's published lists, https://www.cloudflare.com/ips-v4/ and
+# /ips-v6/, fetched 2026-08-13. These change rarely but they DO change; a new
+# Cloudflare range not listed here degrades safely (that edge is untrusted, so
+# its clients look like the edge again — the pre-change behaviour), it does not
+# fail the request. Re-check against the published lists when auditing.
+#
+# ⚠️ RESIDUAL, READ BEFORE RELYING ON THIS FOR ANYTHING SECURITY-BEARING:
+# Cloudflare APPENDS to a client-supplied X-Forwarded-For rather than replacing
+# it ("If the request already includes an X-Forwarded-For header, Cloudflare
+# appends the client IP"), and Authentik reads ips[0] — the FIRST entry. So a
+# caller sending `X-Forwarded-For: 1.2.3.4` produces `1.2.3.4, <real client>` at
+# the origin and Authentik records 1.2.3.4. This change makes the recorded IP
+# per-client instead of per-edge, which is a strict improvement, but it does NOT
+# make it trustworthy. Closing that requires a Cloudflare Transform Rule that
+# overwrites the request header X-Forwarded-For with `ip.src` (or removes the
+# visitor-supplied one) — edge config, not expressible in this repo. Cloudflare's
+# own guidance is to prefer CF-Connecting-IP, which cannot be spoofed; that is
+# already what the rate limiters in manifests/middleware-rate-limit.yaml bucket
+# on, and it is why they are safe today and this is not yet.
 ports:
   web:
     port: 8000
@@ -117,12 +171,41 @@ ports:
       default: true
     exposedPort: 80
     protocol: TCP
+    forwardedHeaders:
+      trustedIPs: &cloudflareTrustedIPs
+        # IPv4 — https://www.cloudflare.com/ips-v4/ (fetched 2026-08-13)
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 141.101.64.0/18
+        - 108.162.192.0/18
+        - 190.93.240.0/20
+        - 188.114.96.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 162.158.0.0/15
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 172.64.0.0/13
+        - 131.0.72.0/22
+        # IPv6 — https://www.cloudflare.com/ips-v6/ (fetched 2026-08-13)
+        - 2400:cb00::/32
+        - 2606:4700::/32
+        - 2803:f800::/32
+        - 2405:b500::/32
+        - 2405:8100::/32
+        - 2a06:98c0::/29
+        - 2c0f:f248::/32
   websecure:
     port: 8443
     expose:
       default: true
     exposedPort: 443
     protocol: TCP
+    forwardedHeaders:
+      # Same list as `web` — anchored above so the two entrypoints cannot drift.
+      trustedIPs: *cloudflareTrustedIPs
     tls:
       enabled: true
     transport:

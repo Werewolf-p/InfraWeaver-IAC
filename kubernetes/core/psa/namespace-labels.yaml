@@ -384,9 +384,10 @@ metadata:
 # `game-hub` AND `game-servers` ARE MISSING FROM THIS FILE ON PURPOSE
 # ═════════════════════════════════════════════════════════════════════════════
 # They need PSA labels at least as badly as wordpress does — they execute
-# third-party game mods — and they still have none. They are NOT added here
-# because doing so would fire the exact SSA fieldset collision this file's
-# header documents at length:
+# third-party game mods. As of 2026-08-13 they HAVE them (enforce=baseline,
+# audit/warn=restricted), set in the two owning manifests named below rather
+# than here. They are still NOT added to this file, because doing so would fire
+# the exact SSA fieldset collision this file's header documents at length:
 #
 #   game-hub      declared by kubernetes/catalog/game-hub/namespace.yaml
 #                 (labels: app.kubernetes.io/part-of: infraweaver)
@@ -403,14 +404,23 @@ metadata:
 # set-default-memory-limits (see resource-governance-policies.yaml), so pruning
 # it would silently move that policy's scope too.
 #
-# THE FIX IS THREE LINES IN THE TWO FILES NAMED ABOVE, not a block here:
+# THE FIX WAS THREE LINES IN THE TWO FILES NAMED ABOVE, not a block here, and
+# it has been APPLIED (2026-08-13):
 #     pod-security.kubernetes.io/enforce: baseline
 #     pod-security.kubernetes.io/audit: restricted
 #     pod-security.kubernetes.io/warn: restricted
 # baseline, not restricted, for the same reason as wordpress above: enforcing
 # restricted would refuse admission to running game servers at their next
 # restart, and evicting somebody's game world is not a change to make from a
-# security sweep.
+# security sweep. That is measured, not assumed — a server-side dry-run of
+# enforce=restricted on game-hub returns:
+#   Warning: gt-new-horizons-...: allowPrivilegeEscalation != false,
+#            unrestricted capabilities, runAsNonRoot != true, runAsUser=0,
+#            seccompProfile
+# while the same dry-run at enforce=baseline returns no warnings at all.
+#
+# DO NOT "consolidate" those labels back into this file later. The reason they
+# live in the app manifests is the SSA collision above, and it does not expire.
 ---
 # ── Manually-labeled leftover, brought under GitOps ──────────────────────────
 # apps-grafana carries privileged PSA applied by hand (field manager
