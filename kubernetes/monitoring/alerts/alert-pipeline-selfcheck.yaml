@@ -181,24 +181,48 @@ spec:
           # dead-man leg — the half that cannot be self-served, and the half that
           # detects this whole cluster dying — was still missing. That is the
           # same silent-disarm this file was bitten by once already today.
-          expr: absent(kube_secret_info{namespace="monitoring",secret="alertmanager-healthchecks-url"})
+          #
+          # RE-POINTED AGAIN 2026-08-13, and this time at something that exists.
+          # The watcher was built: scripts/deadman-watch.sh in the infrastructure
+          # repo, installed on the ops host under /etc/cron.d/infraweaver-deadman,
+          # every 5 minutes. It probes /readyz AND that Alertmanager's Watchdog is
+          # still firing — the second is the case no in-cluster alert can report,
+          # because a dead alert pipeline cannot alert on itself — and mails via
+          # smtp-mail.outlook.com, a third party reachable when this cluster is
+          # not. Its credential is cached in /etc/infraweaver/deadman.env at
+          # install time rather than read from OpenBao at run time, which would
+          # put the cluster back in the path.
+          #
+          # Keying on `alertmanager-healthchecks-url` was keying on the ABSENCE of
+          # a secret whose whole design had been withdrawn as a data leak. It
+          # could only ever fire, and it proved nothing about whether anybody was
+          # watching. This keys on the mark the watcher leaves behind instead.
+          #
+          # LIMITATION, stated rather than hidden: this proves a watcher HAS
+          # checked in, not that it checked in recently. kube-state-metrics
+          # exposes a ConfigMap's creation time, not its last update, so freshness
+          # is not expressible here. Freshness is proven by `deadman-watch.sh
+          # --test`, which sends a real mail and exits non-zero if SMTP refused
+          # it. Run it after any change to the mail path.
+          expr: absent(kube_configmap_info{namespace="monitoring",configmap="deadman-watcher-heartbeat"})
           for: 1h
           labels:
             severity: warning
           annotations:
-            summary: "Dead-man watcher is not provisioned (step 1 of 2)"
+            summary: "Dead-man watcher has never checked in"
             description: >-
-              No dead-man watcher is provisioned, so the ABSENCE of the
-              heartbeat from this platform is not detected by anything. The public
-              healthchecks.io endpoint this once pointed at was withdrawn on
-              purpose: alert content must not leave this network. The constraint
-              that remains is physics, not preference — a heartbeat that stops
-              when the cluster dies cannot be judged BY the cluster. It does not
-              have to leave the NETWORK, only the CLUSTER: a watcher on the
-              Proxmox host or the ops VM satisfies both. Until one exists, a dead
-              pipeline is something an operator must NOTICE rather than be told
-              about. Do NOT clear this by pointing at a public endpoint; that
-              trades a visible gap for an invisible data leak.
+              The ops-host dead-man watcher has never written its heartbeat
+              ConfigMap, so nothing outside this cluster is checking whether the
+              cluster still answers — and the ABSENCE of a heartbeat is the one
+              failure the cluster cannot report about itself. Fix on the ops host:
+              scripts/deadman-watch.sh in the infrastructure repo, installed to
+              /usr/local/sbin with /etc/infraweaver/deadman.env (0600) and
+              /etc/cron.d/infraweaver-deadman. Verify with `deadman-watch.sh
+              --status` and prove the mail path with `--test`, which exits
+              non-zero if SMTP refused it. Do NOT clear this by pointing at a
+              public endpoint such as healthchecks.io: alert content must not
+              leave this network, and that trade swaps a visible gap for an
+              invisible data leak.
 
         - alert: AlertEscalationReceiverNotWired
           # Step 2 has no direct metric: Alertmanager exports no per-receiver
