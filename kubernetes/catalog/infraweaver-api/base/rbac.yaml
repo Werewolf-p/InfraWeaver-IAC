@@ -1,53 +1,127 @@
 ---
-# ClusterRole: full read access + specific write operations for cluster management
+# ═══════════════════════════════════════════════════════════════════════════
+# InfraWeaver API RBAC
+#
+# SHAPE OF THIS FILE — read this before editing.
+#
+#   1. ClusterRole  infraweaver-api-reader          — cluster-wide READ only
+#   2. ClusterRole  infraweaver-api-cluster-writer  — the few cluster-wide
+#                                                      WRITES that genuinely
+#                                                      cannot be namespaced
+#   3. Role         infraweaver-api-console         — ns/infraweaver-console
+#   4. Role         infraweaver-api-registry        — ns/infraweaver-system
+#   5. Role         infraweaver-api-argocd          — ns/argocd
+#   6. Role         infraweaver-api-longhorn        — ns/longhorn-system
+#
+# WHY IT IS SPLIT THIS WAY
+# ------------------------
+# `infraweaver-api` was a single ClusterRole that was effectively cluster-admin.
+# It granted, to the ServiceAccount of the privileged Kubernetes-facing API the
+# console proxies to — the one that holds the cluster credentials — cluster-wide:
+#
+#   secrets:  get list watch create update patch delete   ← every credential in
+#                                                            the cluster
+#   apps/*:   create + delete                             ← run any pod, any ns,
+#                                                            with any SA
+#   namespaces: delete, pvc: create/delete, longhorn: full
+#
+# Two independent escalations, either of which alone is game over:
+#
+#   · Cluster-wide `get`/`list` on Secrets IS a cluster-wide credential read.
+#     RBAC cannot express "metadata only" — a `list` returns every value — so it
+#     handed over the ArgoCD admin token, the OpenBao token and everything ESO
+#     materialises. A single RCE or SSRF in this API escalated straight to total
+#     cluster compromise.
+#   · Cluster-wide `create deployments` is cluster-admin in one object: schedule
+#     a pod that mounts a privileged ServiceAccount token or a hostPath.
+#
+# The rule now is the same one the console's ClusterRole adopted, for the same
+# reason: cluster scope for READS, namespace scope for WRITES. Where a write
+# genuinely cannot be namespaced it lives in `infraweaver-api-cluster-writer`
+# under its own comment saying why.
+#
+# HOW THE WRITE-NAMESPACE SET WAS DERIVED — not guessed
+# -----------------------------------------------------
+# Every Kubernetes write in apps/infraweaver-api/src was enumerated (the full
+# set of `coreApi|appsApi|batchApi|customApi|autoscalingApi.*` call sites) and
+# each one's target namespace read off the source:
+#
+#   infraweaver-console — lib/bootstrap.ts (enroll secret, SECRET_NAMESPACE),
+#                         lib/mode.ts (mode ConfigMap, MODE_NAMESPACE),
+#                         routes/platform.ts (ghcr-pull-secret, PLATFORM_NAMESPACES),
+#                         routes/cluster.ts:/rollout (deployment restart —
+#                         name AND namespace are hard-coded literals)
+#   infraweaver-system  — lib/cluster-registry.ts (REGISTRY_NAMESPACE, a const,
+#                         not env-overridable), lib/shared-state.ts
+#                         (SHARED_STATE_NAMESPACE), routes/platform.ts
+#   argocd              — routes/community-apps.ts, every Application call site
+#                         passes the literal `namespace: 'argocd'`
+#   longhorn-system     — routes/longhorn.ts:/restore, the ONLY Longhorn write
+#                         (literal namespace)
+#
+# Deliberately NOT used as the write set: EXEC_ALLOWED_NAMESPACES
+# ("infraweaver-console,infraweaver-system,game-hub" in overlays/prod). That is
+# the pod-exec allow-list consumed by routes/exec.ts and nothing else. game-hub
+# appears there and is NOT a write namespace.
+#
+# THE "NEW NAMESPACE" PROBLEM — real here, and NOT pretended away
+# ---------------------------------------------------------------
+# Unlike the console, this API genuinely writes into namespaces that do not
+# exist yet and are not enumerable: routes/community-apps.ts installs a
+# community app into a namespace named after its slug, creating the namespace,
+# writing its Secrets, and deleting the namespace on uninstall. Those writes
+# CANNOT be namespace-scoped, so they stayed cluster-wide and are documented
+# individually below rather than hidden. The guard on them is application-layer
+# (the `infraweaver.io/source: community-apps` label check plus the
+# RESERVED_NAMESPACES denylist), not RBAC.
+#
+# WHAT WENT AWAY BECAUSE IT HAD NO CALLER AT ALL
+# -----------------------------------------------
+# `apps` create/delete/update, deployments/scale, statefulsets/scale and
+# persistentvolumeclaims create/delete were granted for "game server
+# management". This service has no game-server provisioning: there is no
+# create/delete of a Deployment, StatefulSet, ReplicaSet or DaemonSet anywhere
+# in its source, no PVC write, and no use of the scale subresource. Game Hub and
+# WordPress are console-side. Removing them closes the `create deployments`
+# escalation at zero functional cost.
+# ═══════════════════════════════════════════════════════════════════════════
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: infraweaver-api
+  name: infraweaver-api-reader
   labels:
     app: infraweaver-api
 rules:
-  # Core resources: full read
+  # Cluster-wide inventory for the Workloads / Cluster / Storage / Security
+  # pages. Genuinely read-only.
+  #
+  # `secrets` REMOVED — escalation #1. RBAC cannot express "list only the
+  # metadata" or "only the key names": a `list` on secrets returns every value,
+  # so a cluster-wide secret read IS a cluster-wide credential read. There is no
+  # safe narrower form of it, which is exactly why it had to go rather than
+  # shrink. Where this service legitimately reads a Secret it does so in a
+  # namespace it owns, and those reads are granted by the two namespace Roles
+  # below (infraweaver-console, infraweaver-system).
+  #
+  # `pods/exec` REMOVED. It was inert: exec is authorized as CREATE on the
+  # pods/exec subresource and this rule only ever granted get/list/watch, so
+  # `kubectl auth can-i create pods/exec --all-namespaces` already answered
+  # "no". Removing it changes no behaviour — see the residual-risk note R4.
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "pods/exec", "nodes", "events", "services", "configmaps", "secrets", "persistentvolumeclaims", "persistentvolumes"]
+    resources:
+      - pods
+      - pods/log
+      - nodes
+      - events
+      - services
+      - configmaps
+      - namespaces
+      - persistentvolumeclaims
+      - persistentvolumes
     verbs: ["get", "list", "watch"]
-  # Pods: allow delete for force-stop
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
-  # Namespaces: read + delete (community app uninstall cascades through namespace deletion)
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "delete"]
-  # PVCs: create for game server deployment
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "delete"]
-  # Secrets/ConfigMaps: full CRUD
-  - apiGroups: [""]
-    resources: ["secrets", "configmaps"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Apps: full CRUD for game server management
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Scale sub-resources
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "update", "patch"]
-  # Longhorn: full access including backups
-  - apiGroups: ["longhorn.io"]
-    resources: ["volumes", "nodes", "replicas", "engines", "backupvolumes", "backups", "backuptargets", "recurringjobs"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods", "nodes"]
-    verbs: ["get", "list"]
-  - apiGroups: ["argoproj.io"]
-    resources: ["applications", "appprojects"]
-    verbs: ["get", "list", "watch", "patch", "update", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
@@ -57,14 +131,30 @@ rules:
   - apiGroups: ["traefik.io"]
     resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps", "middlewares", "traefikservices"]
     verbs: ["get", "list", "watch"]
+  # Longhorn read for the Storage pages. The write half is now a Role in
+  # longhorn-system — the only namespace a Longhorn object is ever written in.
+  - apiGroups: ["longhorn.io"]
+    resources: ["volumes", "nodes", "replicas", "engines", "backupvolumes", "backups", "backuptargets", "recurringjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets", "secretstores", "clustersecretstores"]
+    verbs: ["get", "list", "watch"]
+  # ArgoCD Applications read cluster-wide — the /updates and /argocd panels list
+  # them. patch/update/delete moved to the argocd-namespace Role below.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: infraweaver-api
+  name: infraweaver-api-reader
   labels:
     app: infraweaver-api
 subjects:
@@ -74,9 +164,159 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: infraweaver-api
+  name: infraweaver-api-reader
 ---
-# Additional Role for cluster registry management (ConfigMaps + Secrets in infraweaver-system ns)
+# ═══════════════════════════════════════════════════════════════════════════
+# ClusterRole: the cluster-wide WRITES that cannot honestly be namespaced.
+#
+# Named for what it is. Everything in here is deliberate and justified inline;
+# nothing in here can read a Secret, and nothing in here can create a workload.
+#
+# The test applied to every rule below was: "is there a call site that writes
+# this resource in a namespace that is NOT infraweaver-console / infraweaver-
+# system / argocd / longhorn-system?" Where the answer was no, the verb was
+# deleted from cluster scope and left to the namespace Role that now carries it.
+# Every rule that survived did so because its namespace comes from an HTTP
+# parameter or a user-chosen app slug, i.e. it is not a fixed set.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infraweaver-api-cluster-writer
+  labels:
+    app: infraweaver-api
+rules:
+  # Pod DELETE, cluster-wide. `POST /cluster/namespace-cleanup` sweeps Evicted
+  # and Failed pods out of an operator-supplied namespace (routes/cluster.ts) —
+  # the namespace is a request field, so the target set is every namespace.
+  # cluster:admin gated in the API.
+  #
+  # NOT create: this service never creates a pod anywhere, and cluster-wide
+  # pod-create would re-open the escalation this change closes.
+  # NOT patch: the finalizer-strip branch in the same handler wants `patch pods`
+  # and has never had it (measured: can-i patch pods = no). Left as-is — see R4.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  # ConfigMap write, cluster-wide. ACCEPTED RISK, not a clean result — see R1.
+  # `PATCH/DELETE /config-maps/:namespace/:name` takes the namespace straight
+  # from the URL path with no allow-list (routes/config-maps.ts), so this is
+  # unbounded by construction. Narrowing it needs the route to carry an
+  # allow-list first; that is a code change, not something to guess at here.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "update", "patch", "delete"]
+  # Secret WRITE ONLY, cluster-wide — deliberately WITHOUT get/list/watch.
+  #
+  # Two unbounded callers force this:
+  #   · routes/community-apps.ts `POST /:slug/secrets` writes a community app's
+  #     Secrets into that app's own namespace, which is named after the slug and
+  #     may not exist yet. Not an enumerable set.
+  #   · routes/secrets.ts `DELETE /:namespace/:name` takes the namespace from
+  #     the URL path.
+  #
+  # The split of verbs is the whole point. `create`/`update` cannot read an
+  # existing credential, so this grant does NOT restore escalation #1: the
+  # ArgoCD admin token and the OpenBao token can be overwritten (destructive,
+  # and R2) but not disclosed. The ServiceAccount-token trick — create a
+  # `kubernetes.io/service-account-token` Secret and let the token controller
+  # fill it in — is closed by the same omission, because reading it back needs
+  # the `get` that is not here.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "patch", "delete"]
+  # Namespace DELETE, cluster-wide, for community-app uninstall
+  # (routes/community-apps.ts `DELETE /:slug`, catalog:delete gated). The
+  # namespace name is the app slug, so `resourceNames` cannot constrain it — the
+  # set is not known when this manifest is written. The real guard is in the
+  # route: it refuses unless the ArgoCD Application carries
+  # `infraweaver.io/source: community-apps`, with RESERVED_NAMESPACES as
+  # defence-in-depth. That is an application-layer control, NOT RBAC — R3.
+  #
+  # `create` is NOT granted, and is not granted today either (measured: can-i
+  # create namespaces = no) even though the same route calls createNamespace.
+  # Left exactly as it is: this change removes privilege, it does not add any.
+  # See R4.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infraweaver-api-cluster-writer
+  labels:
+    app: infraweaver-api
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-api
+    namespace: infraweaver-console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infraweaver-api-cluster-writer
+---
+# Role: the API's OWN namespace — its own stores and its own Deployment.
+#
+# This is what replaces the cluster-wide Secret READ for this service's internal
+# use. Callers, all pinned to infraweaver-console in source:
+#   · lib/bootstrap.ts   — reads and creates the enroll Secret
+#                          (SECRET_NAMESPACE, defaults to infraweaver-console)
+#   · routes/platform.ts — creates/replaces `ghcr-pull-secret` in each of
+#                          PLATFORM_NAMESPACES (this ns and infraweaver-system)
+#   · lib/mode.ts        — reads/creates/replaces the mode ConfigMap
+#   · routes/rbac-sync.ts — reads the `infraweaver-users` ConfigMap
+#
+# `deployments: get, patch` is `POST /cluster/rollout` (routes/cluster.ts),
+# which restarts the console by patching a restartedAt annotation. Both the name
+# AND the namespace are hard-coded literals in the handler — `infraweaver-console`
+# / `infraweaver-console` — so this one Role replaces the entire cluster-wide
+# `apps` write grant. No create, no delete: closes escalation #2.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-api-console
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-api
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-api-console
+  namespace: infraweaver-console
+  labels:
+    app: infraweaver-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-api-console
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-api
+    namespace: infraweaver-console
+---
+# Role: cluster registry + shared state, in infraweaver-system.
+#
+# Pre-existing Role, unchanged in content — it is now load-bearing rather than
+# supplementary, because it carries the Secret `get` that lib/cluster-registry.ts
+# used to satisfy from the cluster-wide grant. Callers, all pinned here:
+#   · lib/cluster-registry.ts — REGISTRY_NAMESPACE is a plain const, NOT
+#     env-overridable, so this cannot drift out from under the Role. Reads,
+#     creates, replaces and deletes the per-cluster credential Secrets (which is
+#     where a remote cluster's ArgoCD token lives) and the registry ConfigMap.
+#   · lib/shared-state.ts — leader/claim ConfigMaps (SHARED_STATE_NAMESPACE).
+#   · routes/platform.ts — `ghcr-pull-secret`, the second of PLATFORM_NAMESPACES.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -104,3 +344,136 @@ subjects:
   - kind: ServiceAccount
     name: infraweaver-api
     namespace: infraweaver-console
+---
+# Role: ArgoCD Application lifecycle for community apps, in ns/argocd.
+#
+# This replaces the cluster-wide `argoproj.io` patch/update/delete grant. Every
+# Application write in this service is in routes/community-apps.ts and every one
+# of them passes the literal `namespace: 'argocd'` — the bootstrap hard-refresh,
+# the finalizer strip, the create on install and the delete on uninstall. There
+# is no code path that writes an Application anywhere else, so cluster scope
+# bought nothing.
+#
+# Scoping this does NOT reduce the power of the grant, and pretending otherwise
+# would be dishonest: writing an ArgoCD Application means instructing a
+# cluster-admin controller to apply arbitrary manifests. It remains the largest
+# escalation path this service has — R2. The compensating control is the
+# route-level catalog:write / catalog:delete gate plus the trusted-repo and
+# reserved-namespace checks in the handler, not RBAC. It is scoped anyway
+# because a Role here is the honest description of what the code does.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-api-argocd
+  namespace: argocd
+  labels:
+    app: infraweaver-api
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-api-argocd
+  namespace: argocd
+  labels:
+    app: infraweaver-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-api-argocd
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-api
+    namespace: infraweaver-console
+---
+# Role: Longhorn volume restore, in ns/longhorn-system.
+#
+# This replaces the cluster-wide `longhorn.io/*` full-CRUD grant. The service has
+# exactly ONE Longhorn write: `POST /longhorn/restore` (routes/longhorn.ts)
+# creates a Volume with `spec.fromBackup`, at the literal namespace
+# `longhorn-system`. Everything else on the Longhorn panels is a list/get and is
+# served by the cluster-wide reader.
+#
+# Only `volumes`, and only `create`. The old grant included update/patch/delete
+# on replicas, engines, backuptargets and recurringjobs — no caller writes any of
+# them, and a writable `backuptargets` in particular would let this service
+# repoint every backup in the cluster at storage it chose.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infraweaver-api-longhorn
+  namespace: longhorn-system
+  labels:
+    app: infraweaver-api
+rules:
+  - apiGroups: ["longhorn.io"]
+    resources: ["volumes"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infraweaver-api-longhorn
+  namespace: longhorn-system
+  labels:
+    app: infraweaver-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infraweaver-api-longhorn
+subjects:
+  - kind: ServiceAccount
+    name: infraweaver-api
+    namespace: infraweaver-console
+# ═══════════════════════════════════════════════════════════════════════════
+# RESIDUAL RISK — what this change does NOT fix. Do not read the diff as "the
+# API is now least-privilege".
+#
+#  R1. ConfigMap write is still cluster-wide. `PATCH/DELETE
+#      /config-maps/:namespace/:name` takes its namespace from the URL, so there
+#      is no set to scope to. ConfigMaps frequently hold credentials people did
+#      not want to call Secrets, and a cluster-wide ConfigMap write can also
+#      retarget any component that reads its config from one. Blocked on the
+#      route carrying a namespace allow-list.
+#  R2. Writing an ArgoCD Application is still granted (in ns/argocd), and it
+#      instructs a cluster-admin controller to apply arbitrary manifests. This is
+#      an escalation path to cluster-admin by design. Namespacing it changed the
+#      blast radius not at all; the compensating control is the route's
+#      catalog:write gate + trusted-repo check, NOT RBAC.
+#  R3. Cluster-wide Secret WRITE and Namespace DELETE remain, because
+#      community-app install/uninstall targets a namespace named after a
+#      user-chosen slug. Their guard is the `infraweaver.io/source:
+#      community-apps` label check in routes/community-apps.ts. If that check is
+#      ever weakened, RBAC will not catch it. Narrowing these needs the code to
+#      confine community apps to a fixed namespace prefix that RBAC could match —
+#      which RBAC still cannot do, so it really needs a validating admission
+#      policy instead.
+#  R4. Several capabilities the code calls for were ALREADY not granted before
+#      this change and are still not granted: `patch nodes` (the cordon in
+#      routes/nodes.ts), `delete jobs` and `patch pods` (the other two halves of
+#      /cluster/namespace-cleanup), `patch horizontalpodautoscalers` (PATCH
+#      /cluster/hpa — the whole `autoscaling` group was absent), `create
+#      namespaces` (community-app install), `create pods/exec` (routes/exec.ts,
+#      so EXEC_ALLOWED_NAMESPACES currently gates a call that 403s anyway), and
+#      the reads behind /cluster/quotas (`resourcequotas`) and the PDB panel
+#      (`policy/poddisruptionbudgets`). All measured with `kubectl auth can-i`
+#      against the live ServiceAccount BEFORE this change. They are pre-existing
+#      gaps, NOT regressions introduced here; listed so nobody blames this commit
+#      when they surface. They were left alone on purpose — this change removes
+#      privilege and must not quietly add any.
+#  R5. KNOWN BREAKAGE, accepted as the point of the change: `GET /secrets` with
+#      no namespace (or namespace=all) calls listSecretForAllNamespaces and will
+#      now 503. The Security > Secrets inventory can only list Secrets in
+#      infraweaver-console and infraweaver-system. That IS escalation #1 — the
+#      panel was reading every credential in the cluster to render a key-name
+#      list. Restoring it needs the API to serve that view from metadata it is
+#      allowed to see, not a wider grant.
+#      Second, smaller case: routes/community-apps.ts re-reads an existing Secret
+#      to check its ownership label before overwriting it (the 409 branch), which
+#      needs `get` in the app's namespace. Fresh installs are unaffected;
+#      re-installing over an existing Secret will now fail closed with
+#      "Failed to create secrets" instead of overwriting.
+# ═══════════════════════════════════════════════════════════════════════════
