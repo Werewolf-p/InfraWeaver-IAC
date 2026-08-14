@@ -328,13 +328,20 @@ postgresql:
         # THE ACTUAL BACKUP for this database is the nightly logical dump in
         # manifests/pg-backup.yaml → Longhorn PVC → 01:00 NAS backup.
         recurring-job-group.longhorn.io/truenas-backup: "enabled"
-      # Was local-path ("stable with 2 nodes/cp3 offline"). That rationale
-      # expired: the cluster now runs cp1/cp3/cp4 across three physical hosts,
-      # and a local-path PV pinned this database to cp2 — draining cp2 on
-      # 2026-08-14 took SSO down entirely. Longhorn replicates it instead.
-      # If this claim is ever recreated empty, restore from the nightly
-      # logical dump in manifests/pg-backup.yaml.
-      storageClass: longhorn
+      # Attempted on Longhorn 2026-08-14 and reverted the same day. A
+      # local-path PV pins this database to one node, which is a real
+      # weakness — draining cp2 took SSO down. But Longhorn was worse here:
+      # with cp4 (hypatia, ~16 ms over WireGuard) in the replica set, Postgres
+      # died with
+      #     FATAL: could not open file "global/pg_filenode.map": I/O error
+      # because Longhorn acknowledges writes from EVERY replica, so one
+      # internet-latency replica stalls the whole volume.
+      #
+      # Before retrying: fence latency-sensitive volumes off the remote node
+      # (Longhorn disk tags / a dedicated StorageClass with a diskSelector),
+      # verify the volume stays healthy under load, and only then switch.
+      # Restore path either way is the nightly dump in manifests/pg-backup.yaml.
+      storageClass: local-path
       size: 2Gi
     resources:
       requests:
