@@ -1,0 +1,152 @@
+# In-cluster agent — identity and permissions.
+#
+# The agent exists so you can ask questions of the cluster from a browser the
+# same way you do over SSH today: read manifests, read logs, see events.
+#
+# It is READ-ONLY on purpose. An always-available shell with write access is a
+# standing privilege-escalation path: whoever reaches the terminal inherits
+# whatever the ServiceAccount can do. Reading is enough to diagnose; changing
+# things stays a deliberate act through the normal paths (git, ArgoCD, console).
+#
+# Explicitly NOT granted:
+#   - secrets (read access to Secrets is equivalent to owning the cluster)
+#   - any create/update/patch/delete verb
+#   - impersonation, RBAC editing, or escalate/bind
+#
+# To let a session write, bind a second, time-boxed Role to that session's
+# ServiceAccount — do not widen this one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infraweaver-agent
+  labels:
+    # Sessions run under the same restricted baseline as everything else.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-session
+  namespace: infraweaver-agent
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infraweaver-agent-readonly
+rules:
+  # Core read surface, minus Secrets.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - services
+      - endpoints
+      - namespaces
+      - nodes
+      - nodes/status
+      - events
+      - configmaps
+      - persistentvolumeclaims
+      - persistentvolumes
+      - serviceaccounts
+      - replicationcontrollers
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  # Platform CRDs worth being able to inspect.
+  - apiGroups: ["longhorn.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["traefik.io", "traefik.containo.us"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infraweaver-agent-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infraweaver-agent-readonly
+subjects:
+  - kind: ServiceAccount
+    name: agent-session
+    namespace: infraweaver-agent
+---
+# Egress: the agent needs the Kubernetes API, DNS, and outbound HTTPS (model
+# API + git). It must NOT be able to reach other workloads directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-session
+  namespace: infraweaver-agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-session
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only the ingress controller may reach the terminal, never pod-to-pod.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - port: 7681
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Kubernetes API via kube-prism on the node, and the apiserver directly.
+    - ports:
+        - port: 7445
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    # Outbound HTTPS for the model API and git. Excludes RFC1918 so a
+    # compromised session cannot pivot into the rest of the network.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
