@@ -19,7 +19,7 @@ import os
 import smtplib
 import ssl
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -35,7 +35,7 @@ if yaml:
         with open("users.yaml") as f:
             users_config = yaml.safe_load(f)
         all_users = users_config.get("users", {}) or {}
-    except Exception as e:
+    except (OSError, yaml.YAMLError) as e:
         print(f"WARN: could not load users.yaml: {e}", file=sys.stderr)
 
 # ── SMTP / env ────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ bao_unseal      = os.environ.get("BAO_UNSEAL", "unavailable")
 auth_admin_pass = os.environ.get("AUTHENTIK_ADMIN_PASS", "unavailable")
 admin_username  = os.environ.get("ADMIN_USERNAME", "admin")
 akadmin_pass    = os.environ.get("AUTHENTIK_AKADMIN_PASS", auth_admin_pass)
-timestamp       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+timestamp       = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 base_domain     = os.environ.get("BASE_DOMAIN", "yourdomain.com")
 admin_email     = os.environ.get("ADMIN_EMAIL", f"admin@{base_domain}")
 
@@ -429,6 +429,8 @@ try:
         s.login(smtp_user, smtp_pass)
         s.sendmail(smtp_user, smtp_to, msg.as_string())
     print(f"✅ Deployment summary email sent to {smtp_to}")
-except Exception as e:
+except (smtplib.SMTPException, OSError) as e:
+    # OSError covers ssl.SSLError and socket timeouts/refusals; both are the
+    # normal ways this fails. Anything else is a bug and should traceback.
     print(f"❌ Failed to send email: {e}", file=sys.stderr)
     sys.exit(1)

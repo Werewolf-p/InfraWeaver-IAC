@@ -19,7 +19,6 @@ Environment:
     IW_HOST       — interface to bind (default: 127.0.0.1)
     IW_INIT_TOKEN — bearer token for /api routes (auto-generated if unset)
 """
-from datetime import datetime
 import hmac
 import http.server
 import json
@@ -28,6 +27,8 @@ import os
 import re
 import secrets
 import shutil
+import socketserver
+import ssl
 import subprocess
 import sys
 import threading
@@ -35,10 +36,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
-import socketserver
-import ssl
 
 mimetypes.init()
 EXT_TYPES = {
@@ -76,7 +75,7 @@ TEMPLATE_DIR = _script_dir / "templates"
 OUT_DIR = _script_dir / "out"
 ENV_FILE = REPO_DIR / ".env"
 DEPLOY_LOCK = threading.Lock()
-CURRENT_DEPLOY: Optional[subprocess.Popen] = None
+CURRENT_DEPLOY: subprocess.Popen | None = None
 DEPLOY_STATE_COND = threading.Condition()
 DEPLOY_STATE = {
     "deployment_id": 0,
@@ -241,9 +240,9 @@ def _detect_local_subnets() -> list:
             ip = match.group(1)
             prefix = int(match.group(2))
             # Skip loopback, link-local, Docker, K8s pod/node internals
-            if ip.startswith("127.") or ip.startswith("169.254."):
+            if ip.startswith(("127.", "169.254.")):
                 continue
-            if ip.startswith("10.244.") or ip.startswith("10.245."):
+            if ip.startswith(("10.244.", "10.245.")):
                 continue  # K8s pod CIDR
             # Calculate network address
             ip_int = struct.unpack("!I", socket.inet_aton(ip))[0]
@@ -265,7 +264,7 @@ _PUBLIC_IP_PROVIDERS = (
 )
 
 
-def _detect_public_ip() -> Dict:
+def _detect_public_ip() -> dict:
     """Fetch this host's public IPv4 from the first responsive provider.
 
     Done server-side to avoid browser CORS and to keep the value out of any
@@ -285,7 +284,7 @@ def _detect_public_ip() -> Dict:
     return {"ok": False, "error": "Could not determine public IP from any provider."}
 
 
-def _fetch_latest_versions() -> Dict:
+def _fetch_latest_versions() -> dict:
     """Look up the latest stable Talos and Kubernetes versions from upstream.
 
     Talos:      latest GitHub release tag for siderolabs/talos.
@@ -321,7 +320,7 @@ def _fetch_latest_versions() -> Dict:
     return out
 
 
-def _generate_talos_schematic(extensions: Optional[List[str]] = None) -> Dict:
+def _generate_talos_schematic(extensions: list[str] | None = None) -> dict:
     """Generate a Talos factory schematic ID for the given system extensions.
 
     POSTs the extension list to factory.talos.dev and returns the resulting
@@ -401,7 +400,7 @@ def _ping_host(ip: str, timeout_ms: int = 500) -> bool:
         return False
 
 
-def _suggest_vips(gateway: str, prefix: int) -> Dict:
+def _suggest_vips(gateway: str, prefix: int) -> dict:
     """Given a gateway + subnet prefix, suggest 5 MetalLB VIPs and ping-check each.
     VIPs are placed at offset 200 from the network base (mirrors the .200-.210 convention).
     """
@@ -427,7 +426,7 @@ def _suggest_vips(gateway: str, prefix: int) -> Dict:
             ip_map[var] = _int_to_ip(ip_int)
 
         # Parallel ping checks
-        ping_results: Dict[str, bool] = {}
+        ping_results: dict[str, bool] = {}
 
         def ping_one(var: str, ip: str):
             ping_results[var] = _ping_host(ip)
@@ -454,7 +453,7 @@ def _suggest_vips(gateway: str, prefix: int) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _suggest_node_ips(gateway: str, prefix: int) -> Dict:
+def _suggest_node_ips(gateway: str, prefix: int) -> dict:
     """Suggest 3 node IPs at offsets .90/.91/.92 from the network base and ping-check."""
     import threading
     try:
@@ -464,7 +463,7 @@ def _suggest_node_ips(gateway: str, prefix: int) -> Dict:
         offsets = [90, 91, 92]
 
         ip_map = {o: _int_to_ip(network + o) for o in offsets}
-        ping_results: Dict[int, bool] = {}
+        ping_results: dict[int, bool] = {}
 
         def ping_one(offset: int, ip: str):
             ping_results[offset] = _ping_host(ip)
@@ -484,7 +483,7 @@ def _suggest_node_ips(gateway: str, prefix: int) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _ping_check_single(ip: str) -> Dict:
+def _ping_check_single(ip: str) -> dict:
     """Ping-check a single IP and return free/in_use status."""
     try:
         in_use = _ping_host(ip)
@@ -493,7 +492,7 @@ def _ping_check_single(ip: str) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _ping_proxmox(host: str) -> Dict:
+def _ping_proxmox(host: str) -> dict:
     ctx = _proxmox_context()
     req = urllib.request.Request(
         f"https://{host}:8006/api2/json/version",
@@ -551,7 +550,7 @@ def _proxmox_context() -> ssl.SSLContext:
     return ctx
 
 
-def _proxmox_json_request(host: str, token: str, path: str, method: str = "GET", data: Optional[Dict] = None):
+def _proxmox_json_request(host: str, token: str, path: str, method: str = "GET", data: dict | None = None):
     headers = {"Authorization": f"PVEAPIToken={token}"}
     body = None
     if data is not None:
@@ -568,7 +567,7 @@ def _proxmox_json_request(host: str, token: str, path: str, method: str = "GET",
         return payload.get("data")
 
 
-def _find_proxmox_vm_node(host: str, token: str, vmid: int) -> Optional[str]:
+def _find_proxmox_vm_node(host: str, token: str, vmid: int) -> str | None:
     try:
         resources = _proxmox_json_request(host, token, "/cluster/resources?type=vm") or []
         for resource in resources:
@@ -588,11 +587,11 @@ def _install_deployer_ssh_key(node_ips: list, root_password: str) -> list:
 
     Returns a list of {"node", "ip", "ok", "error"} dicts, one per node.
     """
+    import os
+    import shlex
+    import stat
     import subprocess
     import tempfile
-    import os
-    import stat
-    import shlex
 
     env_data = _parse_env_file(ENV_FILE)
     deployer_key_content = env_data.get("DEPLOYER_SSH_KEY", "").strip()
@@ -690,21 +689,21 @@ def _install_deployer_ssh_key(node_ips: list, root_password: str) -> list:
     return results
 
 
-def _setup_proxmox_user(host: str, username: str, password: str) -> Dict:
+def _setup_proxmox_user(host: str, username: str, password: str) -> dict:
     """Log in with username/password (ticket auth), create a dedicated
     infraweaver@pve user + InfraWeaver role + API token.
     Credentials are NEVER stored — only the resulting token is returned."""
-    import urllib.request
-    import urllib.parse
-    import urllib.error
     import secrets
+    import urllib.error
+    import urllib.parse
+    import urllib.request
 
     ctx = _proxmox_context()
     base = f"https://{host}:8006/api2/json"
 
     def pve_req(method: str, path: str, data=None, ticket=None, csrf=None):
         url = f"{base}{path}"
-        headers: Dict[str, str] = {}
+        headers: dict[str, str] = {}
         if ticket:
             headers["Cookie"] = f"PVEAuthCookie={ticket}"
         if csrf:
@@ -742,17 +741,7 @@ def _setup_proxmox_user(host: str, username: str, password: str) -> Dict:
         # ── 3. Create/update InfraWeaver role ────────────────────────────────
         # Datastore.Download is required by bpg/proxmox proxmox_download_file
         # (PVE 8.1+).  Older nodes ignore unknown privs, so it's safe to include.
-        PRIVS = ",".join([
-            "VM.Allocate", "VM.Clone", "VM.Config.CDROM", "VM.Config.CPU",
-            "VM.Config.Cloudinit", "VM.Config.Disk", "VM.Config.HWType",
-            "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options",
-            "VM.Audit", "VM.PowerMgmt", "VM.Console",
-            "VM.Migrate", "VM.Snapshot", "VM.Snapshot.Rollback",
-            "VM.GuestAgent.Audit",
-            "Datastore.AllocateSpace", "Datastore.AllocateTemplate", "Datastore.Audit",
-            "Datastore.Allocate", "Pool.Allocate", "Pool.Audit", "SDN.Use", "Sys.Audit", "Sys.Modify",
-            "Realm.Allocate",
-        ])
+        PRIVS = "VM.Allocate,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Audit,VM.PowerMgmt,VM.Console,VM.Migrate,VM.Snapshot,VM.Snapshot.Rollback,VM.GuestAgent.Audit,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Datastore.Allocate,Pool.Allocate,Pool.Audit,SDN.Use,Sys.Audit,Sys.Modify,Realm.Allocate"
         try:
             pve_req("POST", "/access/roles",
                     {"roleid": "InfraWeaver", "privs": PRIVS}, ticket, csrf)
@@ -834,7 +823,7 @@ def _setup_proxmox_user(host: str, username: str, password: str) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _discover_proxmox(host: str, token: str) -> Dict:
+def _discover_proxmox(host: str, token: str) -> dict:
     """Query Proxmox API to discover node name, datastores, and next free VMIDs."""
     import urllib.request
     ctx = _proxmox_context()
@@ -862,9 +851,9 @@ def _discover_proxmox(host: str, token: str) -> Dict:
 
         # Collect per-node SSH IPs, datastores, and resources — all nodes in parallel.
         import threading
-        node_ips: Dict[str, str] = {}
-        datastores_by_node: Dict[str, list] = {}
-        node_resources: Dict[str, Dict] = {}
+        node_ips: dict[str, str] = {}
+        datastores_by_node: dict[str, list] = {}
+        node_resources: dict[str, dict] = {}
         lock = threading.Lock()
 
         # Pre-populate with safe defaults so all node keys are always present in
@@ -877,7 +866,7 @@ def _discover_proxmox(host: str, token: str) -> Dict:
         def fetch_node(node_name: str) -> None:
             ip_found = ""
             usable: list = []
-            resources: Dict = {}
+            resources: dict = {}
             # Use tight per-request timeout so 3 calls fit inside join(timeout=20).
             # 5s × 3 calls = 15s max, safely below the 20s join window.
             _t = 5
@@ -964,7 +953,7 @@ def _discover_proxmox(host: str, token: str) -> Dict:
 
         # resource_info for primary node (backward compat)
         primary_res = node_resources.get(primary_node, {})
-        resource_info: Dict[str, int] = {
+        resource_info: dict[str, int] = {
             "node_memory_total_mb": primary_res.get("mem_total_mb", 0),
             "node_memory_free_mb": primary_res.get("mem_free_mb", 0),
         }
@@ -995,7 +984,7 @@ def _discover_proxmox(host: str, token: str) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _discover_proxmox_node(host: str, token: str, node_name: str) -> Dict:
+def _discover_proxmox_node(host: str, token: str, node_name: str) -> dict:
     """Fetch datastores and resources for a single Proxmox node on demand.
 
     Used by the UI when the user switches to a PVE node whose data wasn't
@@ -1038,7 +1027,7 @@ def _discover_proxmox_node(host: str, token: str, node_name: str) -> Dict:
         except Exception:
             pass
 
-        resources: Dict = {}
+        resources: dict = {}
         try:
             ns = pve_get(f"/nodes/{node_name}/status")
             mem = ns.get("memory", {})
@@ -1060,7 +1049,7 @@ def _discover_proxmox_node(host: str, token: str, node_name: str) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _generate_ssh_key() -> Dict:
+def _generate_ssh_key() -> dict:
     """Generate a fresh ed25519 keypair. Returns private + public key strings."""
     import tempfile
     try:
@@ -1090,7 +1079,7 @@ def _normalize_dns_provider(provider: str) -> str:
     return provider if provider in DNS_PROVIDER_FIELDS else "cloudflare"
 
 
-def _check_dns_provider(provider: str, credentials: Dict[str, str]) -> Dict:
+def _check_dns_provider(provider: str, credentials: dict[str, str]) -> dict:
     """Validate DNS provider credentials or token connectivity."""
     import urllib.request
 
@@ -1239,7 +1228,7 @@ def _check_dns_provider(provider: str, credentials: Dict[str, str]) -> Dict:
     return {"ok": False, "error": f"Unsupported DNS provider: {provider}", "provider": provider}
 
 
-def _parse_env_file(path: Path) -> Dict[str, str]:
+def _parse_env_file(path: Path) -> dict[str, str]:
     data = {}
     if not path.exists():
         return data
@@ -1258,7 +1247,7 @@ def _parse_env_file(path: Path) -> Dict[str, str]:
     return data
 
 
-def _write_env_file(path: Path, data: Dict[str, str]) -> None:
+def _write_env_file(path: Path, data: dict[str, str]) -> None:
     lines = ["# InfraWeaver Platform .env — generated by init wizard\n"]
     for k, v in data.items():
         if "\n" in v:
@@ -1271,7 +1260,7 @@ def _write_env_file(path: Path, data: Dict[str, str]) -> None:
     path.write_text("".join(lines))
 
 
-def _get_status() -> Dict:
+def _get_status() -> dict:
     env = _parse_env_file(ENV_FILE)
     provider = _normalize_dns_provider(env.get("DNS_PROVIDER", "cloudflare"))
     required_fields = DNS_PROVIDER_FIELDS.get(provider, [])
@@ -1291,7 +1280,7 @@ def _get_status() -> Dict:
     }
 
 
-def _validate_proxmox(env_data: Dict) -> Dict:
+def _validate_proxmox(env_data: dict) -> dict:
     token = str(env_data.get("PROXMOX_API_TOKEN", "")).strip()
     env_name = env_data.get("ENV_NAME", "productie")
     cluster_yaml = REPO_DIR / "envs" / env_name / "cluster.yaml"
@@ -1311,11 +1300,11 @@ def _validate_proxmox(env_data: Dict) -> Dict:
         return {"ok": False, "error": str(e)}
 
 
-def _validate_import_env(payload: Dict) -> Dict:
+def _validate_import_env(payload: dict) -> dict:
     env_payload = payload.get("env", payload)
     env = {str(k): "" if v is None else str(v) for k, v in dict(env_payload or {}).items()}
-    errors: List[Dict[str, str]] = []
-    warnings: List[Dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
 
     def add_error(field: str, message: str):
         errors.append({"field": field, "message": message})
@@ -1393,7 +1382,7 @@ def _validate_import_env(payload: Dict) -> Dict:
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
-def _detect_init_vm_id() -> Optional[int]:
+def _detect_init_vm_id() -> int | None:
     env_value = os.environ.get("IW_VM_ID", "").strip()
     if _is_positive_integer(env_value):
         return int(env_value)
@@ -1410,7 +1399,7 @@ def _detect_init_vm_id() -> Optional[int]:
     return None
 
 
-def _platform_version() -> Dict:
+def _platform_version() -> dict:
     """Return current and remote commit SHA with pending changelog."""
     try:
         current_sha = subprocess.run(
@@ -1447,7 +1436,7 @@ def _platform_version() -> Dict:
         return {"ok": False, "error": str(exc)}
 
 
-def _self_update() -> Dict:
+def _self_update() -> dict:
     """Run scripts/update.sh and return structured output. Caller schedules restart."""
     import json as _json
     update_script = REPO_DIR / "scripts" / "update.sh"
@@ -1478,7 +1467,7 @@ def _self_update() -> Dict:
         return {"ok": False, "error": str(exc)}
 
 
-def _cleanup_init_server(stop_server: bool) -> Dict:
+def _cleanup_init_server(stop_server: bool) -> dict:
     """Tear down the one-shot init environment after a successful deploy.
 
     Removes /tmp/iw-* scratch artifacts and, when running inside the init VM,
@@ -1530,7 +1519,7 @@ def _cleanup_init_server(stop_server: bool) -> Dict:
     return {"ok": True, "vmId": vm_id, "stopServer": stop_server}
 
 
-def _sse_json(payload: Dict) -> str:
+def _sse_json(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
@@ -1669,7 +1658,7 @@ def _start_deploy(mode: str) -> int:
     return deployment_id
 
 
-def _iter_deploy_events(deployment_id: Optional[int] = None, since_seq: int = 0):
+def _iter_deploy_events(deployment_id: int | None = None, since_seq: int = 0):
     last_seq = since_seq
     target_id = deployment_id
     while True:
@@ -1734,9 +1723,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Also accept "?token=<token>" so the initial page-load link works.
         qs = urllib.parse.urlparse(self.path).query
         token = urllib.parse.parse_qs(qs).get("token", [""])[0].strip()
-        if token and hmac.compare_digest(token, IW_INIT_TOKEN):
-            return True
-        return False
+        return bool(token and hmac.compare_digest(token, IW_INIT_TOKEN))
 
     def _deny(self):
         self._send_json({"ok": False, "error": "unauthorized"}, 401)
@@ -1801,7 +1788,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 data = _parse_env_file(ENV_FILE)
                 # Don't send private key in cleartext over GET — send masked version
-                if "DEPLOYER_SSH_KEY" in data and data["DEPLOYER_SSH_KEY"]:
+                if data.get("DEPLOYER_SSH_KEY"):
                     data["DEPLOYER_SSH_KEY"] = data["DEPLOYER_SSH_KEY"]  # send full for editing
                 self._send_json({"ok": True, "data": data})
             except Exception as e:

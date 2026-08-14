@@ -196,10 +196,22 @@ prometheus:
 
     resources:
       requests:
-        memory: 512Mi
+        # 2026-08-14: was 512Mi, described as "4x headroom over current 499Mi".
+        # That measurement went stale and nobody re-took it. Measured now:
+        # 1739Mi steady-state RSS against a 9.2G TSDB. A 512Mi request for a
+        # 1.7Gi process is not a conservative setting, it is a false number —
+        # the scheduler, every N+1 capacity sum and KubeMemoryOvercommit were
+        # all reasoning about a Prometheus that does not exist.
+        memory: 2Gi
         cpu: 200m
       limits:
-        memory: 2Gi  # Hard cap: 4x headroom over current 499Mi usage
+        # 2Gi sat just above steady state, so every TSDB compaction crossed it:
+        # OOMKilled 4x, most recently 2026-08-14T05:00:23Z. That is what
+        # PrometheusTSDBCompactionsFailing was actually reporting. Compaction
+        # merges blocks in memory on top of the head block, so the ceiling must
+        # clear steady state by more than the largest merge, not by a token
+        # margin. Scheduled on cp2, which holds ~10Gi of unreserved allocatable.
+        memory: 4Gi
 
     # Scrape all ServiceMonitors across all namespaces
     serviceMonitorSelectorNilUsesHelmValues: false

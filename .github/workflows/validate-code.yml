@@ -50,7 +50,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install ruff
-        run: pip install ruff
+        # PINNED ON PURPOSE. This was `pip install ruff` against a repo with no
+        # ruff config, so the gate's rule set was whatever the newest release
+        # happened to default to. Ruff widened that default in 0.16.0 and the
+        # same unchanged Python went from green to 177 errors overnight — red on
+        # every push from 2026-08-07 to 2026-08-14 with no code change behind it.
+        # The rule set now lives in ruff.toml; this pin makes the gate move only
+        # when someone bumps it deliberately. Bump + re-lint in the SAME commit.
+        run: pip install ruff==0.16.3
       - name: Lint python scripts
         run: ruff check scripts
 

@@ -24,7 +24,7 @@ for resource in state.get("resources", []):
     if not instances:
         continue
     content = instances[0].get("attributes", {}).get("content", "")
-    
+
     if rtype == "local_sensitive_file" and rname == "kubeconfig":
         kubeconfig = content
     elif rtype == "local_sensitive_file" and rname in ("talosconfig", "talosconfig_generated"):
@@ -34,9 +34,8 @@ for resource in state.get("resources", []):
     elif rtype == "talos_cluster_kubeconfig":
         if not kubeconfig:
             kubeconfig = instances[0].get("attributes", {}).get("kubeconfig_raw", "")
-    elif rtype == "data.talos_client_configuration" or (rtype == "talos_client_configuration"):
-        if not talosconfig:
-            talosconfig = instances[0].get("attributes", {}).get("talos_config", "")
+    elif rtype in ("data.talos_client_configuration", "talos_client_configuration") and not talosconfig:
+        talosconfig = instances[0].get("attributes", {}).get("talos_config", "")
 
 if kubeconfig:
     path = f"{out_dir}/kubeconfig"

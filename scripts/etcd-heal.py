@@ -6,14 +6,14 @@ Actions (in order):
   2. Detect high fragmentation (ratio > 1.5x) or large DB (> 800 MB) → defrag
   3. Print a structured summary for GitHub Actions step output
 """
-import subprocess
 import glob
-import sys
-import os
-import urllib.request
-import tarfile
 import io
 import json
+import os
+import subprocess
+import sys
+import tarfile
+import urllib.request
 
 E = "/tmp/etcdctl-healer"
 ETCD_NODES = [
@@ -35,28 +35,40 @@ def ensure_etcdctl():
     url = "https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz"
     with urllib.request.urlopen(url, timeout=60) as r:
         data = r.read()
-    t = tarfile.open(fileobj=io.BytesIO(data))
-    m = t.getmember("etcd-v3.5.17-linux-amd64/etcdctl")
-    with open(E, "wb") as f:
-        f.write(t.extractfile(m).read())
+    with tarfile.open(fileobj=io.BytesIO(data)) as t:
+        m = t.getmember("etcd-v3.5.17-linux-amd64/etcdctl")
+        with open(E, "wb") as f:
+            f.write(t.extractfile(m).read())
     os.chmod(E, 0o755)
 
 
 def find_certs():
+    # A process can exit between the glob and the read, so ENOENT/ESRCH on an
+    # individual /proc entry is expected and skipped. Any other OSError is a real
+    # fault on the /host/proc mount and is printed rather than swallowed —
+    # otherwise a broken mount is indistinguishable from "no apiserver here".
     for f in glob.glob('/host/proc/*/comm'):
         try:
-            if open(f).read().strip() == 'kube-apiserver':
-                pid = f.split('/')[3]
-                p = f'/host/proc/{pid}/root/system/secrets/kubernetes/kube-apiserver'
-                if os.path.exists(p + '/etcd-client.crt'):
-                    return p
-        except Exception:
-            pass
+            with open(f) as fh:
+                comm = fh.read().strip()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            print(f"  Warning: cannot read {f}: {exc}", flush=True)
+            continue
+        if comm != 'kube-apiserver':
+            continue
+        pid = f.split('/')[3]
+        p = f'/host/proc/{pid}/root/system/secrets/kubernetes/kube-apiserver'
+        if os.path.exists(p + '/etcd-client.crt'):
+            return p
     return None
 
 
 def run(cmd, timeout=120):
-    r = subprocess.run([E] + cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    # check=False on purpose: every caller inspects the returncode itself, and a
+    # non-zero etcdctl exit is data here (an unreachable member), not a crash.
+    r = subprocess.run([E] + cmd, capture_output=True, timeout=timeout, check=False)
     return r.stdout.decode().strip(), r.stderr.decode().strip(), r.returncode
 
 
@@ -107,7 +119,8 @@ try:
         if mb > ABS_SIZE_MB_THRESHOLD:
             defrag_reason.append(f"{ep} size={mb}MB")
             needs_defrag = True
-except Exception as exc:
+except (ValueError, KeyError, TypeError) as exc:
+    # Malformed/empty etcdctl JSON only. A crash here would be a bug worth seeing.
     print(f"  Warning: could not parse endpoint status: {exc}", flush=True)
 
 
@@ -124,7 +137,9 @@ try:
     rev = json.loads(rev_out)[0]['Status']['header']['revision']
     out, err, rc = run(['--endpoints', ENDPOINTS] + OPTS + ['compact', str(rev)], timeout=60)
     print(f"Compact rev={rev}: {out or err or 'ok'}", flush=True)
-except Exception as exc:
+except (ValueError, KeyError, TypeError, IndexError) as exc:
+    # No parsable revision to compact at. Defrag below still runs and is the
+    # part that reclaims space; compaction only improves how much it reclaims.
     print(f"Compact skipped: {exc}", flush=True)
 
 for ep in ENDPOINTS.split(','):

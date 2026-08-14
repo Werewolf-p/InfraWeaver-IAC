@@ -12,9 +12,9 @@ is automatically protected by Authentik on the next deploy — zero per-app conf
 Run from repo root:  python3 scripts/generate-forward-auth-blueprint.py
 Wired into the deploy pipeline (see deploy-local.sh) so it runs before ArgoCD sync.
 """
-import re
 import glob
 import os
+import re
 
 BASE = os.environ.get("INTERNAL_DOMAIN", "int." + os.environ.get("BASE_DOMAIN", "example.com"))
 ROUTES_GLOB = "kubernetes/**/*.yaml"
@@ -35,7 +35,8 @@ EXCLUDE_SUBS = {"api", "registry", "plex"}
 def _existing_hosts():
     """external_host values already defined as proxy providers in blueprint-apps.yaml."""
     try:
-        txt=open("kubernetes/platform/authentik/manifests/blueprint-apps.yaml").read()
+        with open("kubernetes/platform/authentik/manifests/blueprint-apps.yaml") as fh:
+            txt = fh.read()
     except FileNotFoundError:
         return set()
     return set(re.findall(r'external_host:\s*"([^"]+)"', txt))
@@ -44,7 +45,8 @@ def discover_hosts():
     """Return {sub: full_host} for every IngressRoute using forward-auth."""
     hosts = {}
     for f in glob.glob(ROUTES_GLOB, recursive=True):
-        txt = open(f).read()
+        with open(f) as fh:
+            txt = fh.read()
         for doc in txt.split("\n---\n"):
             if "kind: IngressRoute" not in doc or "name: forward-auth" not in doc:
                 continue
@@ -67,22 +69,20 @@ def main():
     e = []  # blueprint entries (6-space indented under entries:)
 
     e.append("      # ── Groups (auto: infra-* scopes referenced by discovered hosts) ──")
-    for g in groups:
-        e.append(f"""      - model: authentik_core.group
+    e.extend(f"""      - model: authentik_core.group
         state: present
         identifiers: {{ name: {g} }}
-        attrs: {{ name: {g}, is_superuser: false }}""")
+        attrs: {{ name: {g}, is_superuser: false }}""" for g in groups)
 
     e.append("      # ── Policies (admins OR <group>; admins always above) ──")
-    for g in groups:
-        e.append(f"""      - model: authentik_policies_expression.expressionpolicy
+    e.extend(f"""      - model: authentik_policies_expression.expressionpolicy
         state: present
         identifiers: {{ name: policy-{g} }}
         attrs:
           name: policy-{g}
           expression: |
             return (ak_is_group_member(request.user, name="platform-admins")
-                    or ak_is_group_member(request.user, name="{g}"))""")
+                    or ak_is_group_member(request.user, name="{g}"))""" for g in groups)
 
     e.append("      # ── Forward-auth proxy providers + applications + bindings (auto) ──")
     for sub, host in hosts.items():
@@ -152,7 +152,8 @@ data:
     entries:
 {body}
 """
-    open(OUT, "w").write(out)
+    with open(OUT, "w") as fh:
+        fh.write(out)
     print(f"generated {OUT}: {len(hosts)} forward-auth hosts → {sorted(hosts)}")
     print(f"groups: {groups}")
 

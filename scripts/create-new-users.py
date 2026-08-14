@@ -13,11 +13,13 @@ Arguments:
   kubeconfig    — path to kubeconfig file
   new_users_json — JSON array of new usernames, e.g. '["testuser"]'
 """
-import os
 import base64
+import binascii
 import json
+import os
 import subprocess
 import sys
+
 import yaml
 
 worker_pod = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -26,8 +28,11 @@ new_users_raw = sys.argv[3] if len(sys.argv) > 3 else "[]"
 
 try:
     new_usernames = json.loads(new_users_raw)
-except Exception:
-    new_usernames = []
+except json.JSONDecodeError as exc:
+    # Falling back to [] here used to print "No new users" and exit 0 — a
+    # malformed argument reported success and silently created nobody.
+    print(f"ERROR: argv[3] is not valid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 if not new_usernames:
     print("# No new users — nothing to create")
@@ -45,13 +50,17 @@ def get_k8s_secret_value(kubeconfig: str, secret_name: str, namespace: str, key:
         "get", "secret", secret_name, "-n", namespace,
         f"-o=jsonpath={{.data.{key}}}",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # check=False: a missing secret is an expected outcome here, handled by the
+    # empty-stdout branch below rather than by an exception.
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     encoded = result.stdout.strip()
     if not encoded:
         return ""
     try:
         return base64.b64decode(encoded).decode()
-    except Exception:
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        print(f"WARN: secret {namespace}/{secret_name} key {key} is not "
+              f"decodable base64: {exc}", file=sys.stderr)
         return ""
 
 lines = [
@@ -70,18 +79,18 @@ for username in new_usernames:
     lines.append(f"""
 try:
     obj, created = User.objects.get_or_create(
-        username={repr(username)},
-        defaults={{"name": {repr(name)}, "email": {repr(email)}, "is_active": True}},
+        username={username!r},
+        defaults={{"name": {name!r}, "email": {email!r}, "is_active": True}},
     )
     if not created:
-        obj.name = {repr(name)}
-        obj.email = {repr(email)}
+        obj.name = {name!r}
+        obj.email = {email!r}
         obj.is_active = True
-    if {repr(pw_b64)}:
-        obj.set_password(base64.b64decode({repr(pw_b64)}).decode())
+    if {pw_b64!r}:
+        obj.set_password(base64.b64decode({pw_b64!r}).decode())
     obj.save()
     action = "created" if created else "updated"
-    pw_status = "password set" if {repr(pw_b64)} else "WARNING: no password (missing from secret)"
+    pw_status = "password set" if {pw_b64!r} else "WARNING: no password (missing from secret)"
     print(f"OK: {username} {{action}} — {{pw_status}}")
 except Exception as e:
     print(f"ERR: {username}: {{e}}")

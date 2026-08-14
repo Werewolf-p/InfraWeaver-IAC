@@ -6,8 +6,9 @@ Run after editing platform.yaml to regenerate the dashboard config.
 Usage: python3 scripts/generate-homepage-config.py
 """
 
-import yaml
 import os
+
+import yaml
 
 BASE_DOMAIN = os.environ.get('BASE_DOMAIN', 'yourdomain.com')
 PLATFORM_YAML = os.path.join(os.path.dirname(__file__), '..', 'platform.yaml')

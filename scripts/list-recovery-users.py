@@ -17,6 +17,7 @@ Usage:
 """
 import argparse
 import subprocess
+import sys
 
 import yaml
 
@@ -24,9 +25,10 @@ import yaml
 def load_usernames_from_content(content: str) -> set:
     try:
         data = yaml.safe_load(content)
-        return set((data or {}).get("users", {}).keys())
-    except Exception:
+    except yaml.YAMLError as exc:
+        print(f"WARN: users.yaml is not parsable YAML: {exc}", file=sys.stderr)
         return set()
+    return set((data or {}).get("users", {}).keys())
 
 
 def main():

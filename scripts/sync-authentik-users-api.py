@@ -18,14 +18,16 @@ Group resolution order (same as sync-authentik-users.py):
        admin         → platform-admins, authentik Admins, platform-users
        platform-user → platform-users
 """
+import json
 import os
 import sys
-import json
+
 import yaml
+
 try:
-    import urllib.request
-    import urllib.parse
     import urllib.error
+    import urllib.parse
+    import urllib.request
 except ImportError:
     sys.exit("stdlib urllib not available")
 

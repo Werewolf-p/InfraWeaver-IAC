@@ -14,6 +14,7 @@ Usage:
   kubectl exec -n authentik <worker-pod> -- ak shell < /tmp/ak-sync.py
 """
 import sys
+
 import yaml
 
 # Default group sets per access_level (used when authentik_groups not set)
@@ -40,7 +41,7 @@ for username, udata in users.items():
     groups_repr = repr(groups)
     lines.append(
         f"try:\n"
-        f"    u = User.objects.get(username={repr(username)})\n"
+        f"    u = User.objects.get(username={username!r})\n"
         f"    desired = {groups_repr}\n"
         f"    for g in desired:\n"
         f"        grp, _ = Group.objects.get_or_create(name=g)\n"

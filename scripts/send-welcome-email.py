@@ -18,7 +18,7 @@ import os
 import smtplib
 import ssl
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -54,7 +54,7 @@ smtp_user = os.environ["SMTP_USERNAME"]
 smtp_pass = os.environ["SMTP_PASSWORD"]
 
 # ── Content ───────────────────────────────────────────────────────────────────
-timestamp    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+timestamp    = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 base_domain  = os.environ.get("BASE_DOMAIN", "yourdomain.com")
 auth_url     = f"https://auth.{base_domain}"
 homepage_url = f"https://home.int.{base_domain}"
@@ -267,6 +267,8 @@ try:
         s.login(smtp_user, smtp_pass)
         s.sendmail(smtp_user, user_email, msg.as_string())
     print(f"✅ Welcome email sent to {user_email} ({user_name})")
-except Exception as e:
+except (smtplib.SMTPException, OSError) as e:
+    # OSError covers ssl.SSLError and socket timeouts/refusals; both are the
+    # normal ways this fails. Anything else is a bug and should traceback.
     print(f"❌ Failed to send welcome email to {user_email}: {e}", file=sys.stderr)
     sys.exit(1)

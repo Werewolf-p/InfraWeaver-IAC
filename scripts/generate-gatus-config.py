@@ -477,8 +477,7 @@ def endpoint_to_yaml(ep: dict) -> str:
         if ep["client"].get("insecure"):
             lines.append("          insecure: true")
     lines.append("        conditions:")
-    for c in ep["conditions"]:
-        lines.append(f'          - "{c}"')
+    lines.extend(f'          - "{c}"' for c in ep["conditions"])
     if ep.get("alerts"):
         lines.append("        alerts:")
         for a in ep["alerts"]:
@@ -498,7 +497,7 @@ def build_enabled_set(platform: dict) -> set:
     enabled = set()
 
     groups = platform.get("groups", {})
-    for group_name, group in groups.items():
+    for group in groups.values():
         if not group.get("enabled", True):
             continue
         for app_key, app_cfg in group.get("apps", {}).items():
