@@ -18,10 +18,15 @@ loki:
     # project quota — proof: on 2026-08-07 this "10Gi" volume held 10.7 GiB.
     # The real bound is talos-prod-cp2's EPHEMERAL partition (295.8 GiB total,
     # 182.4 GiB free) plus the compactor retention configured below.
-    # Do NOT change this number: it is a StatefulSet volumeClaimTemplate, which
-    # Kubernetes forbids updating, and the `local-path` StorageClass does not set
-    # allowVolumeExpansion. Editing it makes the app fail to sync, not grow.
+    # Do NOT change this number in place: it is a StatefulSet
+    # volumeClaimTemplate, which Kubernetes forbids updating. Editing it makes
+    # the app fail to sync, not grow — the claim has to be recreated instead.
     size: 10Gi
+    # Explicit as of 2026-08-14. The cluster default StorageClass is local-path,
+    # which pins the volume to one node: draining cp2 left this claim
+    # unschedulable. Longhorn replicates it, and unlike local-path it sets
+    # allowVolumeExpansion, so the size above can be grown on a recreate.
+    storageClass: longhorn
 
   # ── Retention (GAP-H5, SOC 2 CC7.2 / ISO 27001 A.8.15) ────────────────────
   # BEFORE this change, retention was configured three contradictory ways and

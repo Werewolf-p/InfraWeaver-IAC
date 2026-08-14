@@ -180,6 +180,12 @@ prometheus:
       volumeClaimTemplate:
         spec:
           accessModes: ["ReadWriteOnce"]
+          # Explicit as of 2026-08-14. The cluster default is local-path, which
+          # pinned this claim to cp2 and left it unschedulable once that node
+          # was drained. Longhorn replicates it and sets allowVolumeExpansion,
+          # so the retention ceiling noted above can be raised by recreating
+          # the claim rather than rebuilding the StatefulSet.
+          storageClassName: longhorn
           resources:
             requests:
               storage: 20Gi
@@ -252,6 +258,10 @@ alertmanager:
       volumeClaimTemplate:
         spec:
           accessModes: ["ReadWriteOnce"]
+          # Explicit as of 2026-08-14 — see the Prometheus claim above. The
+          # local-path default pinned this to cp2 and it could not schedule
+          # anywhere else once that node was drained.
+          storageClassName: longhorn
           resources:
             requests:
               storage: 2Gi

@@ -328,7 +328,13 @@ postgresql:
         # THE ACTUAL BACKUP for this database is the nightly logical dump in
         # manifests/pg-backup.yaml → Longhorn PVC → 01:00 NAS backup.
         recurring-job-group.longhorn.io/truenas-backup: "enabled"
-      storageClass: local-path   # local-path: stable with 2 nodes/cp3 offline
+      # Was local-path ("stable with 2 nodes/cp3 offline"). That rationale
+      # expired: the cluster now runs cp1/cp3/cp4 across three physical hosts,
+      # and a local-path PV pinned this database to cp2 — draining cp2 on
+      # 2026-08-14 took SSO down entirely. Longhorn replicates it instead.
+      # If this claim is ever recreated empty, restore from the nightly
+      # logical dump in manifests/pg-backup.yaml.
+      storageClass: longhorn
       size: 2Gi
     resources:
       requests:

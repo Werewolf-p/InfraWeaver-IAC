@@ -111,7 +111,13 @@ server:
   dataStorage:
     enabled: true
     size: 5Gi
-    storageClass: local-path   # local-path avoids Longhorn I/O errors on Raft BoltDB
+    # Was local-path to avoid Longhorn I/O errors on Raft BoltDB. Moved to
+    # Longhorn on 2026-08-14: a local-path PV is pinned to a single node, so
+    # retiring that node strands the vault outright — which is exactly what
+    # happened when cp2 was drained. Watch for BoltDB I/O errors after this
+    # change; if they return, the durable fix is 3 Raft replicas each on
+    # local-path, not a replicated volume. A Raft snapshot is taken first.
+    storageClass: longhorn
     accessMode: ReadWriteOnce
 
   ingress:

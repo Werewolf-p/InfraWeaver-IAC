@@ -1,0 +1,56 @@
+# Site link: hypatia (Hetzner dedicated, Falkenstein) -> Homelab production VLAN
+#
+# Declares a layer-2 extension of an on-prem VLAN to a remote Proxmox node over
+# an existing WireGuard tunnel, so guests on the remote node can hold addresses
+# in the on-prem subnet and join clusters that assume same-subnet adjacency
+# (Talos control planes, MetalLB L2, Cilium).
+#
+# Consumed by scripts/site-link.sh. The same fields are what a console-driven
+# "add remote site" flow needs to collect; nothing here is specific to hypatia
+# beyond the values.
+
+name: hypatia
+
+# Node that already terminates the WireGuard tunnel and holds the VLAN.
+hub:
+  host: 10.1.0.3
+  node: proxmox
+  tunnel_ip: 10.1.9.1
+  # VLAN-aware bridge carrying the VLAN to extend.
+  bridge: vmbr0
+
+# Remote node receiving the extended VLAN.
+edge:
+  host: 162.55.99.90
+  node: hypatia
+  tunnel_ip: 10.1.9.2
+  # Bridge created on the edge node. Guests attach here untagged and land
+  # directly in the hub VLAN's subnet.
+  bridge: vmbr3
+
+l2:
+  # VLAN ID on the hub bridge to extend.
+  vlan: 3
+  # VXLAN VNI. Kept equal to the VLAN ID for legibility; only needs to be
+  # unique per site link on a shared tunnel.
+  vni: 3
+  dstport: 4789
+
+mtu:
+  # WireGuard interface MTU on both ends.
+  tunnel: 1420
+  # tunnel - 50 bytes of VXLAN encapsulation. Guests on the edge bridge MUST
+  # be configured with this MTU; otherwise large packets are silently dropped
+  # while pings still succeed.
+  overlay: 1370
+
+# Operational constraints that follow from the link being a WAN path.
+# These are advisory metadata for the console/operator, not applied by the script.
+constraints:
+  # Round-trip latency observed hub <-> edge.
+  rtt_ms: 16
+  # MetalLB runs in L2 mode; a speaker on the edge node can win an ARP election
+  # and pull VIP traffic across the WAN. Exclude the edge node from the speaker set.
+  metallb_speaker: exclude
+  # Longhorn will schedule replicas here unless told otherwise.
+  longhorn_scheduling: disable
