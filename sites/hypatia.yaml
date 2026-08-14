@@ -43,6 +43,20 @@ mtu:
   # be configured with this MTU; otherwise large packets are silently dropped
   # while pings still succeed.
   overlay: 1370
+  # EVERY cluster node must use the overlay MTU on its cluster interface, not
+  # only the ones behind the site link. Learned the hard way on 2026-08-14:
+  # Longhorn's instance-manager pods run with hostNetwork, so they inherit the
+  # HOST MTU. The home nodes sat at 1500 and happily sent 1500-byte frames down
+  # a 1370-byte path, which silently destroyed replication — volumes faulted
+  # cluster-wide with "failed to handle data server EOF" while every ping and
+  # every small API call kept working, so nothing looked wrong.
+  #
+  # Cilium's MTU setting does NOT fix this: Cilium governs the pod network,
+  # while Longhorn's data path is host network and ignores it entirely.
+  #
+  # Set on each node via machine config:
+  #   machine.network.interfaces[].mtu: 1370
+  cluster_mtu: 1370
 
 # Operational constraints that follow from the link being a WAN path.
 # These are advisory metadata for the console/operator, not applied by the script.
