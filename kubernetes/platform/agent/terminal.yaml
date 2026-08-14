@@ -1,0 +1,215 @@
+# Web terminal for the in-cluster agent — what the console's "Terminal" button
+# opens.
+#
+# Authentication is Authentik forward-auth at the edge (the same
+# forward-auth-admin middleware ArgoCD sits behind). There is deliberately no
+# second auth layer inside: a terminal reachable without SSO is a cluster
+# breach, so the gate belongs where every other admin surface has it.
+#
+# Currently always-on (replicas: 1) so the console button always resolves, and
+# recycled daily by the reaper below. The stricter shape — replicas 0, scaled
+# up on click, reaped hourly — needs a console action to do the scaling; the
+# reaper's Role is already scoped to exactly that one deployment's scale.
+#
+# The session inherits the read-only agent-session ServiceAccount: it can read
+# pods, logs, events and platform CRDs, and cannot read Secrets or write
+# anything. See rbac.yaml for why.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-terminal
+  namespace: infraweaver-agent
+spec:
+  # 1, not 0: a button that 502s on first click is not a button. The reaper
+  # below recycles it daily so a session cannot quietly live forever. Move this
+  # to 0 once the console can scale it on demand — the reaper Role already
+  # allows exactly that scale and nothing else.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-session
+      app.kubernetes.io/component: terminal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-session
+        app.kubernetes.io/component: terminal
+    spec:
+      serviceAccountName: agent-session
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: terminal
+          image: docker.io/library/node:22-bookworm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: "2", memory: 2Gi }
+          ports:
+            - name: ttyd
+              containerPort: 7681
+          env:
+            - { name: HOME, value: /home/session }
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-api-key
+                  key: api-key
+                  optional: true
+            - name: AGENT_MEMORY_REPO
+              valueFrom:
+                secretKeyRef:
+                  name: agent-memory
+                  key: repo
+                  optional: true
+            - name: AGENT_MEMORY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-memory
+                  key: token
+                  optional: true
+          command: ["bash","-lc"]
+          args:
+            - |
+              set -e
+              export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"
+              mkdir -p "$HOME/bin" "$HOME/.npm-global/bin"
+              npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+              curl -sSLo "$HOME/bin/kubectl" \
+                "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+                && chmod +x "$HOME/bin/kubectl"
+              curl -sSLo "$HOME/bin/ttyd" \
+                "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
+                && chmod +x "$HOME/bin/ttyd"
+              npm i -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+              if [ -n "${AGENT_MEMORY_REPO:-}" ]; then
+                URL="${AGENT_MEMORY_REPO}"
+                [ -n "${AGENT_MEMORY_TOKEN:-}" ] && URL="$(echo "$URL" | sed "s#https://#https://x-access-token:${AGENT_MEMORY_TOKEN}@#")"
+                git clone --depth 1 "$URL" "$HOME/.claude" >/dev/null 2>&1 || true
+              fi
+              # -W makes the terminal writable (you need to type). Auth is the
+              # business of the forward-auth middleware in front, not ttyd.
+              exec "$HOME/bin/ttyd" -p 7681 -W -t titleFixed="InfraWeaver agent" \
+                bash -lc 'export PATH=$HOME/bin:$HOME/.npm-global/bin:$PATH; claude || bash -l'
+          readinessProbe:
+            tcpSocket: { port: 7681 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - { name: home, mountPath: /home/session }
+            - { name: tmp,  mountPath: /tmp }
+      volumes:
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-terminal
+  namespace: infraweaver-agent
+spec:
+  selector:
+    app.kubernetes.io/name: agent-session
+    app.kubernetes.io/component: terminal
+  ports:
+    - name: ttyd
+      port: 80
+      targetPort: 7681
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: agent-terminal
+  namespace: infraweaver-agent
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`terminal.int.example.com`)
+      kind: Rule
+      middlewares:
+        - { name: secure-headers, namespace: traefik }
+        # Same gate ArgoCD sits behind. Without this the terminal is an
+        # unauthenticated shell on the ingress.
+        - { name: forward-auth-admin, namespace: traefik }
+      services:
+        - name: agent-terminal
+          port: 80
+  tls:
+    secretName: platform-int-wildcard-tls
+---
+# Reaper: recycles the terminal daily so a forgotten session does not live
+# indefinitely. Runs at 04:00 rather than hourly because the deployment is
+# currently always-on; when the console gains an on-demand scale-up action,
+# tighten this to hourly and set replicas back to 0.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agent-terminal-reaper
+  namespace: infraweaver-agent
+spec:
+  schedule: "0 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: agent-terminal-reaper
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: reaper
+              image: docker.io/bitnami/kubectl:1.31
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits:   { cpu: 200m, memory: 128Mi }
+              command: ["sh","-c","kubectl -n infraweaver-agent rollout restart deploy/agent-terminal"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-terminal-reaper
+  namespace: infraweaver-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-terminal-reaper
+  namespace: infraweaver-agent
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames: ["agent-terminal"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-terminal-reaper
+  namespace: infraweaver-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-terminal-reaper
+subjects:
+  - kind: ServiceAccount
+    name: agent-terminal-reaper
+    namespace: infraweaver-agent
