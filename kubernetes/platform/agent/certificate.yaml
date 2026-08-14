@@ -1,0 +1,26 @@
+# TLS for the agent terminal.
+#
+# A Traefik IngressRoute can only reference a TLS secret in its OWN namespace,
+# so the wildcard secret living in the traefik namespace is not usable here.
+# Issuing a second certificate from the same ClusterIssuer is the supported way
+# to get one — copying the secret between namespaces works until it renews and
+# then silently serves an expired cert.
+#
+# Without this, Traefik drops the whole router and the terminal returns 404
+# while logging "secret infraweaver-agent/platform-int-wildcard-tls does not
+# exist" on every reconcile (it logged that 256 times before this existed).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agent-terminal-tls
+  namespace: infraweaver-agent
+spec:
+  secretName: platform-int-wildcard-tls
+  # Same wildcard as the platform certificate, so the terminal hostname is
+  # covered without minting a per-host cert for every new internal service.
+  dnsNames:
+    - int.example.com
+    - "*.int.example.com"
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-dns
