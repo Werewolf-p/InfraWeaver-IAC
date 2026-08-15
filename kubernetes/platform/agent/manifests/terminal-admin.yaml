@@ -89,57 +89,58 @@ metadata:
   labels:
     app.kubernetes.io/name: agent-admin
 rules:
-  # Core workload + storage objects. `secrets` is NOT here — see the namespaced
-  # ClusterRole below and exclusion 4 in the header.
+  # ── CLUSTER-WIDE WRITE IS NOW LIMITED TO CLUSTER-SCOPED OBJECTS ────────────
+  # 2026-08-15: every NAMESPACED write moved out of this role and into
+  # `agent-admin-workloads` below, whose RoleBindings enumerate the four
+  # namespaces this shell may change.
+  #
+  # WHY. This role granted `create` on `pods` and `pods/exec` cluster-wide.
+  # That pair defeated all four exclusions in the header above — not by
+  # contradicting them, but by walking around them:
+  #
+  #     kubectl -n argocd run x --serviceaccount=argocd-application-controller …
+  #     kubectl -n argocd exec -it x -- sh        # that SA holds * on */*
+  #
+  # Create-a-pod-as-any-ServiceAccount plus exec-into-it IS "widen yourself",
+  # spelled in a different API group. The same pair opened a shell inside
+  # authentik-server, defeating exclusion 4 without touching one ConfigMap; and
+  # `kube-system` / `longhorn-system` are both PSA `privileged` AND exempt from
+  # the Kyverno webhook, so a hostPath+privileged pod there reached node root.
+  #
+  # Cluster-wide `apps` write was the third lever: Kyverno's webhooks run
+  # `failurePolicy: Ignore`, so DELETING the admission controller Deployment
+  # disables enforcement without touching a single `kyverno.io` object.
+  #
+  # ⚠️ Do not re-add `pods`, `pods/exec`, `pods/portforward` or any `apps`
+  # resource to THIS role. Namespaced write belongs in agent-admin-workloads.
+  #
+  # Cluster-scoped objects cannot be RoleBound, so they stay here — with
+  # `create`/`delete` dropped. Patching a PV's reclaimPolicy or cordoning a node
+  # is real operator work; creating or destroying them is not day-to-day, and
+  # `namespaces: delete` would let one typo remove `argocd`.
   - apiGroups: [""]
-    resources:
-      - pods
-      - pods/log
-      - pods/exec
-      - pods/portforward
-      - services
-      - endpoints
-      - persistentvolumeclaims
-      - persistentvolumes
-      - serviceaccounts
-      - events
-      - namespaces
-      - nodes
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["batch"]
-    resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["autoscaling"]
-    resources: ["horizontalpodautoscalers"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses", "networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["policy"]
-    resources: ["poddisruptionbudgets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses", "volumeattachments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Platform CRDs the operator actually drives.
-  - apiGroups: ["longhorn.io"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["argoproj.io"]
-    resources: ["applications", "appprojects"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["external-secrets.io"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["cert-manager.io"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["monitoring.coreos.com"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # `namespaces` create, deliberately without delete: standing up a new app
+  # namespace is routine; tearing one down is not.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  #
+  # NOT PRESENT, DELIBERATELY: `argoproj.io` write.
+  # An ArgoCD Application is a pointer at manifests that the application
+  # controller — which holds `*` on `*/*` — then applies for you. Write on
+  # Applications is arbitrary cluster mutation laundered through a CRD, and it
+  # is the one escalation that survives every other control in this file. Pause
+  # a sync or edit an Application through the ArgoCD UI or CLI instead, where
+  # the action is attributed to a human rather than to this ServiceAccount.
+  # Read stays available in the read-only block below.
   # READ-ONLY on everything else, so the shell can still SEE what it may not
   # change — the RBAC, Traefik and Kyverno objects left unwritable above are all
   # readable. Debugging a permission problem you cannot even read is needlessly
@@ -200,6 +201,95 @@ subjects:
   - kind: ServiceAccount
     name: agent-admin
     namespace: infraweaver-agent
+---
+# ── NAMESPACED WRITE: where this shell may actually change things ───────────
+# Everything that used to be cluster-wide write lives here, and reaches only the
+# namespaces enumerated by the RoleBindings below. The list of RoleBindings IS
+# the blast radius — read it as the answer to "what can a stolen session break?"
+#
+# Absent on purpose, and each absence is load-bearing:
+#   kube-system, longhorn-system — PSA `privileged` AND Kyverno-webhook-exempt,
+#     so a pod created there is admitted with hostPath and privileged: true.
+#   argocd                       — hosts argocd-application-controller, whose SA
+#     holds `*` on `*/*`; pod-create there is cluster-admin in two commands.
+#   authentik                    — exec into authentik-server reaches the API
+#     token in-process, which is exclusion 4 by another route.
+#   openbao, external-secrets, cert-manager, velero, monitoring — each holds a
+#     credential or a control whose compromise outlives this shell.
+#
+# ⚠️ Adding a namespace here is a security decision, not a convenience one.
+# `longhorn-system` in particular is tempting (volume surgery is real work) and
+# is exactly the namespace where a privileged pod is admitted unchecked.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-admin-workloads
+  labels:
+    app.kubernetes.io/name: agent-admin
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/exec
+      - pods/portforward
+      - services
+      - endpoints
+      - persistentvolumeclaims
+      - serviceaccounts
+      - events
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-workloads, namespace: infraweaver-console }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-workloads }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-workloads, namespace: wordpress }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-workloads }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-workloads, namespace: game-hub }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-workloads }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-workloads, namespace: infraweaver-agent }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-workloads }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
 # Secrets and ConfigMaps are namespaced ON PURPOSE — exclusion 4 in the header.
 # The `authentik` namespace is absent from the bindings below, so neither the
@@ -263,18 +353,41 @@ spec:
   target:
     name: agent-admin-creds
     creationPolicy: Owner
-  data:
-    # Push access for GitOps commits made from the shell.
-    - secretKey: github-token
-      remoteRef: { key: secret/platform/infraweaver-console, property: github-token }
-    # Full Talos control-plane access — node reboot, reset, machine config.
-    - secretKey: talosconfig_b64
-      remoteRef: { key: secret/platform/talosconfig, property: talosconfig_b64 }
-    # Proxmox ops token: VM create/delete/resize on every host in the cluster.
-    - secretKey: proxmox-token-id
-      remoteRef: { key: secret/platform/proxmox/proxmox, property: ops-token-id }
-    - secretKey: proxmox-token-secret
-      remoteRef: { key: secret/platform/proxmox/proxmox, property: ops-token-secret }
+  data: []
+  # ── EMPTIED 2026-08-15. THE ABSENCE IS THE POINT. ──────────────────────────
+  # This ExternalSecret used to materialise four credentials into $HOME on every
+  # pod start: a GitHub push token, a base64 Talos config, and a Proxmox ops
+  # token id/secret pair. Each one, on its own, defeated every RBAC control in
+  # this file:
+  #
+  #   talosconfig     — os:admin. Machine-config edit, node reboot/reset, and
+  #                     extraction of the cluster PKI. Below Kubernetes, so no
+  #                     in-cluster control can contain it.
+  #   proxmox ops     — VM create/delete/resize on every host. Clone or mount
+  #                     any other VM's disk, including the control plane's.
+  #                     Below the cluster entirely; unrecoverable from inside.
+  #   github-token    — push to the deploy repo, which ArgoCD applies with
+  #                     `automated: {prune, selfHeal}` as a `*` on `*/*`
+  #                     identity. Arbitrary cluster mutation, via git.
+  #
+  # A browser-reachable shell that holds these is a phishing target whose prize
+  # is the hypervisor. The RBAC narrowing elsewhere in this file is worth
+  # nothing while they sit in $HOME, because none of them go through the API
+  # server this file's rules govern.
+  #
+  # These actions are not lost, they are relocated: they belong behind a
+  # separate, audited, human-attributed path that issues a short-lived
+  # per-action credential, not in this shell's ambient environment. Until that
+  # broker exists they stay on the ops host, which is not reachable from a
+  # browser.
+  #
+  # ⚠️ Do not "temporarily" add one back to unblock a task. That is exactly how
+  # it got here — each was added for one good reason and then stayed.
+  #
+  # `data: []` is intentional rather than deleting the ExternalSecret outright:
+  # the empty Secret keeps the optional secretKeyRefs below resolvable, so the
+  # startup script takes its documented "credential missing" branch and prints
+  # what is unavailable instead of the container failing to start.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -590,24 +703,22 @@ spec:
               kubernetes.io/metadata.name: build
       ports:
         - { port: 1234, protocol: TCP }
-    # Talos apid and the Proxmox API. These are NARROW ON PURPOSE: the broad
-    # egress rule below excludes RFC1918 precisely so this shell cannot wander
-    # the private network, and these two exceptions re-open exactly the hosts and
-    # ports needed for node and hypervisor work — nothing else on 10.0.0.0/24.
+    # ── REMOVED 2026-08-15 ALONGSIDE THE CREDENTIALS THEY SERVED ─────────────
+    # This block used to re-open Talos apid (50000/TCP on 10.0.0.90/.92/.93)
+    # and the Proxmox API (8006/TCP on 10.0.0.3) as narrow exceptions to the
+    # RFC1918 exclusion below.
     #
-    # Without these the credentials above are inert and fail by HANGING rather
-    # than erroring, which is the same silent shape that hid every other defect
-    # in this tree.
-    - to:
-        - ipBlock: { cidr: 10.0.0.90/32 }
-        - ipBlock: { cidr: 10.0.0.92/32 }
-        - ipBlock: { cidr: 10.0.0.93/32 }
-      ports:
-        - { port: 50000, protocol: TCP }   # talos apid
-    - to:
-        - ipBlock: { cidr: 10.0.0.3/32 }  # proxmox host
-      ports:
-        - { port: 8006, protocol: TCP }
+    # They are gone because the talosconfig and Proxmox token are gone. A
+    # credential and its network path must never outlive each other: leaving the
+    # route open invites someone to "just add the secret back" and get a working
+    # hypervisor client in one line, and leaving a credential without a route
+    # produces the hang-instead-of-error failure that hid every other defect in
+    # this tree. Deleting both together means re-enabling node or hypervisor
+    # work is a visible, two-part change that has to argue for itself.
+    #
+    # The RFC1918 exclusion below is now unqualified: from this shell, nothing
+    # on the private network is reachable except the explicit in-cluster
+    # destinations listed above.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
