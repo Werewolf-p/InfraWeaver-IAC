@@ -2,7 +2,7 @@
 # Chart: https://charts.goauthentik.io
 # Deploys: Authentik server + worker + PostgreSQL + Redis
 repoURL: https://charts.goauthentik.io
-targetRevision: "2026.5.*"
+targetRevision: "2026.5.6"
 chart: authentik
 releaseName: authentik
 namespace: authentik

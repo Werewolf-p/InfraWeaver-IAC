@@ -10,11 +10,11 @@
 # hardcoded repoURL http://onedev.onedev.svc.cluster.local/InfraWeaver-platform —
 # a repo that was removed from the platform (commit 125c21e) and no longer resolves.
 #
-# Chart 12.1.0 => appVersion 1.18.1. Constrained to "12.1.*" rather than "12.*" so a
+# Chart 12.1.0 => appVersion 1.18.1. Constrained to "12.1.0" so a
 # minor chart bump cannot silently move the Velero server across a major version
 # boundary away from the pinned velero-plugin-for-aws v1.14.2 in values.yaml.
 repoURL: https://vmware-tanzu.github.io/helm-charts
-targetRevision: "12.1.*"
+targetRevision: "12.1.0"
 chart: velero
 releaseName: velero
 namespace: velero
