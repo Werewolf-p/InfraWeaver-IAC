@@ -143,14 +143,8 @@ APP_ENDPOINT_MAP = {
         "conditions": ["[STATUS] == 200"],
         "alerts": [{"type": "discord", "description": "Stirling PDF is unreachable"}],
     },
-    "onedev": {
-        "name": "OneDev (Git + CI)",
-        "url": "https://onedev.yourdomain.com",
-        "interval": "120s",
-        "group": "catalog",
-        "conditions": ["[STATUS] == 200"],
-        "alerts": [{"type": "discord", "description": "OneDev is unreachable"}],
-    },
+    # OneDev (decommissioned 2026-07-03) and Forgejo (2026-08-15) were removed
+    # from this map along with their Authentik providers and applications.
     "infraweaver-console": {
         "name": "InfraWeaver Console",
         # In-cluster ping (unauthenticated route on the console svc, port 3000).
@@ -188,15 +182,6 @@ APP_ENDPOINT_MAP = {
         "client": {"insecure": True},
         "conditions": ["[STATUS] < 400"],
         "alerts": [{"type": "discord", "description": "Gitea is unreachable"}],
-    },
-    "forgejo": {
-        "name": "Forgejo",
-        "url": "https://forgejo.int.yourdomain.com",
-        "interval": "120s",
-        "group": "catalog",
-        "client": {"insecure": True},
-        "conditions": ["[STATUS] < 400"],
-        "alerts": [{"type": "discord", "description": "Forgejo is unreachable"}],
     },
     "vaultwarden": {
         "name": "Vaultwarden",

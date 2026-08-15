@@ -28,6 +28,24 @@
 # file rejects NOTHING that is running now.
 # -----------------------------------------------------------------------------
 #
+# DEFAULTS ARE ADMISSIBLE — THE INVARIANT THIS FILE BROKE ONCE.
+# `default.memory / defaultRequest.memory` MUST be <= `maxLimitRequestRatio.memory`
+# in the same block. LimitRanger fills the blanks first and the ratio is checked
+# afterwards, so a container that declares no memory is judged on the pair THIS
+# FILE injected. When the two disagree the namespace rejects every such container
+# — and it does it with "memory max limit to request ratio per Container is N,
+# but provided ratio is M", which reads like the workload's fault when the
+# workload asked for nothing at all.
+#
+# Five of the seven blocks below shipped that way (measured 2026-08-15): build
+# 8x vs 4, nextcloud 16x vs 8, private-test 8x vs 5, registry 16x vs 10,
+# wordpress 8x vs 5. Nothing running broke, because admission is not re-run on
+# running pods — the cost was invisible until `nextcloud-postinstall` tried to
+# start a `wait-for-app` initContainer with no resources and could not. Each
+# `defaultRequest.memory` was raised to satisfy its own cap; no `default`, `max`,
+# `maxLimitRequestRatio` or quota was loosened. Check this ratio whenever you
+# touch either number.
+#
 # ROLLOUT EFFECT: no running pod is restarted or modified. LimitRange and
 # ResourceQuota are evaluated at pod ADMISSION.
 #
@@ -87,7 +105,11 @@ spec:
     - type: Container
       defaultRequest:
         cpu: 50m
-        memory: 128Mi
+        # 1Gi / 256Mi = 4.0x, inside the 5x cap below. THE DEFAULTS MUST SATISFY
+        # THE RATIO THEY ARE JUDGED BY — see "DEFAULTS ARE ADMISSIBLE" in the
+        # header. At 128Mi this pair was 8.0x and every container that omitted
+        # memory was rejected outright.
+        memory: 256Mi
       default:
         # memory limit only — no cpu limit, see header
         memory: 1Gi
@@ -133,7 +155,8 @@ spec:
     - type: Container
       defaultRequest:
         cpu: 100m
-        memory: 256Mi
+        # 2Gi / 512Mi = 4.0x, exactly the cap below. Was 256Mi, i.e. 8.0x.
+        memory: 512Mi
       default:
         memory: 2Gi
       max:
@@ -199,7 +222,8 @@ spec:
     - type: Container
       defaultRequest:
         cpu: 25m
-        memory: 64Mi
+        # 1Gi / 128Mi = 8.0x, inside the 10x cap below. Was 64Mi, i.e. 16.0x.
+        memory: 128Mi
       default:
         memory: 1Gi
       max:
@@ -280,7 +304,11 @@ spec:
     - type: Container
       defaultRequest:
         cpu: 25m
-        memory: 64Mi
+        # 1Gi / 128Mi = 8.0x, exactly the cap below. Was 64Mi, i.e. 16.0x — which
+        # is why `nextcloud-postinstall` could not create a pod: its
+        # `wait-for-app` initContainer declares no memory, so it inherited the
+        # 1Gi/64Mi pair and was refused.
+        memory: 128Mi
       default:
         memory: 1Gi
       max:
@@ -319,7 +347,8 @@ spec:
     - type: Container
       defaultRequest:
         cpu: 25m
-        memory: 64Mi
+        # 512Mi / 128Mi = 4.0x, inside the 5x cap below. Was 64Mi, i.e. 8.0x.
+        memory: 128Mi
       default:
         memory: 512Mi
       max:

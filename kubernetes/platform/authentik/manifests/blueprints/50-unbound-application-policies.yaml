@@ -241,18 +241,10 @@ data:
       #
       # Acceptance test (README.md): unbound application count reads 0 after
       # this applies, and stays 0 whether or not the deletions ever happen.
-      - model: authentik_policies.policybinding
-        state: present
-        identifiers:
-          target: !Find [authentik_core.application, [slug, forgejo]]
-          order: 10
-        attrs:
-          target: !Find [authentik_core.application, [slug, forgejo]]
-          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
-          enabled: true
-          order: 10
-          negate: false
-          timeout: 30
+      # The `forgejo` binding was dropped on 2026-08-15 along with the Forgejo
+      # provider and application (blueprint-apps.yaml) — the service is not run
+      # here. A binding whose `!Find` target no longer resolves is dead weight
+      # that still has to be read by anyone auditing this list.
 
       - model: authentik_policies.policybinding
         state: present
@@ -280,18 +272,9 @@ data:
           negate: false
           timeout: 30
 
-      - model: authentik_policies.policybinding
-        state: present
-        identifiers:
-          target: !Find [authentik_core.application, [slug, onedev]]
-          order: 10
-        attrs:
-          target: !Find [authentik_core.application, [slug, onedev]]
-          policy: !Find [authentik_policies_expression.expressionpolicy, [name, policy-admins-only]]
-          enabled: true
-          order: 10
-          negate: false
-          timeout: 30
+      # The `onedev` binding was dropped on 2026-08-15. OneDev was decommissioned
+      # on 2026-07-03 (GitHub drives GitOps); its application was already gone,
+      # leaving this binding pointing at nothing.
 
       - model: authentik_policies.policybinding
         state: present
