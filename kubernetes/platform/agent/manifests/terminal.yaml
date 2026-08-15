@@ -108,7 +108,29 @@ spec:
               fi
               # -W makes the terminal writable (you need to type). Auth is the
               # business of the forward-auth middleware in front, not ttyd.
-              exec "$HOME/bin/ttyd" -p 7681 -W -t titleFixed="InfraWeaver agent" \
+              #
+              # -O and -m added 2026-08-15, same reasoning as the admin shell:
+              #   -O   without it ttyd never calls check_host_origin() and
+              #        accepts a WebSocket handshake from ANY origin. Any page a
+              #        signed-in operator visits could open wss://terminal.int/ws,
+              #        have the browser attach the Authentik cookie, and get a
+              #        writable shell with full read-back — cross-site WebSocket
+              #        hijacking. SameSite=Lax on the authentik cookie probably
+              #        blocks it today, but that is a cookie we do not control
+              #        guarding a path with no test. Traefik preserves the
+              #        original Host header, which is what -O compares against.
+              #        ⚠️ Upstream #1566: over HTTP/2 the check fails closed and
+              #        the browser retries on HTTP/1.1 — a ~5s first-connect
+              #        delay, not a breakage.
+              #   -m 8 the default is 0 = UNLIMITED and every WebSocket forks a
+              #        process, so a client can loop connections and fork-bomb
+              #        the pod.
+              # -a/--url-arg stays OFF: it lets a client append argv to the
+              # spawned command, which is the historically dangerous surface.
+              exec "$HOME/bin/ttyd" -p 7681 -W -O -m 8 \
+                -t titleFixed="InfraWeaver agent" \
+                -t scrollback=100000 \
+                -t screenReaderMode=true \
                 bash -lc 'export PATH=$HOME/bin:$HOME/.npm-global/bin:$PATH; claude || bash -l'
           readinessProbe:
             tcpSocket: { port: 7681 }
