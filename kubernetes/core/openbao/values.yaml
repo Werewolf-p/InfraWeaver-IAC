@@ -111,26 +111,36 @@ server:
   dataStorage:
     enabled: true
     size: 5Gi
-    # local-path, deliberately — Longhorn gave I/O errors on the Raft BoltDB.
+    # Longhorn, so the vault is not pinned to one node. A local-path PV binds to
+    # a single machine, and retiring that machine strands the vault outright —
+    # which already happened once when cp2 was drained, and was about to happen
+    # again: on 2026-08-15 this PV was pinned to talos-prod-cp2, the node that
+    # then had to be wiped.
     #
-    # 2026-08-14 tried to move this to `longhorn` because a local-path PV pins
-    # the vault to one node, and retiring that node strands it (which is what
-    # happened when cp2 was drained). THAT CHANGE COULD NEVER APPLY: a
-    # StatefulSet's `volumeClaimTemplates` is immutable, so every sync since
-    # failed with "updates to statefulset spec for fields other than 'replicas',
-    # 'ordinals', 'template', ... are forbidden" and core-openbao sat OutOfSync
-    # while the vault stayed on local-path regardless. Reverted 2026-08-15 so
-    # this file states what is actually running.
+    # CHANGING THIS VALUE ALONE DOES NOTHING — that is the trap 2026-08-14 fell
+    # into. A StatefulSet's `volumeClaimTemplates` is IMMUTABLE, so setting
+    # `longhorn` here made every core-openbao sync fail with
+    #   updates to statefulset spec for fields other than 'replicas', 'ordinals',
+    #   'template', ... are forbidden
+    # and the Application sat OutOfSync for a day while the vault stayed exactly
+    # where it was. The declared value described an intention, not the cluster.
     #
-    # THE NODE-PINNING RISK IS REAL AND STILL OPEN. As of 2026-08-15 the PV is
-    # pinned to talos-prod-cp2. Changing this value alone will never move it —
-    # a move requires an attended recreation: take a Raft snapshot, delete the
-    # StatefulSet with --cascade=orphan, delete the PVC, let ArgoCD recreate it
-    # against the new class, restore the snapshot, then verify every
-    # ClusterSecretStore. Do that BEFORE retiring or wiping whichever node the
-    # PV is pinned to. The durable fix is 3 Raft replicas each on local-path,
-    # not a replicated volume.
-    storageClass: local-path
+    # The move only lands with an attended recreation, performed 2026-08-15:
+    #   1. bao operator raft snapshot save   (kept off-cluster before touching anything)
+    #   2. set the old PV's reclaimPolicy to Retain, so a mistake is recoverable
+    #   3. pause the Application's automated sync
+    #   4. delete the StatefulSet with --cascade=orphan, then the pod, then the PVC
+    #   5. resume sync — ArgoCD recreates the StatefulSet against this class
+    #   6. bao operator init on the fresh node, restore the snapshot, unseal with
+    #      the ORIGINAL key (the snapshot restores the old keyring, so the
+    #      openbao-unseal Secret stays valid), verify every ClusterSecretStore
+    # Repeat that sequence — do not just edit this line — if the class ever
+    # changes again.
+    #
+    # Longhorn previously gave I/O errors on the Raft BoltDB. Watch for those;
+    # if they return, the durable answer is 3 Raft replicas each on local-path,
+    # which is HA without a replicated block device underneath a consensus log.
+    storageClass: longhorn
     accessMode: ReadWriteOnce
 
   ingress:
