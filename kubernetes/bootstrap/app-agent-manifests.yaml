@@ -1,0 +1,81 @@
+---
+# Standalone ArgoCD Application for the in-cluster agent shells.
+#
+# WHY THIS FILE EXISTS: until now nothing rendered kubernetes/platform/agent.
+# Both Deployments (agent-terminal, agent-admin) were `kubectl apply`d by hand —
+# live objects carry `kubectl.kubernetes.io/last-applied-configuration` and field
+# manager `kubectl-client-side-apply`, and no `argocd.argoproj.io/tracking-id`.
+# The cost of that was already paid once: commit 952a60a renamed the ClusterRole
+# `agent-admin-configmaps` to `agent-admin-namespaced`, and because a hand-apply
+# creates but never deletes, four RoleBindings to the now-deleted ClusterRole
+# were left behind in game-hub, wordpress, longhorn-system and
+# infraweaver-console. ArgoCD prune will NOT collect them — prune only deletes
+# what it already tracks — so they are removed by hand once, and this
+# Application is what stops the next rename doing the same thing.
+#
+# There is a second, sharper reason. `allow-egress-apiserver`
+# (kubernetes/core/network-policies/manifests/apiserver-egress.yaml) selects the
+# reaper by a pod-template label set in terminal.yaml. While that file was
+# hand-applied, anyone re-applying an older copy silently dropped the label and
+# the reaper started timing out against 10.96.0.1:443 with no policy change and
+# no alert. A load-bearing label belongs in a tree something reconciles.
+#
+# NO `plugin: { name: envsubst-v1.0 }` HERE, DELIBERATELY — same rule as
+# app-velero-manifests.yaml. Every hostname in this tree is a literal
+# (`terminal.int.example.com`, `agent.int.example.com`), so the CMP would add
+# a rendering hop for no benefit. It would also FAIL: the CMP greps rendered
+# output for ${...PASSWORD|TOKEN|SECRET|KEY|LOGIN|CREDENTIAL...} and exits 1, and
+# terminal.yaml's startup script contains a bare ${AGENT_MEMORY_TOKEN} at the
+# point it builds a git URL. That is a runtime SHELL expansion, not a config
+# placeholder — the guard is a raw-text grep and cannot tell the difference. If a
+# future manifest here genuinely needs ${BASE_DOMAIN}, the plugin block and a fix
+# for that shell line have to land together.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-agent-manifests
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: agent
+    infraweaver.io/type: platform
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/platform/agent/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: infraweaver-agent
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      # rbac.yaml owns the Namespace object and its PSA labels — infraweaver-agent
+      # is deliberately absent from kubernetes/core/psa/namespace-labels.yaml, so
+      # unlike velero there is no second owner to fight over them.
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    # ESO defaults these remoteRef strategy fields server-side after admission,
+    # so the live object never matches git without this. agent-admin-creds needs
+    # it. Same block every other ExternalSecret-carrying Application here uses.
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'
