@@ -58,6 +58,43 @@ mtu:
   #   machine.network.interfaces[].mtu: 1370
   cluster_mtu: 1370
 
+# The Talos node running at this site, as built on 2026-08-14.
+#
+# NOT yet consumed by terraform: the talos-cluster module's `nodes` schema has
+# no concept of a bridge, an MTU, or a second disk, and neither does
+# scripts/generate-from-env.sh. Extending both is the remaining work to make
+# this node fully declarative; until then scripts/talos-node-add.sh takes these
+# same values as flags and is the reproducible path.
+node:
+  name: talos-prod-cp4
+  vm_id: 9303
+  role: hybrid
+  ip: 10.0.0.93
+  # Select the interface by MAC, never by name: Talos >= 1.13 uses predictable
+  # names (ens18), so an `interface: eth0` stanza applies silently and does
+  # nothing, and the node joins etcd on its DHCP address instead.
+  mac: bc:24:11:c4:04:93
+  cores: 6
+  memory_mb: 24576
+  # Root disk on the local VG; Longhorn gets a dedicated disk on the second one.
+  root_disk: { size_gb: 300, datastore: lvm-hypatia }
+  data_disk: { size_gb: 900, datastore: lvm-hypatia-longhorn, mount: /var/mnt/longhorn }
+  # Cluster traffic rides the stretched VLAN; see mtu.overlay above.
+  bridge: vmbr3
+  mtu: 1370
+  # Second NIC purely for internet egress. Without it every image pull routes
+  # home over the tunnel and hairpins through the WAN IP, and pulls never
+  # complete. With it, a cold pull takes ~20s.
+  egress:
+    bridge: vmbr1
+    mac: bc:24:11:c4:04:94
+    address: 10.1.10.20/24
+    gateway: 10.1.10.1
+    # Lower metric than the cluster default route, so only internet-bound
+    # traffic leaves locally; 10.0.0.0/24 stays on the stretched VLAN and
+    # 10.1.0.0/24 is routed back over the tunnel.
+    default_route_metric: 100
+
 # Operational constraints that follow from the link being a WAN path.
 # These are advisory metadata for the console/operator, not applied by the script.
 constraints:
