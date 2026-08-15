@@ -175,7 +175,36 @@ Shipped:
 still allowed, `agent-admin-creds` Secret gone entirely, both hosts return 302 to
 Authentik, both shells `1/1 Ready` with the new flags visible in `ps`.
 
-### What phase 1 does NOT satisfy
+## 3b. Phases 2-4 — shipped 2026-08-15 (same day)
+
+**Phase 2 — purpose-built image** (`images/agent-shell`). ttyd built from pinned
+commit `2922cb8` (2026-08-12) rather than release 1.7.7 (2024-03-30), satisfying
+E4/E5. tmux and asciinema baked in, so both shells now run `tmux new -A -s ops`
+and a refresh **reattaches** instead of starting a new shell — S1/S6, the worst
+property of the old setup, fixed.
+
+⚠️ `DOCKER_BUILDKIT=0` in `build.sh` is load-bearing: this host uses the
+containerd snapshotter, so BuildKit emits an OCI index plus attestation manifest
+and Zot rejects both (`provided digest did not match uploaded content`, then
+`manifest invalid` with provenance and SBOM disabled). The legacy builder pushes
+clean.
+
+**Phase 3 — attribution (partial).** `-H X-authentik-username` on the admin
+shell, so `TTYD_USER` carries the signed-in identity and recordings are
+attributable. Verified in-pod: **407 without the header, 200 with it** — it fails
+closed, which also means a direct in-cluster connection bypassing the proxy gets
+no shell. T1/T2 (Kubernetes impersonation) remain open; this is attribution of
+the *session*, not of each API call.
+
+**Phase 4 — audit shipped off-pod.** A read-only sidecar tails every asciicast to
+stdout, where Loki already scrapes container logs. Verified end to end: a canary
+string written inside a recording appeared in the shipper's log stream within
+seconds. This closes the delete-the-evidence-afterwards hole (R3, partially R4).
+
+⚠️ Still not tamper-proof: Loki is not WORM, the shipper races the writer by a
+few seconds, and a session that never starts is never recorded.
+
+### What phases 1-4 do NOT satisfy
 
 Stated plainly so nobody reads the above as more than it is:
 
@@ -191,7 +220,7 @@ Stated plainly so nobody reads the above as more than it is:
 
 ---
 
-## 4. Phases 2-5 — specified, not built
+## 4. Phase 5 — specified, not built
 
 **Phase 2 — purpose-built terminal image.** Unblocks E4, E5, S6, S9. Pin a ttyd
 commit from `main` (or backport), add `tmux`, `asciinema`, and an xterm.js bundle
