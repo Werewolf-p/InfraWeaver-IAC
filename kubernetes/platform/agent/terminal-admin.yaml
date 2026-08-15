@@ -327,3 +327,57 @@ spec:
           port: 80
   tls:
     secretName: platform-int-wildcard-tls
+---
+# WITHOUT THIS THE POD HANGS SILENTLY. The namespace carries an
+# `auto-default-deny` CiliumNetworkPolicy with an empty selector, and the
+# existing allow-rule selects `app.kubernetes.io/name: agent-session`. This
+# Deployment is labelled `agent-admin`, so on first boot it matched the deny and
+# nothing else: curl to npm hung, $HOME/bin stayed empty, and the pod sat 0/1 for
+# minutes emitting NO log line at all — the readiness probe simply never passed.
+# A copy of the agent-session policy with the selector changed.
+#
+# Egress is the same shape as the read-only sibling and no wider: DNS to
+# kube-system, Cilium/apiserver on 7445 and 6443, and 443 to the public internet
+# with RFC1918 EXCLUDED — so the shell can reach npm, GitHub and the Anthropic
+# API, but cannot use its outbound allowance to wander the private network.
+# Ingress is from the traefik namespace only, on the ttyd port, so the shell is
+# reachable through the Authentik-gated route and by nothing else in-cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-admin
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-admin
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-admin
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - { port: 7681, protocol: TCP }
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - ports:
+        - { port: 7445, protocol: TCP }
+        - { port: 6443, protocol: TCP }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - { port: 443, protocol: TCP }
