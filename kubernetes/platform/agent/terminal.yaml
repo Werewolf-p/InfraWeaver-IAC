@@ -173,7 +173,19 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: reaper
-              image: docker.io/bitnami/kubectl:1.31
+              # Digest-pinned, NOT tag-pinned. Bitnami moved its free Docker Hub
+              # catalog to the `bitnamilegacy/` namespace in 2025 and deleted the
+              # versioned tags from `bitnami/*`, so `bitnami/kubectl:1.31` began
+              # returning MANIFEST_UNKNOWN and this CronJob sat in
+              # ImagePullBackOff (680 backoffs over 157m on 2026-08-15). Digests
+              # survive tag removal; tags do not.
+              #
+              # This is the same digest the five ArgoCD CronJobs in
+              # kubernetes/core/argocd/manifests/ already run successfully, so it
+              # is known-good in this cluster. Do NOT swap to
+              # registry.k8s.io/kubectl: it is distroless with no shell, which
+              # broke every Kyverno cleanup job (see kubernetes/core/kyverno/values.yaml).
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -46,7 +46,13 @@ spec:
           restartPolicy: Never
           containers:
             - name: metrics
-              image: bitnami/kubectl:1.33.4
+              # Digest-pinned — `bitnami/kubectl:1.33.4` returns MANIFEST_UNKNOWN
+              # today for the same reason 1.31 did: Bitnami deleted the versioned
+              # tags from `bitnami/*` when it moved the free catalog to
+              # `bitnamilegacy/` in 2025. This Job is run on demand, so the
+              # breakage was latent and would only have surfaced during an etcd
+              # maintenance window — the worst possible time to discover it.
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/sh
