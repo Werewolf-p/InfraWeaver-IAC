@@ -23,13 +23,19 @@
 # NO `plugin: { name: envsubst-v1.0 }` HERE, DELIBERATELY — same rule as
 # app-velero-manifests.yaml. Every hostname in this tree is a literal
 # (`terminal.int.example.com`, `agent.int.example.com`), so the CMP would add
-# a rendering hop for no benefit. It would also FAIL: the CMP greps rendered
-# output for ${...PASSWORD|TOKEN|SECRET|KEY|LOGIN|CREDENTIAL...} and exits 1, and
-# terminal.yaml's startup script contains a bare ${AGENT_MEMORY_TOKEN} at the
-# point it builds a git URL. That is a runtime SHELL expansion, not a config
-# placeholder — the guard is a raw-text grep and cannot tell the difference. If a
-# future manifest here genuinely needs ${BASE_DOMAIN}, the plugin block and a fix
-# for that shell line have to land together.
+# a rendering hop for no benefit. It would also FAIL: the CMP greps its RENDERED
+# OUTPUT for secret-class placeholders and exits 1, and terminal.yaml's startup
+# script expands AGENT_MEMORY_TOKEN in brace form while building a git URL. That
+# is a runtime SHELL expansion, not a config placeholder — the guard is a
+# raw-text grep and cannot tell the difference.
+#
+# ⚠️ AND NEITHER CAN IT TELL A COMMENT FROM A VALUE. An earlier revision of this
+# file spelled that variable out in brace form, right here, to explain the
+# hazard — and took the `bootstrap` Application down with
+# "secret-class placeholder survived substitution — refusing to sync", because
+# kubernetes/bootstrap IS rendered through the CMP and every file in it is
+# concatenated before the grep runs. Describe such placeholders by name only.
+# Never write one in brace form anywhere under kubernetes/bootstrap.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
