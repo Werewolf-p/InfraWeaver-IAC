@@ -44,7 +44,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: terminal
-          image: docker.io/library/node:22-bookworm
+          image: registry.int.example.com/agent-shell:agentshell-20260815-210057
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -84,9 +84,14 @@ spec:
               curl -sSLo "$HOME/bin/kubectl" \
                 "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
                 && chmod +x "$HOME/bin/kubectl"
-              curl -sSLo "$HOME/bin/ttyd" \
-                "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
-                && chmod +x "$HOME/bin/ttyd"
+              # ttyd, tmux and asciinema are BAKED INTO THE IMAGE now
+              # (images/agent-shell). This used to curl the 1.7.7 release binary
+              # on every pod start, which made each restart depend on GitHub
+              # being reachable and pinned us to a release from 2024-03-30 whose
+              # successors carry unreleased shell-injection and sprintf
+              # hardening. The image builds ttyd from a pinned main commit.
+              command -v ttyd >/dev/null || { echo "ttyd missing from image"; exit 1; }
+              ttyd --version
               # Install Claude Code only if the persistent volume does not already
               # carry it, and FAIL LOUDLY when that install does not work.
               #
@@ -127,11 +132,17 @@ spec:
               #        the pod.
               # -a/--url-arg stays OFF: it lets a client append argv to the
               # spawned command, which is the historically dangerous surface.
-              exec "$HOME/bin/ttyd" -p 7681 -W -O -m 8 \
+              # tmux gives session persistence: ttyd SIGHUPs the child on
+              # disconnect, so before this a browser refresh started a NEW shell
+              # and killed whatever was running. `new -A -s ops` attaches to the
+              # existing session or creates it. This is why the custom image
+              # exists — tmux is not in node:22-bookworm and this container is
+              # uid 1000 with no apt.
+              exec ttyd -p 7681 -W -O -m 8 \
                 -t titleFixed="InfraWeaver agent" \
                 -t scrollback=100000 \
                 -t screenReaderMode=true \
-                bash -lc 'export PATH=$HOME/bin:$HOME/.npm-global/bin:$PATH; claude || bash -l'
+                tmux new -A -s ops
           readinessProbe:
             tcpSocket: { port: 7681 }
             initialDelaySeconds: 20

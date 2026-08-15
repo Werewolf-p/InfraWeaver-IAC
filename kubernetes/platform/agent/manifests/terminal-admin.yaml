@@ -404,7 +404,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: terminal
-          image: docker.io/library/node:22-bookworm
+          image: registry.int.example.com/agent-shell:agentshell-20260815-210057
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -476,11 +476,13 @@ spec:
                   "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
                 chmod +x "$HOME/bin/kubectl"
               fi
-              if [ ! -x "$HOME/bin/ttyd" ]; then
-                curl -sSLo "$HOME/bin/ttyd" \
-                  "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64"
-                chmod +x "$HOME/bin/ttyd"
-              fi
+              # ttyd, tmux and asciinema are BAKED INTO THE IMAGE now
+              # (images/agent-shell). This used to curl the 1.7.7 release binary
+              # on every start, pinning us to a 2024-03-30 release whose
+              # successors carry unreleased shell-injection and sprintf
+              # hardening, and making every restart depend on GitHub.
+              command -v ttyd >/dev/null || { echo "ttyd missing from image"; exit 1; }
+              ttyd --version
               # Fail loudly, never `|| true` — a silent install failure produced a
               # Healthy pod that dropped visitors into a bare shell with no agent
               # and no explanation. See terminal.yaml.
@@ -591,10 +593,7 @@ spec:
               #
               # scrollback: xterm.js defaults to 1000 lines, which loses the top
               # of any real build log. screenReaderMode is off by default and
-              # costs nothing to enable.
-              # ── SESSION WRAPPER: recording, retention, then the shell ───────
-              # Written here rather than inlined into ttyd's argv so the quoting
-              # stays readable and the logic is greppable in the running pod.
+              # ── SESSION WRAPPER: record, retain, persist, then the shell ────
               REC_DIR="$HOME/.session-recordings"
               mkdir -p "$REC_DIR"
               cat > "$HOME/bin/session-wrapper.sh" <<'WRAPPER'
@@ -602,56 +601,60 @@ spec:
               export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"
               REC_DIR="$HOME/.session-recordings"
               STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-              # TTYD_USER is set by ttyd from the -H header when one is
-              # configured; until forward-auth's header is wired through it will
-              # be empty, and an unattributed recording says so rather than
-              # implying an identity it does not have.
+              # ttyd sets TTYD_USER from the -H header, so this is the signed-in
+              # Authentik identity, not a guess. Unattributed sessions say so
+              # rather than implying an identity they do not have.
               WHO="${TTYD_USER:-unattributed}"
-              OUT="$REC_DIR/${STAMP}-${WHO}.typescript"
-              TIMING="$REC_DIR/${STAMP}-${WHO}.timing"
+              CAST="$REC_DIR/${STAMP}-${WHO}.cast"
 
               # Retention BEFORE recording, so a full volume cannot silently stop
-              # the session from being recorded. 30 days.
+              # the session being recorded. 30 days.
               find "$REC_DIR" -type f -mtime +30 -delete 2>/dev/null || true
 
-              # `script` ships in util-linux and is already in this image, so
-              # recording costs no new dependency. Output-only by construction:
-              # `script` captures the TERMINAL STREAM, so a non-echoing prompt
-              # (sudo, a key passphrase, a TOTP code) emits nothing to capture.
-              # Do not "improve" this by adding input logging — that turns a
+              # asciicast v2: plain NDJSON. Greppable, diffable, replayable by a
+              # self-hosted player with no external calls. Chosen over `script`'s
+              # typescript+timing pair and far over video or base64 NDJSON.
+              #
+              # Output-only by construction: asciinema records the TERMINAL
+              # STREAM, so a non-echoing prompt (sudo, key passphrase, TOTP)
+              # emits nothing to capture. NEVER add --stdin — that turns a
               # greppable text file into a cleartext credential store.
               #
-              # Replay:  scriptreplay --timing=FILE.timing FILE.typescript
-              # Search:  grep -l 'pattern' ~/.session-recordings/*.typescript
+              # tmux inside the recording, not outside: `new -A -s ops` reattaches
+              # on refresh instead of starting over, and the recording follows the
+              # attach rather than being cut at every disconnect.
               #
-              # ⚠️ THIS IS NOT A TAMPER-EVIDENT AUDIT CONTROL, AND MUST NOT BE
-              # DESCRIBED AS ONE. The recordings live on the session's own PVC as
-              # the session's own uid, so the recorded party can read, edit or
-              # delete them. It is a debugging and accountability aid. Real audit
-              # means streaming off-pod during the session to storage this
-              # identity has no write path to — that is a separate change, and
-              # every product surveyed that skipped it (AWS stages transcripts on
-              # the recorded host for 14 days; Azure forbids immutable storage on
-              # its recording container) has the same weakness.
-              if command -v script >/dev/null 2>&1; then
-                exec script -q -f --log-out "$OUT" --log-timing "$TIMING" \
-                     -c 'claude || bash -l'
+              # Replay:  asciinema play FILE.cast
+              # Search:  grep -l 'pattern' ~/.session-recordings/*.cast
+              #
+              # ⚠️ NOT A TAMPER-EVIDENT AUDIT CONTROL. The recordings live on the
+              # session's own PVC as the session's own uid, so the recorded party
+              # can read, edit or delete them. It is an accountability and
+              # debugging aid. Real audit means streaming off-pod DURING the
+              # session to storage this identity cannot write.
+              if command -v asciinema >/dev/null 2>&1; then
+                exec asciinema rec --quiet --command "tmux new -A -s ops" "$CAST"
               fi
-              echo "script: NOT AVAILABLE — this session is NOT being recorded"
-              exec bash -lc 'claude || bash -l'
+              echo "asciinema: NOT AVAILABLE — this session is NOT being recorded"
+              exec tmux new -A -s ops
               WRAPPER
-              # The heredoc is indented for readability; strip that indentation.
               sed -i 's/^              //' "$HOME/bin/session-wrapper.sh"
               chmod +x "$HOME/bin/session-wrapper.sh"
 
-              # ⚠️ NO SESSION PERSISTENCE YET. ttyd sends SIGHUP on disconnect,
-              # so a browser refresh starts a NEW shell and kills whatever was
-              # running. The fix is `tmux new -A -s ops` in the wrapper above,
-              # and tmux is NOT in node:22-bookworm — this container runs as uid
-              # 1000 with no apt. It needs a purpose-built image, which is wanted
-              # anyway: ttyd 1.7.7 is the newest RELEASE but is ~2.5 years old,
-              # and shell-injection and sprintf hardening sit unreleased on main.
-              exec "$HOME/bin/ttyd" -p 7681 -W -O -m 8 \
+              # -H X-authentik-username is what makes a recording attributable.
+              # forward-auth-admin already returns that header
+              # (external-routes/manifests/01-middlewares.yaml authResponseHeaders),
+              # and Traefik adds it to the request it forwards here.
+              #
+              # ⚠️ IT IS ALSO AN AUTH GATE, AND IT FAILS CLOSED. ttyd's
+              # check_auth() only verifies the header is PRESENT — worthless as
+              # authentication on its own, and meaningful only because the
+              # NetworkPolicy below admits traffic from the traefik namespace
+              # alone. Anything reaching ttyd without that header now gets 401
+              # instead of a shell, which is the desired behaviour for a direct
+              # in-cluster connection that bypassed the proxy.
+              exec ttyd -p 7681 -W -O -m 8 \
+                -H X-authentik-username \
                 -t titleFixed="InfraWeaver agent (ADMIN — can change production)" \
                 -t scrollback=100000 \
                 -t screenReaderMode=true \
