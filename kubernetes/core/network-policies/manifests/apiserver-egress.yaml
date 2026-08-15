@@ -87,16 +87,15 @@ spec:
   egress:
     - toEntities: [kube-apiserver]
 ---
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: allow-egress-apiserver
-  namespace: falco
-  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
-spec:
-  endpointSelector: {}
-  egress:
-    - toEntities: [kube-apiserver]
+# ── falco: REMOVED 2026-08-15 ───────────────────────────────────────────────
+# The `falco` namespace was deleted — empty since creation, chart is
+# application.yaml.disabled, and it held 6 orphaned NetworkPolicies that read
+# as active segmentation while guarding nothing.
+#
+# Its apiserver-egress CNP goes with it. A policy naming a namespace that does
+# not exist cannot apply, and leaving it here held this Application permanently
+# OutOfSync — which is how the deletion was noticed.
+# Re-enabling falco means re-adding the namespace AND this policy together.
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

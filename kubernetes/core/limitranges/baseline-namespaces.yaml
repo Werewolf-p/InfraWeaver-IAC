@@ -295,19 +295,9 @@ spec:
 # kube-system, kube-public, kube-node-lease.
 # =============================================================================
 ---
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: baseline-requests
-  namespace: apps-grafana
-  labels:
-    infraweaver.io/governance: baseline
-spec:
-  limits:
-    - type: Container
-      defaultRequest:
-        cpu: 10m
-        memory: 32Mi
+# ── apps-grafana: REMOVED 2026-08-15 (namespace deleted) ────────────────────
+# Same reason as falco above: empty namespace, chart disabled, no Grafana pod
+# anywhere (dashboards come from kube-prometheus-stack).
 ---
 apiVersion: v1
 kind: LimitRange
@@ -365,19 +355,9 @@ spec:
         cpu: 10m
         memory: 32Mi
 ---
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: baseline-requests
-  namespace: falco
-  labels:
-    infraweaver.io/governance: baseline
-spec:
-  limits:
-    - type: Container
-      defaultRequest:
-        cpu: 10m
-        memory: 32Mi
+# ── falco: REMOVED 2026-08-15 (namespace deleted) ───────────────────────────
+# A LimitRange in a namespace that does not exist cannot apply and holds this
+# Application OutOfSync. Re-add with the namespace if falco returns.
 ---
 apiVersion: v1
 kind: LimitRange
