@@ -144,6 +144,14 @@ blueprints:
     # earlier login prompt, and 12h clears the console's 1h staleness floor by
     # 12x. See the header of the blueprint for the measurements.
     - authentik-blueprint-session-lifetimes
+    # ── Agent terminal gate (manifests/blueprints/90-…) ──────────────────────
+    # The in-cluster shell's forward-auth provider + admins-only binding. The
+    # auto-generated forward-auth blueprint cannot produce it: that generator
+    # only matches IngressRoutes using the middleware named `forward-auth`, and
+    # the terminal uses the stricter `forward-auth-admin`. Until this applied,
+    # the embedded outpost had no provider for terminal.int.<domain> and returned
+    # 404 to everyone — the shell was gated shut rather than gated.
+    - authentik-blueprint-agent-terminal
     # ── WP11 / GAP-C5 (manifests/blueprints/) ────────────────────────────────
     - authentik-blueprint-break-glass      # dormant recovery admin (stage 2)
     - authentik-blueprint-current-state    # no-op export of the auth path (stage 1)
