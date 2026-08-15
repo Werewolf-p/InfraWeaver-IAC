@@ -30,11 +30,22 @@
 #      LimitRanges, resource-governance and pod-security policies stay
 #      enforceable from inside this shell.
 #
-#   4. IT CANNOT REWRITE THE IDENTITY PROVIDER'S CONFIG.
-#      `configmaps` are granted per-namespace via RoleBindings below, NOT
-#      cluster-wide, precisely so the `authentik` namespace's blueprint
-#      ConfigMaps — which decide who may reach this shell at all — stay out of
-#      reach.
+#   4. IT CANNOT REWRITE THE IDENTITY PROVIDER'S CONFIG — INCLUDING VIA ITS API.
+#      `configmaps` AND `secrets` are granted per-namespace via RoleBindings
+#      below, never cluster-wide, so the `authentik` namespace is out of reach
+#      for both.
+#
+#      The `secrets` half is the load-bearing one and it was missed on the first
+#      pass. Blocking only ConfigMaps looked sufficient — the blueprints that
+#      decide who may reach this shell live in ConfigMaps — but Authentik's API
+#      TOKENS live in Secrets in the same namespace. Cluster-wide Secret read
+#      would therefore have let the shell reconfigure Authentik over its API and
+#      delete its own policy binding, without touching a single ConfigMap. The
+#      control would have been true on paper and false in practice.
+#
+#      This is also why the read-only catch-all further down names its API groups
+#      instead of using `*`: `*` includes the core group, and the core group
+#      includes `secrets`.
 #
 # ── WHAT IT CAN DO ──────────────────────────────────────────────────────────
 # Everything else needed to run this platform: workloads, storage, networking,
@@ -70,10 +81,8 @@ metadata:
   labels:
     app.kubernetes.io/name: agent-admin
 rules:
-  # Core workload + storage objects. `secrets` is included deliberately: an
-  # operator shell that cannot read a Secret cannot debug half of what breaks.
-  # This is the widest grant here — whoever reaches this shell can read every
-  # Secret in the cluster, the same reach platform-owner already has.
+  # Core workload + storage objects. `secrets` is NOT here — see the namespaced
+  # ClusterRole below and exclusion 4 in the header.
   - apiGroups: [""]
     resources:
       - pods
@@ -84,7 +93,6 @@ rules:
       - endpoints
       - persistentvolumeclaims
       - persistentvolumes
-      - secrets
       - serviceaccounts
       - events
       - namespaces
@@ -125,10 +133,48 @@ rules:
     resources: ["*"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # READ-ONLY on everything else, so the shell can still SEE what it may not
-  # change — including the RBAC, Traefik and Kyverno objects left unwritable
-  # above. Debugging a permission problem you cannot even read is needlessly
-  # painful, and reading them grants nothing.
-  - apiGroups: ["*"]
+  # change — the RBAC, Traefik and Kyverno objects left unwritable above are all
+  # readable. Debugging a permission problem you cannot even read is needlessly
+  # painful, and reading those grants nothing.
+  #
+  # ⚠️ THIS IS DELIBERATELY NOT `apiGroups: ["*"]`. A catch-all read would
+  # include the CORE group, and the core group contains `secrets` — which would
+  # hand back cluster-wide Secret read and, with it, Authentik's own API tokens.
+  # That would let the shell reconfigure Authentik through the API and remove its
+  # own policy binding, defeating exclusion 4 completely even though it cannot
+  # touch a single ConfigMap in that namespace. The named-group list below and
+  # the explicit core-group list above exist to keep `secrets` out of BOTH the
+  # read and the write path. Do not "simplify" either back to `*`.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "endpoints", "persistentvolumeclaims",
+                "persistentvolumes", "serviceaccounts", "events", "namespaces",
+                "nodes", "configmaps", "replicationcontrollers", "limitranges",
+                "resourcequotas", "podtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - apps
+      - batch
+      - autoscaling
+      - policy
+      - networking.k8s.io
+      - storage.k8s.io
+      - rbac.authorization.k8s.io
+      - admissionregistration.k8s.io
+      - apiextensions.k8s.io
+      - coordination.k8s.io
+      - discovery.k8s.io
+      - node.k8s.io
+      - scheduling.k8s.io
+      - metrics.k8s.io
+      - traefik.io
+      - kyverno.io
+      - cilium.io
+      - longhorn.io
+      - argoproj.io
+      - external-secrets.io
+      - cert-manager.io
+      - monitoring.coreos.com
+      - acme.cert-manager.io
     resources: ["*"]
     verbs: ["get", "list", "watch"]
 ---
@@ -147,40 +193,43 @@ subjects:
     name: agent-admin
     namespace: infraweaver-agent
 ---
-# ConfigMap writes are namespaced ON PURPOSE — exclusion 4 in the header. The
-# `authentik` namespace is absent from the bindings below, so the blueprint
-# ConfigMaps deciding who may reach this shell cannot be edited from inside it.
+# Secrets and ConfigMaps are namespaced ON PURPOSE — exclusion 4 in the header.
+# The `authentik` namespace is absent from the bindings below, so neither the
+# blueprint ConfigMaps NOR the Authentik API tokens are reachable from inside
+# this shell. The token exclusion is the load-bearing half: with it the shell
+# could reconfigure Authentik over the API and delete its own policy binding,
+# which would make "cannot rewrite who reaches it" true only on paper.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: agent-admin-configmaps
+  name: agent-admin-namespaced
 rules:
   - apiGroups: [""]
-    resources: ["configmaps"]
+    resources: ["configmaps", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: { name: agent-admin-configmaps, namespace: infraweaver-console }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+metadata: { name: agent-admin-namespaced, namespace: infraweaver-console }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-namespaced }
 subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: { name: agent-admin-configmaps, namespace: wordpress }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+metadata: { name: agent-admin-namespaced, namespace: wordpress }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-namespaced }
 subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: { name: agent-admin-configmaps, namespace: game-hub }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+metadata: { name: agent-admin-namespaced, namespace: game-hub }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-namespaced }
 subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: { name: agent-admin-configmaps, namespace: longhorn-system }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+metadata: { name: agent-admin-namespaced, namespace: longhorn-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-namespaced }
 subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
 apiVersion: v1
