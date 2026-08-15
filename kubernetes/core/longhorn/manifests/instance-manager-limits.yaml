@@ -26,8 +26,17 @@ spec:
   limits:
   - type: Container
     default:
-      # Conservative limit: actual instance-manager usage is ~50-100Mi.
-      # longhorn-manager is exempted from this via the mutation above.
+      # STALE MEASUREMENT WARNING (2026-08-15): this used to read "actual
+      # instance-manager usage is ~50-100Mi". That stopped being true as the
+      # volume count grew — instance-manager holds every engine and replica
+      # process for its node in one cgroup, and cp2 was measured at 245Mi
+      # against this 256Mi ceiling, which destroyed the pod every 30-90s and
+      # faulted every volume in the cluster. instance-manager is therefore ALSO
+      # exempted now, via ./instance-manager-resources.yaml (320Mi/1Gi).
+      #
+      # This default now applies only to the remaining longhorn-system
+      # containers (CSI plugin/sidecars, engine-image, share-manager), which
+      # are genuinely small. Re-measure before assuming that is still true.
       memory: 256Mi
     defaultRequest:
       # longhorn-manager is exempted from this via the mutation above.

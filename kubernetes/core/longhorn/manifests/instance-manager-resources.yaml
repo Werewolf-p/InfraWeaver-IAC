@@ -1,0 +1,139 @@
+---
+# =============================================================================
+# instance-manager memory — the 256Mi LimitRange default was an OOM ceiling
+# =============================================================================
+# INCIDENT (measured 2026-08-15): every Longhorn volume in the cluster went
+# faulted/degraded in a loop. instance-manager pods on cp1/cp2/cp4 were being
+# destroyed and recreated every 30-90s:
+#
+#   instance-manager-0ad40034...  age 3m31s
+#   instance-manager-7c7e720b...  age   47s
+#   instance-manager-d81abc24...  age    4s
+#
+# Each destruction takes every engine and replica process on that node with it,
+# so longhorn-manager marked the volumes faulted and then deleted the consuming
+# pods on purpose to force a remount:
+#
+#   volume_controller.go:1371  All replicas are failed, set engine
+#     salvageRequested to true
+#   kubernetes_pod_controller.go:521  Deleted pod
+#     prometheus-kube-prometheus-stack-prometheus-0 so that Kubernetes will
+#     handle remounting volume pvc-f0e9cf81-...
+#
+# That single loop is what surfaced as ArgoCD reporting
+# monitoring-kube-prometheus-stack Degraded and monitoring-loki Progressing, as
+# WordPress backups failing with EIO, and as the infraweaver-backup datastore
+# pod being replaced ~15 times in 15 minutes. None of those are monitoring,
+# WordPress or backup defects.
+#
+# ROOT CAUSE — a stale measurement baked into a hard limit.
+# ./instance-manager-limits.yaml carries the comment "actual instance-manager
+# usage is ~50-100Mi". That was true when it was written and is not true now.
+# instance-manager holds every engine and replica process for its node in ONE
+# cgroup, so its memory scales with the number of volumes attached there, and
+# the cluster has grown since. Measured 2026-08-15, 3 samples 8s apart:
+#
+#   node            pod                        memory         volumes
+#   talos-prod-cp2  instance-manager-7c7e720b  245/222/222Mi  ~11 attached
+#   talos-prod-cp1  instance-manager-0ad40034  168/198/198Mi
+#   talos-prod-cp4  instance-manager-d81abc24   65/ 92/ 92Mi  (fresh, climbing)
+#   talos-prod-cp3  instance-manager-e5da9f50   43/ 42/ 42Mi  (AllowScheduling
+#                                                              false, few replicas)
+#
+# cp2 peaked at 245Mi against a 256Mi limit — 96% of the ceiling. There is no
+# headroom for a rebuild, a snapshot or one more volume, and crossing it kills
+# the pod rather than throttling it.
+#
+# WHY THE LIMIT MUST BE GENEROUS, NOT MERELY CORRECT.
+# Longhorn upstream advises against a tight memory limit on instance-manager
+# precisely because the failure is not graceful: an OOMKill does not slow the
+# process down, it detaches every volume on the node at once. The cost of
+# over-provisioning here is a few hundred Mi of headroom; the cost of
+# under-provisioning is exactly the incident above. Request 320Mi (>= the 245Mi
+# observed peak, so the pod never sorts into the kubelet's "exceeds request"
+# eviction tier — see the ranking arithmetic in
+# ./longhorn-manager-resources.yaml) and limit 1Gi (4x peak, room for volume
+# growth and concurrent rebuilds).
+#
+# WHY NOT EDIT THE LimitRange — ./instance-manager-limits.yaml says it plainly
+# and it is still right: a LimitRange has no per-workload selector, so raising
+# the default would hit all 10-16 containers per node. This is the same
+# targeted-mutation mechanism its sibling ./longhorn-manager-resources.yaml
+# already uses for longhorn-manager, for the same reason.
+#
+# WHY NOT HELM VALUES — the longhorn chart pinned in ../application.yaml (1.7.*)
+# exposes `guaranteedInstanceManagerCPU` and no memory equivalent. There is no
+# values key that reaches this container.
+#
+# WE MUTATE THE POD, NOT A WORKLOAD. instance-manager pods have no controller in
+# git at all — they are created directly by longhorn-manager
+# (`longhorn.io/managed-by: longhorn-manager`), so there is nothing for ArgoCD
+# to drift against.
+#
+# REQUEST BUDGET: +270Mi per node (320Mi minus the 50Mi the LimitRange gives
+# today), one instance-manager per node, so ~1.1GiB across the four nodes
+# against 76.7GiB allocatable. Nothing approaches unschedulable.
+#
+# ROLLOUT: pod resources are immutable, so this applies as each instance-manager
+# is next created. Because the pods are currently in a destroy/recreate loop,
+# that is within seconds — the loop supplies its own rollout and then stops.
+#
+# FAIL-OPEN, STATED PLAINLY: kyverno-resource-mutating-webhook-cfg has
+# failurePolicy: Ignore. If Kyverno is down when an instance-manager pod is
+# created, the pod falls back to the LimitRange defaults — i.e. to today's
+# broken behaviour. This is not a hard guarantee, only a strict improvement.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: longhorn-instance-manager-memory-resources
+  labels:
+    infraweaver.io/governance: storage-eviction
+  annotations:
+    policies.kyverno.io/title: Longhorn Instance Manager Memory Resources
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Sets an accurate memory request (320Mi) and limit (1Gi) on the
+      instance-manager container. instance-manager holds every engine and
+      replica process for its node in one cgroup, so its memory scales with
+      attached volume count; the longhorn-system LimitRange default of 256Mi
+      was sized against a stale "50-100Mi" measurement and was reached on
+      talos-prod-cp2 at 245Mi on 2026-08-15, destroying the pod every 30-90s
+      and faulting every volume in the cluster.
+spec:
+  # Admission-time only. Pod resources are immutable, so a background scan
+  # could not patch a running pod even if it tried.
+  background: false
+  rules:
+    - name: set-instance-manager-memory
+      match:
+        any:
+          - resources:
+              # CREATE ONLY — same reasoning as the longhorn-manager policy:
+              # matching UPDATE re-applies the patch into a pod update payload
+              # and the API server rejects it, because pod resources are
+              # immutable after admission.
+              operations:
+                - CREATE
+              kinds:
+                - Pod
+              namespaces:
+                - longhorn-system
+              selector:
+                matchLabels:
+                  longhorn.io/component: instance-manager
+      mutate:
+        patchStrategicMerge:
+          spec:
+            containers:
+              # Conditional anchor: patch the instance-manager container if it
+              # is present, never append a new element to the list.
+              - (name): "instance-manager"
+                resources:
+                  requests:
+                    memory: "320Mi"
+                  limits:
+                    memory: "1Gi"
