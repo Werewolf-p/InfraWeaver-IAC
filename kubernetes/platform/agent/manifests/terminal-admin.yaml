@@ -330,64 +330,33 @@ metadata: { name: agent-admin-namespaced, namespace: longhorn-system }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-namespaced }
 subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
-# ── THE CREDENTIALS THAT MAKE THIS A VM REPLACEMENT ────────────────────────
-# Everything below widens blast radius on purpose, and it is worth being blunt:
-# a browser session that passes the Authentik admins-only gate now reaches GitHub
-# push, every Talos node, and the Proxmox API. Compromise of one signed-in
-# browser is compromise of the hypervisor.
+# ── THE CREDENTIALS ARE GONE, AND SO IS THE ExternalSecret ─────────────────
+# Until 2026-08-15 an ExternalSecret named `agent-admin-creds` materialised four
+# platform credentials into $HOME on every pod start: a GitHub push token, a
+# base64 Talos os:admin config, and a Proxmox ops token id/secret pair.
 #
-# That is the deliberate trade for retiring the operator VM. The mitigations are
-# the gate itself, the RBAC exclusions above, and the fact that these are
-# SEPARATE credentials from the read-only shell — which still holds none of them.
+# Each one, alone, defeated every RBAC rule in this file — because none of them
+# go through the API server those rules govern:
 #
-# ⚠️ ROTATE THESE IF THIS SHELL IS EVER COMPROMISED. They are not derived from
-# the signed-in human; they are static platform credentials the pod can read.
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: agent-admin-creds
-  namespace: infraweaver-agent
-spec:
-  refreshInterval: 1h
-  secretStoreRef: { name: openbao, kind: ClusterSecretStore }
-  target:
-    name: agent-admin-creds
-    creationPolicy: Owner
-  data: []
-  # ── EMPTIED 2026-08-15. THE ABSENCE IS THE POINT. ──────────────────────────
-  # This ExternalSecret used to materialise four credentials into $HOME on every
-  # pod start: a GitHub push token, a base64 Talos config, and a Proxmox ops
-  # token id/secret pair. Each one, on its own, defeated every RBAC control in
-  # this file:
-  #
-  #   talosconfig     — os:admin. Machine-config edit, node reboot/reset, and
-  #                     extraction of the cluster PKI. Below Kubernetes, so no
-  #                     in-cluster control can contain it.
-  #   proxmox ops     — VM create/delete/resize on every host. Clone or mount
-  #                     any other VM's disk, including the control plane's.
-  #                     Below the cluster entirely; unrecoverable from inside.
-  #   github-token    — push to the deploy repo, which ArgoCD applies with
-  #                     `automated: {prune, selfHeal}` as a `*` on `*/*`
-  #                     identity. Arbitrary cluster mutation, via git.
-  #
-  # A browser-reachable shell that holds these is a phishing target whose prize
-  # is the hypervisor. The RBAC narrowing elsewhere in this file is worth
-  # nothing while they sit in $HOME, because none of them go through the API
-  # server this file's rules govern.
-  #
-  # These actions are not lost, they are relocated: they belong behind a
-  # separate, audited, human-attributed path that issues a short-lived
-  # per-action credential, not in this shell's ambient environment. Until that
-  # broker exists they stay on the ops host, which is not reachable from a
-  # browser.
-  #
-  # ⚠️ Do not "temporarily" add one back to unblock a task. That is exactly how
-  # it got here — each was added for one good reason and then stayed.
-  #
-  # `data: []` is intentional rather than deleting the ExternalSecret outright:
-  # the empty Secret keeps the optional secretKeyRefs below resolvable, so the
-  # startup script takes its documented "credential missing" branch and prints
-  # what is unavailable instead of the container failing to start.
+#   talosconfig   os:admin. Machine-config edit, node reboot/reset, cluster PKI
+#                 extraction. Below Kubernetes; no in-cluster control reaches it.
+#   proxmox ops   VM create/delete/resize on every host. Clone or mount any
+#                 other VM's disk, control plane included. Below the cluster.
+#   github-token  Push to the deploy repo, which ArgoCD applies with
+#                 automated:{prune,selfHeal} as a `*` on `*/*` identity.
+#
+# A browser-reachable shell holding these is a phishing target whose prize is
+# the hypervisor. The object is deleted rather than emptied: every secretKeyRef
+# below is `optional: true`, so the startup script takes its documented
+# "credential missing" branch and prints what is unavailable. An empty
+# ExternalSecret would only have been an invitation to add one key back.
+#
+# These actions are relocated, not lost. They belong behind an audited,
+# human-attributed broker issuing a short-lived per-action credential. Until
+# that exists they stay on the ops host, which no browser can reach.
+#
+# ⚠️ Do not "temporarily" restore one to unblock a task. That is how they got
+# here: each was added for one good reason and then stayed.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -72,16 +72,14 @@ spec:
       - CreateNamespace=true
       - ServerSideApply=true
       - RespectIgnoreDifferences=true
-  ignoreDifferences:
-    # ESO defaults these remoteRef strategy fields server-side after admission,
-    # so the live object never matches git without this. agent-admin-creds needs
-    # it. Same block every other ExternalSecret-carrying Application here uses.
-    - group: external-secrets.io
-      kind: ExternalSecret
-      jsonPointers:
-        - /status
-        - /metadata/finalizers
-      jqPathExpressions:
-        - '.spec.data[].remoteRef.conversionStrategy'
-        - '.spec.data[].remoteRef.decodingStrategy'
-        - '.spec.data[].remoteRef.metadataPolicy'
+  # NO ignoreDifferences BLOCK. This tree no longer contains an ExternalSecret —
+  # agent-admin-creds was deleted with the platform credentials it carried.
+  #
+  # ⚠️ If one is ever added back, note what the standard block does in
+  # combination with RespectIgnoreDifferences=true above: its jq expressions
+  # cover `.spec.data[]…`, so ArgoCD treats that subtree as ignored and will NOT
+  # push changes to it. Emptying `spec.data` in git therefore left the live
+  # object — and the four credentials in the Secret it owned — completely
+  # untouched, reporting OutOfSync forever rather than converging. Deleting the
+  # object is what actually removed them. A field you have told ArgoCD to ignore
+  # is a field you can no longer use ArgoCD to change.
