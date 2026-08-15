@@ -232,6 +232,42 @@ metadata: { name: agent-admin-namespaced, namespace: longhorn-system }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-namespaced }
 subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
 ---
+# ── THE CREDENTIALS THAT MAKE THIS A VM REPLACEMENT ────────────────────────
+# Everything below widens blast radius on purpose, and it is worth being blunt:
+# a browser session that passes the Authentik admins-only gate now reaches GitHub
+# push, every Talos node, and the Proxmox API. Compromise of one signed-in
+# browser is compromise of the hypervisor.
+#
+# That is the deliberate trade for retiring the operator VM. The mitigations are
+# the gate itself, the RBAC exclusions above, and the fact that these are
+# SEPARATE credentials from the read-only shell — which still holds none of them.
+#
+# ⚠️ ROTATE THESE IF THIS SHELL IS EVER COMPROMISED. They are not derived from
+# the signed-in human; they are static platform credentials the pod can read.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: agent-admin-creds
+  namespace: infraweaver-agent
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: openbao, kind: ClusterSecretStore }
+  target:
+    name: agent-admin-creds
+    creationPolicy: Owner
+  data:
+    # Push access for GitOps commits made from the shell.
+    - secretKey: github-token
+      remoteRef: { key: secret/platform/infraweaver-console, property: github-token }
+    # Full Talos control-plane access — node reboot, reset, machine config.
+    - secretKey: talosconfig_b64
+      remoteRef: { key: secret/platform/talosconfig, property: talosconfig_b64 }
+    # Proxmox ops token: VM create/delete/resize on every host in the cluster.
+    - secretKey: proxmox-token-id
+      remoteRef: { key: secret/platform/proxmox/proxmox, property: ops-token-id }
+    - secretKey: proxmox-token-secret
+      remoteRef: { key: secret/platform/proxmox/proxmox, property: ops-token-secret }
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -290,9 +326,26 @@ spec:
               containerPort: 7681
           env:
             - { name: HOME, value: /home/session }
+            - { name: BUILDKIT_HOST, value: "tcp://buildkitd.build.svc.cluster.local:1234" }
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: agent-api-key, key: api-key, optional: true }
+            # optional:true on every one of these is deliberate: the ExternalSecret
+            # syncs on its own schedule, and a pod that refuses to start because a
+            # credential has not landed yet is a shell you cannot get into to fix
+            # the credential. The startup script reports which ones are missing.
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agent-admin-creds, key: github-token, optional: true }
+            - name: TALOSCONFIG_B64
+              valueFrom:
+                secretKeyRef: { name: agent-admin-creds, key: talosconfig_b64, optional: true }
+            - name: PROXMOX_TOKEN_ID
+              valueFrom:
+                secretKeyRef: { name: agent-admin-creds, key: proxmox-token-id, optional: true }
+            - name: PROXMOX_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: { name: agent-admin-creds, key: proxmox-token-secret, optional: true }
           command: ["bash", "-lc"]
           args:
             - |
@@ -318,6 +371,57 @@ spec:
                 npm i -g @anthropic-ai/claude-code
               fi
               claude --version
+
+              # ── talosctl: node lifecycle, machine config, etcd membership ──
+              if [ ! -x "$HOME/bin/talosctl" ]; then
+                TALOS_VER="$(curl -sSL https://api.github.com/repos/siderolabs/talos/releases/latest \
+                  | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+                curl -sSLo "$HOME/bin/talosctl" \
+                  "https://github.com/siderolabs/talos/releases/download/${TALOS_VER}/talosctl-linux-amd64"
+                chmod +x "$HOME/bin/talosctl"
+              fi
+              # ── buildctl: image builds against the in-cluster buildkitd ──
+              # No Docker daemon and no privileged pod. buildkitd already runs in
+              # the `build` namespace; this is a client, so image builds need no
+              # extra privilege here at all.
+              if [ ! -x "$HOME/bin/buildctl" ]; then
+                BK_VER=0.18.2
+                curl -sSL "https://github.com/moby/buildkit/releases/download/v${BK_VER}/buildkit-v${BK_VER}.linux-amd64.tar.gz" \
+                  | tar -xz -C "$HOME" bin/buildctl 2>/dev/null || true
+                chmod +x "$HOME/bin/buildctl" 2>/dev/null || true
+              fi
+
+              # ── credentials: materialise, and SAY when one is missing ──
+              # Each is optional so the pod always starts; silence about a missing
+              # credential is exactly the failure mode that made this whole tree
+              # look finished while doing nothing.
+              if [ -n "${TALOSCONFIG_B64:-}" ]; then
+                mkdir -p "$HOME/.talos"
+                echo "$TALOSCONFIG_B64" | base64 -d > "$HOME/.talos/config"
+                chmod 600 "$HOME/.talos/config"
+                echo "talosctl: config installed"
+              else
+                echo "talosctl: NO CONFIG (agent-admin-creds/talosconfig_b64 missing) — node ops unavailable"
+              fi
+              if [ -n "${GITHUB_TOKEN:-}" ]; then
+                git config --global credential.helper store
+                printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" > "$HOME/.git-credentials"
+                chmod 600 "$HOME/.git-credentials"
+                git config --global user.name  "InfraWeaver Agent"
+                git config --global user.email "agent@${HOSTNAME}.invalid"
+                echo "git: push credentials installed"
+              else
+                echo "git: NO TOKEN (agent-admin-creds/github-token missing) — push unavailable"
+              fi
+              if [ -n "${PROXMOX_TOKEN_ID:-}" ] && [ -n "${PROXMOX_TOKEN_SECRET:-}" ]; then
+                # Sourced by the operator, not exported into every child process.
+                printf 'export PVE_AUTH_HEADER="Authorization: PVEAPIToken=%s=%s"\n' \
+                  "$PROXMOX_TOKEN_ID" "$PROXMOX_TOKEN_SECRET" > "$HOME/.proxmox-env"
+                chmod 600 "$HOME/.proxmox-env"
+                echo "proxmox: token installed (source ~/.proxmox-env)"
+              else
+                echo "proxmox: NO TOKEN (agent-admin-creds/proxmox-* missing) — hypervisor ops unavailable"
+              fi
               exec "$HOME/bin/ttyd" -p 7681 -W -t titleFixed="InfraWeaver agent (ADMIN — can change production)" \
                 bash -lc 'export PATH=$HOME/bin:$HOME/.npm-global/bin:$PATH; claude || bash -l'
           readinessProbe:
@@ -421,6 +525,31 @@ spec:
     - ports:
         - { port: 7445, protocol: TCP }
         - { port: 6443, protocol: TCP }
+    # buildkitd, so image builds work without a Docker daemon or a privileged pod.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: build
+      ports:
+        - { port: 1234, protocol: TCP }
+    # Talos apid and the Proxmox API. These are NARROW ON PURPOSE: the broad
+    # egress rule below excludes RFC1918 precisely so this shell cannot wander
+    # the private network, and these two exceptions re-open exactly the hosts and
+    # ports needed for node and hypervisor work — nothing else on 10.0.0.0/24.
+    #
+    # Without these the credentials above are inert and fail by HANGING rather
+    # than erroring, which is the same silent shape that hid every other defect
+    # in this tree.
+    - to:
+        - ipBlock: { cidr: 10.0.0.90/32 }
+        - ipBlock: { cidr: 10.0.0.92/32 }
+        - ipBlock: { cidr: 10.0.0.93/32 }
+      ports:
+        - { port: 50000, protocol: TCP }   # talos apid
+    - to:
+        - ipBlock: { cidr: 10.0.0.3/32 }  # proxmox host
+      ports:
+        - { port: 8006, protocol: TCP }
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
