@@ -1,0 +1,42 @@
+---
+# ciliumnetworkpolicy-dispatch-egress.yaml — least-privilege egress to the
+# feedback dispatch service.
+#
+# The console's default-deny-egress (networkpolicy.yaml) blocks all egress and
+# its "External HTTPS" allow explicitly excepts 10.0.0.0/8, so the dispatch
+# service at 10.0.0.108:9876 was unreachable from the pod even though
+# DISPATCH_URL has pointed at it since June (overlays/prod/kustomization.yaml).
+#
+# MEASURED 2026-08-15: `wget http://10.0.0.108:9876/health` from inside an
+# infraweaver-console pod timed out, while the same request from the ops host
+# returned `{"status":"ok"}` immediately. Every /api/feedback/:id/runs call was
+# therefore failing server-side, which is what made the Fix Flow page's live
+# console render nothing at all — and would equally have broken approve and
+# publish, since those are dispatch mutations.
+#
+# Additive with the k8s NetworkPolicies (Cilium enforces the union of allows)
+# and opens exactly one destination: dispatch on 9876/TCP, nothing else.
+#
+# ⚠️ 10.0.0.108 is the ops VM that is being retired (see
+# kubernetes/core/github-runner/namespace.yaml). This policy pins the address
+# the app is already configured with; when dispatch moves, DISPATCH_URL and this
+# CIDR change together or the Fix Flow page goes quiet again in exactly this way.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: infraweaver-console-dispatch-egress
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: gitops
+    app.kubernetes.io/part-of: infraweaver
+spec:
+  endpointSelector:
+    matchLabels:
+      app: infraweaver-console
+  egress:
+    - toCIDR:
+        - 10.0.0.108/32
+      toPorts:
+        - ports:
+            - port: "9876"
+              protocol: TCP
