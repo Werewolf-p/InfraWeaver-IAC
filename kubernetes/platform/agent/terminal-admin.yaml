@@ -54,9 +54,17 @@
 # self-escalation, not a harmless one.
 #
 # ── WHAT IT STILL IS NOT ────────────────────────────────────────────────────
-# Not a replacement for the operator VM on its own: no git push credentials, no
-# talosctl or Talos machine config, no Proxmox API access, no Docker. Node
-# lifecycle, hypervisor work and image builds still happen elsewhere.
+# There is still NO Docker daemon here and there never will be — a shell that can
+# start privileged containers is a shell that can rewrite the node. Image builds
+# go through the in-cluster buildkitd instead (BUILDKIT_HOST below,
+# scripts/console-build-incluster.sh, and the three additive CiliumNetworkPolicies
+# in kubernetes/core/network-policies/manifests/allowlists.yaml). The `next build`
+# itself runs HERE, which is what the 6Gi limit below is for.
+#
+# The remaining honest gap: this pod is scheduled by the very cluster it repairs.
+# A cluster that will not schedule pods is a cluster whose repair shell will not
+# start either, and that failure mode is exactly when an operator VM earns its
+# keep. Keep one reachable path that does not depend on the control plane.
 #
 # ── AUDIT CAVEAT, STATED PLAINLY ────────────────────────────────────────────
 # Every action here attributes to the ServiceAccount `agent-admin`, not to the
@@ -318,9 +326,37 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+          # ── WHY 6Gi, AND WHY THE BUILD IS NOT PUSHED INTO buildkitd ─────────
+          # `npm run build` for the console is the single biggest thing this
+          # shell does. Measured history, from consoleup-build.sh: 1800MB OOMed
+          # after the 2026-08-01 wave, 3400MB OOMed on 2026-08-10, and the
+          # working setting today is --max-old-space-size=4096. A 2Gi container
+          # cannot run it at all — the webpack worker dies with "Ineffective
+          # mark-compacts near heap limit" and leaves no .next/standalone.
+          #
+          # The obvious alternative — run the whole Next build inside buildkitd
+          # via apps/infraweaver-console/Dockerfile, so the memory lives in the
+          # daemon — was measured and REJECTED on 2026-08-15, for two reasons:
+          #
+          #   1. It needs INTERNET in the build namespace. That Dockerfile runs
+          #      `npm ci` and pulls node:20-slim from Docker Hub, so buildkitd
+          #      would need world:443. buildkitd is rootful, privileged and
+          #      unauthenticated; giving it outbound internet is precisely the
+          #      hole `airgap-baseline` in `build` exists to prevent. The shell
+          #      already has its own 443-to-world allowance and sits behind the
+          #      Authentik admin gate, so the network-facing half of the build
+          #      belongs HERE, not there.
+          #   2. buildkitd is capped at 3Gi (kubernetes/core/buildkit/buildkit.yaml)
+          #      and is SHARED. A build that OOMs the daemon takes out every
+          #      other build, not just its own; a build that OOMs this pod costs
+          #      one operator a session.
+          #
+          # 6Gi against a 1Gi request is a 6x ratio — inside Kyverno's 8x
+          # limit-memory-burst-ratio cap. cp1 had 23Gi of unreserved memory when
+          # this was raised.
           resources:
-            requests: { cpu: 200m, memory: 512Mi }
-            limits:   { cpu: "2", memory: 2Gi }
+            requests: { cpu: 200m, memory: 1Gi }
+            limits:   { cpu: "2", memory: 6Gi }
           ports:
             - name: ttyd
               containerPort: 7681
@@ -389,6 +425,28 @@ spec:
                 curl -sSL "https://github.com/moby/buildkit/releases/download/v${BK_VER}/buildkit-v${BK_VER}.linux-amd64.tar.gz" \
                   | tar -xz -C "$HOME" bin/buildctl 2>/dev/null || true
                 chmod +x "$HOME/bin/buildctl" 2>/dev/null || true
+              fi
+              # ── crane: mirror upstream base images into Zot ────────────────
+              # buildkitd is airgapped from the internet ON PURPOSE (see
+              # allow-buildkitd-to-registry in
+              # kubernetes/core/network-policies/manifests/allowlists.yaml), so it
+              # cannot resolve a `FROM public.ecr.aws/...`. THIS pod has the
+              # 443-to-world allowance instead, so the mirror hop happens here:
+              #   crane copy public.ecr.aws/docker/library/node:20-alpine \
+              #              registry.int.example.com/base/node:20-alpine
+              # scripts/console-build-incluster.sh in the infra repo does this
+              # automatically when the mirror is missing.
+              #
+              # `|| true` here, unlike the claude install above, because a build
+              # tool is not what a session is FOR — refusing to start the shell
+              # over it would trade every debugging session for one build. The
+              # loud check lives in console-build-incluster.sh's preflight, which
+              # names the missing tool and this file instead of hanging.
+              if [ ! -x "$HOME/bin/crane" ]; then
+                CRANE_VER=0.20.2
+                curl -sSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VER}/go-containerregistry_Linux_x86_64.tar.gz" \
+                  | tar -xz -C "$HOME/bin" crane 2>/dev/null || true
+                chmod +x "$HOME/bin/crane" 2>/dev/null || true
               fi
 
               # ── credentials: materialise, and SAY when one is missing ──

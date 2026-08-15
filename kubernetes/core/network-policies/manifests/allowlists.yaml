@@ -380,3 +380,111 @@ spec:
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": nextcloud}}]
     - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
       toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
+---
+# WHY: the elevated in-cluster shell (infraweaver-agent/agent-admin) must be able
+# to build and push the console image, so the operator VM can be retired. That is
+# a buildctl CLIENT talking to the existing buildkitd on 1234 — no Docker daemon
+# in the shell and no privileged pod anywhere new.
+#
+# WHAT `airgap-baseline` IN `build` ACTUALLY PROTECTS, and why this does not undo it:
+#
+#   buildkitd runs ROOTFUL + `privileged: true` with `--allow-insecure-entitlement
+#   security.insecure`, listening on 1234 with NO authentication of any kind. Anyone
+#   who can open that socket can run arbitrary unsandboxed containers as root on a
+#   control-plane node. The ingress half of airgap-baseline is therefore the ONLY
+#   authentication in front of that daemon: build ⇄ build, plus traefik (ingress)
+#   and monitoring (scrape). The egress half is the second line — it means a build
+#   that does get in still cannot reach the internet or any other namespace.
+#
+#   This rule adds ONE named client to the ingress side: not "the agent namespace",
+#   not "any pod", but the pod labelled agent-admin in infraweaver-agent, on 1234
+#   only, and it is scoped to the buildkitd endpoint rather than the namespace. It
+#   grants agent-admin nothing it does not already hold: that ServiceAccount can
+#   already create Pods in any namespace, which is already root on a node for anyone
+#   who wants it. The gate in front of agent-admin (Authentik admins-only, see
+#   kubernetes/platform/agent/terminal-admin.yaml) is the real control, and it is
+#   unchanged. The read-only sibling `agent-session` is deliberately NOT named here.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-agent-admin-to-buildkitd, namespace: build, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": buildkitd}}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": infraweaver-agent
+            "app.kubernetes.io/name": agent-admin
+      toPorts: [{ports: [{port: "1234", protocol: TCP}]}]
+---
+# WHY: the matching egress side — a build daemon that cannot reach a registry can
+# neither resolve a `FROM` nor push a result, so with airgap-baseline alone
+# buildkitd is a daemon that can only ever fail. Measured 2026-08-15 from inside
+# the pod, BEFORE this rule: 10.0.0.200:443 BLOCKED, registry.npmjs.org:443 BLOCKED.
+#
+# THE AIRGAP IS KEPT. This opens exactly one destination — the cluster's INTERNAL
+# ingress VIP on 443, which is where buildkitd's own `hostAliases` already point
+# registry.int.${BASE_DOMAIN} (going via the PUBLIC IP hairpins and resets OCI blob
+# uploads; see kubernetes/core/registry/README.md). buildkitd still has NO route to
+# the internet: no npm, no Docker Hub, no ECR. That is deliberate and it is the
+# property worth keeping — a privileged, unauthenticated build daemon with outbound
+# internet is an exfiltration path with a shell attached.
+#
+# The consequence is that the daemon cannot pull an upstream base image either, so
+# the base is MIRRORED into Zot (registry.int.${BASE_DOMAIN}/base/node:20-alpine)
+# by the agent shell, which does have a 443-to-world allowance of its own and is
+# behind the Authentik gate. scripts/console-build-incluster.sh refreshes it.
+#
+# Both forms of the same single flow are listed because the destination is a MetalLB
+# LoadBalancer IP: depending on where service translation happens relative to policy
+# enforcement, Cilium sees either the traefik endpoint or the bare VIP. Naming both
+# is one flow described twice, not two holes.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-buildkitd-to-registry, namespace: build, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": buildkitd}}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+    - toCIDR: ["10.0.0.200/32"]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+---
+# WHY: the console runtime image installs ONE OS package — `RUN apk add --no-cache
+# git` in apps/infraweaver-console/Dockerfile.prebuilt — because the console shells
+# out to git at runtime (external-routes-server.ts) and the clone-infra-routes
+# initContainer runs the same image. That single RUN step is the only reason
+# buildkitd needs anything outside this cluster at all.
+#
+# SCOPED TO ONE NAME, ON PURPOSE. node:20-alpine ships exactly two repository
+# lines, both on the same host (measured 2026-08-15):
+#   https://dl-cdn.alpinelinux.org/alpine/v3.23/main
+#   https://dl-cdn.alpinelinux.org/alpine/v3.23/community
+# So this is the Alpine package CDN and nothing else: no npm, no Docker Hub, no
+# ECR, no arbitrary registry. The base image itself is NOT pulled through here —
+# it is mirrored into Zot by the agent shell (see allow-buildkitd-to-registry).
+#
+# THREE THINGS THIS IS NOT, STATED PLAINLY:
+#   1. toFQDNs is not a hard boundary. Cilium allows the IPs that name resolves
+#      to, and dl-cdn is Fastly — those IPs front many other sites, so a process
+#      with RCE inside buildkitd could reach them with a different SNI. It is a
+#      large reduction from `toEntities: [world]`, not an airtight one.
+#   2. It is not the only outbound channel the build namespace has. airgap-baseline
+#      already permits DNS with `matchPattern: "*"`, which is itself an exfil path
+#      and predates this rule.
+#   3. It relies on that same DNS rule: without the Cilium DNS proxy seeing the
+#      lookup, toFQDNs has no IPs to allow and this silently denies.
+#
+# The alternative considered and rejected: switch the runtime base to full
+# `node:20` (Debian, ships git) so buildkitd needs no internet whatsoever. It
+# works, but it changes the deployed image from musl/alpine to glibc/Debian and
+# adds ~330MB to every node's image cache — a production change made to avoid a
+# one-hostname hole. Not worth it. Revisit if a Zot-hosted base with git ever
+# exists, at which point this rule should be DELETED.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: allow-buildkitd-os-packages, namespace: build, labels: {app.kubernetes.io/managed-by: gitops}}
+spec:
+  endpointSelector: {matchLabels: {"app.kubernetes.io/name": buildkitd}}
+  egress:
+    - toFQDNs: [{matchName: "dl-cdn.alpinelinux.org"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
