@@ -130,3 +130,48 @@ spec:
   endpointSelector: {}
   egress:
     - toEntities: [kube-apiserver]
+---
+# infraweaver-agent — added 2026-08-15.
+#
+# The namespace was created for the web terminal and immediately received an
+# `auto-default-deny` CiliumNetworkPolicy from Kyverno's
+# `generate-default-deny-cnp` rule. That rule allows intra-namespace traffic and
+# DNS, and nothing else. Every other namespace in this file got a hand-written
+# apiserver-egress companion at the same time; this one never did, so the
+# `agent-terminal-reaper` CronJob — whose entire job is to call the API — hung
+# and died on every run:
+#
+#   couldn't get current server API group list: Get "https://10.96.0.1:443/api?
+#     timeout=32s": dial tcp 10.96.0.1:443: i/o timeout
+#
+# Measured, so the diagnosis is not guesswork: an identical busybox pod reached
+# 10.96.0.1:443 from the `default` namespace and failed from `infraweaver-agent`
+# on BOTH talos-prod-cp1 and talos-prod-cp3 — a namespace boundary, not a node
+# and not a NetworkPolicy (the namespace's only NetworkPolicy selects
+# `app.kubernetes.io/name: agent-session`, which the reaper pod does not carry).
+#
+# ⚠️ SCOPED, unlike every entry above. The other namespaces use
+# `endpointSelector: {}` because everything in them is platform infrastructure.
+# This namespace also hosts `agent-session` pods — ephemeral, operator-facing
+# in-cluster shells. Granting the whole namespace apiserver egress would widen
+# what those shells can reach as a side effect of fixing a CronJob. The selector
+# therefore names the reaper only; the session pods keep the narrower egress
+# their own NetworkPolicy already defines.
+#
+# The matching label is set on the reaper pod template in
+# kubernetes/platform/agent/terminal.yaml. ⚠️ That file is NOT rendered by any
+# ArgoCD Application (it lives outside a `manifests/` directory and has no
+# `application.yaml`), so the label must be applied by hand until the agent
+# tree is brought under GitOps.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: infraweaver-agent
+  labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/purpose: zero-trust-apiserver-egress}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-terminal-reaper
+  egress:
+    - toEntities: [kube-apiserver]

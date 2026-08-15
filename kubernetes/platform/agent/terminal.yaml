@@ -163,6 +163,17 @@ spec:
     spec:
       ttlSecondsAfterFinished: 3600
       template:
+        metadata:
+          labels:
+            # Selected by the SCOPED allow-egress-apiserver CiliumNetworkPolicy in
+            # kubernetes/core/network-policies/manifests/apiserver-egress.yaml.
+            # Without this label the reaper is covered only by the namespace's
+            # Kyverno-generated auto-default-deny CNP, which permits intra-namespace
+            # traffic and DNS and nothing else — so every run died on
+            #   dial tcp 10.96.0.1:443: i/o timeout
+            # The label is deliberately NOT `agent-session`: that name selects the
+            # ephemeral operator shells, whose egress must stay narrower than this.
+            app.kubernetes.io/name: agent-terminal-reaper
         spec:
           restartPolicy: Never
           serviceAccountName: agent-terminal-reaper
