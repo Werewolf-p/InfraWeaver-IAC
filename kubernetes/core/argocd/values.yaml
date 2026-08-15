@@ -12,13 +12,27 @@ global:
   # `kubectl rollout undo` available as break-glass while still discarding the
   # stale backlog.
   revisionHistoryLimit: 1
-  # repo-server's cmp-envsubst sidecar is a PRIVATE ghcr image
-  # (ghcr.io/example-owner/argocd-cmp-tools). Without a pull secret the SA pulls
-  # anonymously and ghcr returns 401, leaving repo-server stuck 1/2 ImagePullBackOff.
-  # Attach the ghcr-pull dockerconfigjson secret to all ArgoCD SAs so the pull is
-  # authenticated on every (re)deploy. (ghcr-pull is seeded into the argocd ns.)
+  # The cmp-envsubst sidecar now comes from the INTERNAL registry, not ghcr.
+  #
+  # 2026-08-15: the ghcr PAT behind `ghcr-pull` was dead, and ghcr does NOT fall
+  # back to anonymous when handed a bad credential — it answers 403 for a PUBLIC
+  # image just as readily as a private one (measured: anonymous token request 200,
+  # the same request with the stored credential 403). That took argocd-dex-server
+  # down the moment its cached image went, and it left the PRIVATE cmp-envsubst
+  # image unpullable on every node. When cp1 rebooted, repo-server came back
+  # 1/2 ImagePullBackOff and every Application went sync-status Unknown — ArgoCD
+  # could no longer render anything.
+  #
+  # The image is built from docker/argocd-cmp-tools/ in this repo, so it never
+  # needed to sit behind someone else's credential. It is now built and pushed to
+  # the in-cluster Zot registry, which the pull secret below covers. Dex, whose
+  # image is public, pulls anonymously now that `ghcr-pull` is gone.
+  #
+  # Keep this pointing at the internal registry. To rebuild for a new ArgoCD
+  # version: docker/argocd-cmp-tools/build.sh with ARGOCD_VERSION matching the
+  # chart's appVersion, push to the internal registry, then bump the tag here.
   imagePullSecrets:
-    - name: ghcr-pull
+    - name: registry-pull-secret
 
 controller:
   # argocd_app_info comes from the application controller, and it had NO series
@@ -156,7 +170,7 @@ repoServer:
   # allowlisted ${CONFIG} placeholders at sync time; secrets stay in OpenBao + ESO.
   extraContainers:
     - name: cmp-envsubst
-      image: ghcr.io/example-owner/argocd-cmp-tools@sha256:05f971df8600134be5ac2a82ca938286d86c33e40e2f07ba70d834d9afd11e90
+      image: registry.int.example.com/argocd-cmp-tools:v3.4.4
       command: ["/var/run/argocd/argocd-cmp-server"]
       securityContext:
         runAsNonRoot: true
