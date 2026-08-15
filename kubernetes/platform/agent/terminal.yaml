@@ -87,7 +87,20 @@ spec:
               curl -sSLo "$HOME/bin/ttyd" \
                 "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
                 && chmod +x "$HOME/bin/ttyd"
-              npm i -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+              # Install Claude Code only if the persistent volume does not already
+              # carry it, and FAIL LOUDLY when that install does not work.
+              #
+              # This used to end in `|| true` with all output to /dev/null, so a
+              # broken install produced a pod that passed its readiness probe —
+              # ttyd was listening — and dropped every visitor into a bare shell
+              # with no agent and no explanation. Same shape as the `optional: true`
+              # on the API key above: Healthy, and useless. If the install breaks,
+              # this pod should crashloop and say so.
+              if ! command -v claude >/dev/null 2>&1; then
+                echo "installing @anthropic-ai/claude-code ..."
+                npm i -g @anthropic-ai/claude-code
+              fi
+              claude --version
               if [ -n "${AGENT_MEMORY_REPO:-}" ]; then
                 URL="${AGENT_MEMORY_REPO}"
                 [ -n "${AGENT_MEMORY_TOKEN:-}" ] && URL="$(echo "$URL" | sed "s#https://#https://x-access-token:${AGENT_MEMORY_TOKEN}@#")"
@@ -105,10 +118,45 @@ spec:
             - { name: home, mountPath: /home/session }
             - { name: tmp,  mountPath: /tmp }
       volumes:
+        # $HOME PERSISTS. It used to be an emptyDir, and that single line was why
+        # this terminal looked half-built: every restart threw away the Claude
+        # Code install, the signed-in session, and any config the operator had
+        # set up. You logged in, the pod moved or restarted, and you were back to
+        # an unauthenticated shell with no trace of why.
+        #
+        # Persistence is also what makes the credential question go away. With a
+        # durable HOME an operator signs in through the web terminal ONCE and it
+        # sticks, so no Anthropic API key has to be minted, stored in OpenBao, or
+        # mounted into a browser-reachable pod. `agent-api-key` stays optional and
+        # unset by design.
+        #
+        # Longhorn rather than local-path: this pod must be free to reschedule
+        # onto any node without stranding the operator's session on a machine
+        # that happens to be down. RWO is right — the Deployment is single-replica
+        # and a second writer would corrupt the config anyway.
+        #
+        # NOTE: the reaper CronJob deletes session PODS, not this volume. That is
+        # the intended split now — sessions stay disposable, identity does not.
         - name: home
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: agent-session-home
         - name: tmp
           emptyDir: {}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-session-home
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-session
+    app.kubernetes.io/component: terminal
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
 ---
 apiVersion: v1
 kind: Service
