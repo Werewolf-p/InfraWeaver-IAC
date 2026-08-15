@@ -1,0 +1,329 @@
+---
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  ELEVATED in-cluster agent shell — this one can CHANGE things.            ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# The sibling in terminal.yaml is read-only and stays that way. This is a second,
+# separate surface: its own ServiceAccount, hostname and volume. The read-only
+# cockpit is not widened, so "give me a shell to look at something" never has to
+# mean "give me a shell that can delete it".
+#
+# ── WHAT THIS DELIBERATELY CANNOT DO ────────────────────────────────────────
+# RBAC has no deny. You cannot grant "everything except X", only decline to grant
+# X. So the exclusions below ARE the security model, and each is a rule that is
+# absent on purpose. Adding an innocuous-looking `*` would silently undo them.
+#
+#   1. IT CANNOT WIDEN ITSELF.
+#      No rule mentions `rbac.authorization.k8s.io`, so it cannot create or edit
+#      Roles, ClusterRoles or bindings — including its own. It never receives
+#      `escalate` or `bind`, the two verbs that let a principal grant permissions
+#      it does not already hold. A shell that can rewrite its own ClusterRole is
+#      not scoped; it is root with extra steps.
+#
+#   2. IT CANNOT OPEN ITS OWN FRONT DOOR.
+#      No rule mentions `traefik.io`, so it cannot touch the Middleware that
+#      forces every request through Authentik, nor the IngressRoute referencing
+#      it. Being able to delete your own auth gate makes the gate decorative.
+#
+#   3. IT CANNOT DISABLE THE ADMISSION GUARDRAILS.
+#      No rule mentions `kyverno.io` or `admissionregistration.k8s.io`, so the
+#      LimitRanges, resource-governance and pod-security policies stay
+#      enforceable from inside this shell.
+#
+#   4. IT CANNOT REWRITE THE IDENTITY PROVIDER'S CONFIG.
+#      `configmaps` are granted per-namespace via RoleBindings below, NOT
+#      cluster-wide, precisely so the `authentik` namespace's blueprint
+#      ConfigMaps — which decide who may reach this shell at all — stay out of
+#      reach.
+#
+# ── WHAT IT CAN DO ──────────────────────────────────────────────────────────
+# Everything else needed to run this platform: workloads, storage, networking,
+# jobs, ArgoCD Applications, ExternalSecrets, Longhorn. That is a lot of power
+# and should be read as such — this is an admin shell scoped away from
+# self-escalation, not a harmless one.
+#
+# ── WHAT IT STILL IS NOT ────────────────────────────────────────────────────
+# Not a replacement for the operator VM on its own: no git push credentials, no
+# talosctl or Talos machine config, no Proxmox API access, no Docker. Node
+# lifecycle, hypervisor work and image builds still happen elsewhere.
+#
+# ── AUDIT CAVEAT, STATED PLAINLY ────────────────────────────────────────────
+# Every action here attributes to the ServiceAccount `agent-admin`, not to the
+# human who signed in. Authentik knows who opened the session; the Kubernetes
+# audit log only sees the SA. That is strictly weaker than an SSH-keyed VM with a
+# personal kubeconfig, and it is the real cost of a browser-reachable shell.
+# Correlate by timestamp against Authentik's login events.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-admin
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-admin
+    app.kubernetes.io/component: terminal-admin
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-admin
+  labels:
+    app.kubernetes.io/name: agent-admin
+rules:
+  # Core workload + storage objects. `secrets` is included deliberately: an
+  # operator shell that cannot read a Secret cannot debug half of what breaks.
+  # This is the widest grant here — whoever reaches this shell can read every
+  # Secret in the cluster, the same reach platform-owner already has.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/exec
+      - pods/portforward
+      - services
+      - endpoints
+      - persistentvolumeclaims
+      - persistentvolumes
+      - secrets
+      - serviceaccounts
+      - events
+      - namespaces
+      - nodes
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Platform CRDs the operator actually drives.
+  - apiGroups: ["longhorn.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # READ-ONLY on everything else, so the shell can still SEE what it may not
+  # change — including the RBAC, Traefik and Kyverno objects left unwritable
+  # above. Debugging a permission problem you cannot even read is needlessly
+  # painful, and reading them grants nothing.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-admin
+  labels:
+    app.kubernetes.io/name: agent-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-admin
+subjects:
+  - kind: ServiceAccount
+    name: agent-admin
+    namespace: infraweaver-agent
+---
+# ConfigMap writes are namespaced ON PURPOSE — exclusion 4 in the header. The
+# `authentik` namespace is absent from the bindings below, so the blueprint
+# ConfigMaps deciding who may reach this shell cannot be edited from inside it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-admin-configmaps
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-configmaps, namespace: infraweaver-console }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-configmaps, namespace: wordpress }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-configmaps, namespace: game-hub }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: agent-admin-configmaps, namespace: longhorn-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: agent-admin-configmaps }
+subjects: [{ kind: ServiceAccount, name: agent-admin, namespace: infraweaver-agent }]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-admin-home
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-admin
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # RETAIN, unlike the read-only sibling. This volume holds the signed-in session
+  # for the shell that can change production; losing it to an accidental PVC
+  # delete should cost a re-login, not be silent and unrecoverable.
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-admin
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-admin
+    app.kubernetes.io/component: terminal-admin
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-admin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-admin
+        app.kubernetes.io/component: terminal-admin
+    spec:
+      serviceAccountName: agent-admin
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: terminal
+          image: docker.io/library/node:22-bookworm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: "2", memory: 2Gi }
+          ports:
+            - name: ttyd
+              containerPort: 7681
+          env:
+            - { name: HOME, value: /home/session }
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: agent-api-key, key: api-key, optional: true }
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -e
+              export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"
+              mkdir -p "$HOME/bin" "$HOME/.npm-global/bin"
+              npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+              if [ ! -x "$HOME/bin/kubectl" ]; then
+                curl -sSLo "$HOME/bin/kubectl" \
+                  "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                chmod +x "$HOME/bin/kubectl"
+              fi
+              if [ ! -x "$HOME/bin/ttyd" ]; then
+                curl -sSLo "$HOME/bin/ttyd" \
+                  "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64"
+                chmod +x "$HOME/bin/ttyd"
+              fi
+              # Fail loudly, never `|| true` — a silent install failure produced a
+              # Healthy pod that dropped visitors into a bare shell with no agent
+              # and no explanation. See terminal.yaml.
+              if ! command -v claude >/dev/null 2>&1; then
+                echo "installing @anthropic-ai/claude-code ..."
+                npm i -g @anthropic-ai/claude-code
+              fi
+              claude --version
+              exec "$HOME/bin/ttyd" -p 7681 -W -t titleFixed="InfraWeaver agent (ADMIN — can change production)" \
+                bash -lc 'export PATH=$HOME/bin:$HOME/.npm-global/bin:$PATH; claude || bash -l'
+          readinessProbe:
+            tcpSocket: { port: 7681 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - { name: home, mountPath: /home/session }
+            - { name: tmp,  mountPath: /tmp }
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: agent-admin-home
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-admin
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-admin
+spec:
+  selector:
+    app.kubernetes.io/name: agent-admin
+  ports:
+    - name: http
+      port: 80
+      targetPort: 7681
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: agent-admin
+  namespace: infraweaver-agent
+spec:
+  entryPoints: [websecure]
+  routes:
+    # Literal, not ${BASE_DOMAIN}: this tree is applied by hand and never passes
+    # through the ArgoCD envsubst CMP, so a placeholder here would reach Traefik
+    # unexpanded and match a hostname nobody can resolve. terminal.yaml hardcodes
+    # its host for the same reason.
+    - match: Host(`agent.int.example.com`)
+      kind: Rule
+      middlewares:
+        - { name: secure-headers, namespace: traefik }
+        # The admin gate, same as ArgoCD. Its Authentik provider and admins-only
+        # policy binding live in
+        # kubernetes/platform/authentik/manifests/blueprints/90-agent-terminal-forward-auth.yaml
+        # — WITHOUT that provider the outpost answers 404 and this route is
+        # unreachable, which is exactly how the read-only terminal sat unusable.
+        - { name: forward-auth-admin, namespace: traefik }
+      services:
+        - name: agent-admin
+          port: 80
+  tls:
+    secretName: platform-int-wildcard-tls
