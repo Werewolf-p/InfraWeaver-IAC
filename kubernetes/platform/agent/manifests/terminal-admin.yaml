@@ -666,6 +666,63 @@ spec:
           volumeMounts:
             - { name: home, mountPath: /home/session }
             - { name: tmp,  mountPath: /tmp }
+        # ── AUDIT SHIPPER ───────────────────────────────────────────────────
+        # Tails every asciicast recording to stdout, where Loki already scrapes
+        # container logs. This is what turns recording into something closer to
+        # an audit trail.
+        #
+        # WHY A SIDECAR AND NOT JUST THE FILE. Recordings live on the session's
+        # own PVC as the session's own uid, so the recorded party can delete
+        # them. They cannot delete what has already been shipped: this container
+        # streams DURING the session, so the only window is between a line being
+        # written and being read. Every product surveyed that skipped this has
+        # the same weakness — AWS stages transcripts on the recorded host for 14
+        # days, Azure forbids immutable storage on its recording container.
+        #
+        # ⚠️ STILL NOT TAMPER-PROOF, AND MUST NOT BE SOLD AS SUCH. Loki is not
+        # WORM, the shipper races the writer, and a session that never starts is
+        # never recorded. It closes the "delete the evidence afterwards" hole,
+        # not the "prevent the evidence" one.
+        #
+        # ⚠️ VOLUME. asciicast records every output chunk, so a noisy session
+        # produces a lot of log lines. If this becomes a Loki cost problem the
+        # fix is sampling at the shipper, not turning it off.
+        #
+        # `mountPath` is read-only: this container must never be able to alter
+        # what it is shipping.
+        - name: audit-shipper
+          image: registry.int.example.com/agent-shell:agentshell-20260815-210057
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -u
+              REC_DIR=/recordings
+              echo "audit-shipper: watching $REC_DIR"
+              declare -A SEEN=()
+              while true; do
+                for f in "$REC_DIR"/*.cast; do
+                  [ -e "$f" ] || continue
+                  [ -n "${SEEN[$f]:-}" ] && continue
+                  SEEN[$f]=1
+                  echo "audit-shipper: now shipping $(basename "$f")"
+                  # -F follows across truncation and re-creation; the subshell
+                  # prefixes each line with the recording name so a Loki query
+                  # can reconstruct one session from the stream.
+                  ( tail -n +1 -F "$f" 2>/dev/null | while IFS= read -r line; do
+                      printf '%s %s\n' "$(basename "$f")" "$line"
+                    done ) &
+                done
+                sleep 5
+              done
+          volumeMounts:
+            - { name: home, mountPath: /recordings, subPath: .session-recordings, readOnly: true }
       volumes:
         - name: home
           persistentVolumeClaim:
