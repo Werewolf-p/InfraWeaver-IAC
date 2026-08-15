@@ -438,6 +438,17 @@ spec:
 # LoadBalancer IP: depending on where service translation happens relative to policy
 # enforcement, Cilium sees either the traefik endpoint or the bare VIP. Naming both
 # is one flow described twice, not two holes.
+#
+# MEASURED which one actually carries it (2026-08-15, `cilium-dbg bpf policy get`
+# on the buildkitd endpoint, straight after a real push):
+#   cidr:10.0.0.200/32          443/TCP   52819702 bytes / 14646 packets  ← this one
+#   k8s:...name=traefik          443/TCP          0 bytes /     0 packets
+# So on THIS cluster the VIP is not translated before policy is evaluated, which
+# tracks: cilium-config has kube-proxy-replacement=false, so kube-proxy does the
+# DNAT on the host AFTER the packet has left the pod. The toEndpoints form is
+# retained deliberately — turning kube-proxy-replacement on would move the
+# translation ahead of policy and the CIDR rule would stop matching, which would
+# break image builds silently and a long way from the cause.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata: {name: allow-buildkitd-to-registry, namespace: build, labels: {app.kubernetes.io/managed-by: gitops}}
