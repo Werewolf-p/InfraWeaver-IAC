@@ -1,0 +1,139 @@
+---
+# In-cluster GitHub Actions runner for example-owner/InfraWeaver-platform.
+#
+# Labels: self-hosted, Linux, X64, in-cluster  (agent id 29, name
+# `in-cluster-platform`). See README.md for why it does NOT carry
+# `management-host`, `prod-worker`, `productie` or `ontwikkel`.
+#
+# Replicas is 1 and MUST stay 1: the runner identity in the mounted Secret is a
+# single registered agent. Two pods presenting the same agent id fight over the
+# same session and GitHub disconnects them in a loop.
+#
+# strategy Recreate, not RollingUpdate — same reason. A rolling update would
+# briefly run two pods on one identity.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-runner-platform
+  namespace: github-runner
+  labels:
+    app.kubernetes.io/name: github-runner
+    app.kubernetes.io/instance: platform
+    app.kubernetes.io/managed-by: gitops
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: github-runner
+      app.kubernetes.io/instance: platform
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: github-runner
+        app.kubernetes.io/instance: platform
+    spec:
+      serviceAccountName: github-runner
+      # No API token in the pod at all. See rbac.yaml.
+      automountServiceAccountToken: false
+      # Lowest priority class that exists here (verified against the live
+      # cluster: game-server/platform-default/standard/high/critical). CI
+      # capacity must never preempt a platform workload, so it takes the
+      # global default rather than anything above it.
+      priorityClassName: platform-default
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        # Kyverno `require-seccomp-profile-wide` checks the POD-level field,
+        # not just the container one. Setting it only on the container fails
+        # admission with:
+        #   "should set spec.securityContext.seccompProfile.type"
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runner
+          # PIN THIS TO A CURRENT RUNNER RELEASE AND KEEP IT MOVING.
+          #
+          # MEASURED FAILURE (2026-08-15): 2.334.0 registered fine and reached
+          # "Listening for Jobs", then GitHub's broker answered every long-poll
+          # with HTTP 403 and the process exited:
+          #   "Runner version v2.334.0 is deprecated and cannot receive
+          #    messages" -> "no retry needed" -> Exiting runner
+          # The pod then CrashLoops while `gh api` still lists the runner, so
+          # this failure looks like a healthy registration from the API side.
+          # Watch the Deployment, not the GitHub runner list.
+          #
+          # Registration deliberately does NOT pass `--disableupdate`, so the
+          # runner self-updates in place and survives the next deprecation
+          # without an image bump. The update lands on the container's
+          # writable layer and is lost on restart, which is fine — it just
+          # re-downloads. Bump this tag anyway so a cold start is current.
+          image: ghcr.io/actions/actions-runner:2.336.0
+          # run.sh directly — the runner is ALREADY registered and its identity
+          # arrives via the mounted Secret. Nothing here calls config.sh, so no
+          # registration token and no admin PAT is needed at runtime.
+          #
+          # The Secret is mounted read-only at /secrets. The runner writes to
+          # its own directory (session state, _diag, _work), so the three files
+          # are copied into the writable home on start. Copy, not symlink: the
+          # runner rewrites .credentials during session refresh.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              install -m 0600 /secrets/.runner                /home/runner/.runner
+              install -m 0600 /secrets/.credentials           /home/runner/.credentials
+              install -m 0600 /secrets/.credentials_rsaparams /home/runner/.credentials_rsaparams
+              exec ./run.sh
+          workingDir: /home/runner
+          env:
+            # The runner refuses to start as root; it is 1001 here anyway.
+            - name: RUNNER_ALLOW_RUNASROOT
+              value: "0"
+            # Jobs get a clean, ephemeral work dir on emptyDir.
+            - name: RUNNER_WORKDIR
+              value: /home/runner/_work
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # runner writes _diag/_work/.credentials
+            capabilities:
+              drop: ["ALL"]
+          # LimitRange/quota note: github-runner is a NEW namespace, so Kyverno
+          # generates only `auto-baseline-requests` (defaultRequest 10m/32Mi),
+          # which has no `max` and no maxLimitRequestRatio and therefore cannot
+          # reject. The binding constraint is the cluster-wide Kyverno audit
+          # rule `limit-memory-burst-ratio` (memory limit <= 8x request).
+          # 512Mi -> 2Gi is 4x, inside both that and the tightest governed
+          # ratio in the repo (build, 4x), so this shape stays valid if the
+          # namespace is ever promoted to a governed LimitRange.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: runner-identity
+              mountPath: /secrets
+              readOnly: true
+            - name: work
+              mountPath: /home/runner/_work
+            - name: diag
+              mountPath: /home/runner/_diag
+      volumes:
+        - name: runner-identity
+          secret:
+            secretName: github-runner-platform
+            defaultMode: 0400
+        # emptyDir, NOT a PVC: nothing a job produces should outlive the job or
+        # be visible to the next one. This also keeps untrusted workflow output
+        # off Longhorn entirely.
+        - name: work
+          emptyDir: {}
+        - name: diag
+          emptyDir: {}

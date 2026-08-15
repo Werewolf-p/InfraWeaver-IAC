@@ -1,0 +1,61 @@
+---
+# github-runner — in-cluster GitHub Actions self-hosted runner.
+#
+# WHY THIS NAMESPACE EXISTS
+# -------------------------
+# The only self-hosted runners for example-owner/InfraWeaver-platform and
+# example-owner/InfraWeaver-base live on the ops VM 10.0.0.108. That VM is being
+# retired. This namespace is the in-cluster home for runner capacity that has no
+# dependency on that host.
+#
+# THREAT MODEL — READ BEFORE CHANGING ANYTHING HERE
+# -------------------------------------------------
+# A self-hosted runner EXECUTES ARBITRARY CODE from workflow files. Anyone who
+# can land a workflow change (or, for `pull_request_target`/fork PRs, anyone at
+# all) gets remote code execution inside this pod. Every control in this
+# directory exists to bound what that code can reach:
+#
+#   1. NO Kubernetes API.        automountServiceAccountToken: false, and the
+#                                ServiceAccount has ZERO RoleBindings/
+#                                ClusterRoleBindings. Even if a job forges a
+#                                request there is no token to present and no
+#                                permission behind it.
+#   2. NO in-cluster lateral.    The CiliumNetworkPolicy in this directory is
+#                                FQDN-scoped to GitHub only. The runner cannot
+#                                reach OpenBao (secrets), ArgoCD (deploys), the
+#                                Zot registry, Longhorn, Authentik, the console,
+#                                the Talos API on :50000, or kube-apiserver.
+#   3. NO privilege.             runAsNonRoot, runAsUser 1001, drop ALL caps,
+#                                allowPrivilegeEscalation false, seccomp
+#                                RuntimeDefault. Not privileged, no CAP_SYS_ADMIN.
+#   4. NO host.                  No hostPath, no hostNetwork, no docker socket,
+#                                no /var/run mounts. Builds cannot escape to a
+#                                node. (This is also why this runner CANNOT run
+#                                the jobs that need Docker — see README.)
+#   5. NO durable secrets.       _work is an emptyDir. Nothing a job writes
+#                                survives a restart, and nothing it writes lands
+#                                on shared storage.
+#
+# The one credential the pod does hold is its OWN runner identity
+# (.credentials + .credentials_rsaparams). Worst case that lets an attacker
+# impersonate this runner to GitHub — i.e. do what it can already do. It is
+# deliberately NOT a GitHub admin PAT: see externalsecret.yaml for why.
+#
+# PSA: `restricted` is enforced here, not the cluster-default `baseline`. A
+# runner is the single most hostile workload on the platform; it gets the
+# strictest profile the platform has.
+#
+# This Namespace is declared HERE and nowhere else. kubernetes/core/psa/
+# namespace-labels.yaml deliberately does not list github-runner — two
+# Applications declaring the same Namespace fight over the shared
+# `argocd-controller` SSA field manager and take turns pruning each other's
+# labels.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: github-runner
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    infraweaver.io/component: github-runner

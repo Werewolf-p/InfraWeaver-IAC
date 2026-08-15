@@ -1,0 +1,47 @@
+---
+# ArgoCD Application for the in-cluster GitHub Actions runner
+# (kubernetes/core/github-runner).
+#
+# Replaces ops-host-resident runner capacity so that retiring the ops VM
+# 10.0.0.108 does not leave example-owner/InfraWeaver-platform without a
+# self-hosted runner. Read kubernetes/core/github-runner/README.md before
+# changing labels — this runner deliberately does NOT claim the labels used by
+# the host-coupled workflows.
+#
+# CreateNamespace=false: the Namespace (with its `restricted` PSA labels) is
+# declared by namespace.yaml inside the app path, so ArgoCD must not create a
+# bare one first.
+#
+# No envsubst plugin: nothing in this app path uses ${VAR} substitution.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-github-runner-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/github-runner
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: github-runner
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

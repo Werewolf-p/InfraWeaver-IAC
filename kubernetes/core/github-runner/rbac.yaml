@@ -1,0 +1,31 @@
+---
+# ServiceAccount for the in-cluster GitHub Actions runner.
+#
+# THIS FILE INTENTIONALLY CONTAINS NO Role, RoleBinding, ClusterRole OR
+# ClusterRoleBinding. That absence IS the control.
+#
+# A self-hosted runner executes attacker-controllable workflow code. Any
+# Kubernetes permission granted here is a permission granted to whoever can
+# open a pull request. There is no "small" grant: `get secrets` in this
+# namespace would expose the runner's own GitHub identity; `get pods` anywhere
+# is a cluster-topology oracle; anything in `argocd` is a deploy primitive.
+#
+# The runner does not need the Kubernetes API to do its job. It talks to
+# GitHub over HTTPS and runs shell commands. So it gets nothing, and
+# automountServiceAccountToken is false on both the ServiceAccount and the Pod
+# (belt and braces — a future Pod spec that forgets the flag still gets no
+# token from the SA default).
+#
+# If a workflow ever legitimately needs cluster access, do NOT bind a Role
+# here. Give that specific job a scoped, short-lived credential delivered as a
+# GitHub Actions secret, so the blast radius is one workflow and not every
+# workflow that ever runs on this runner.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner
+  namespace: github-runner
+  labels:
+    app.kubernetes.io/name: github-runner
+    app.kubernetes.io/managed-by: gitops
+automountServiceAccountToken: false

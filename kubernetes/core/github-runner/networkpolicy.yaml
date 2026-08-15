@@ -1,0 +1,92 @@
+---
+# Egress allowlist for the in-cluster GitHub Actions runner.
+#
+# WHY THIS FILE IS THE MOST IMPORTANT CONTROL IN THIS DIRECTORY
+# -------------------------------------------------------------
+# A runner executes arbitrary workflow code. RBAC (rbac.yaml) stops it from
+# using the Kubernetes API, but RBAC does nothing about raw TCP. Without this
+# policy a malicious PR could, from inside the pod:
+#   * read every secret in the platform      -> openbao.openbao.svc:8200
+#   * sync/rollback any app                  -> argocd-server.argocd.svc
+#   * push a poisoned image                  -> registry.int.<domain> (Zot)
+#   * take over the control plane            -> Talos apid on 10.10.0.9x:50000
+#   * mint tokens / read the cluster          -> kube-apiserver
+#
+# MEASURED BEHAVIOUR (2026-08-15): Kyverno's `generate-default-deny-cnp`
+# ClusterPolicy auto-generates `auto-default-deny` in every namespace it does
+# not exclude, and github-runner is NOT excluded. That generated policy is
+# "airgapped" posture: it allows egress to ALL cluster endpoints plus DNS, and
+# NO internet. Two consequences, both verified empirically here:
+#
+#   1. Internet is blocked by default. `./config.sh` hung retrying against
+#      api.github.com until this policy was added (DNS resolved fine; the TLS
+#      connect timed out). Without this file the runner NEVER comes online.
+#   2. Cilium policies are ADDITIVE — the union of all allow rules applies.
+#      The generated policy already permits egress to every in-cluster
+#      endpoint, so this file CANNOT take that away by being restrictive.
+#
+# Because of (2), the cluster-lateral risk above is NOT fully closed by this
+# file alone. Closing it requires removing github-runner's in-cluster egress at
+# the source. That is tracked in README.md as the one accepted, documented gap;
+# it needs an edit to the Kyverno generate rule, whose `exclude` block is
+# IMMUTABLE (Kyverno rejects any update: "change of immutable fields for a
+# generate rule is disallowed") and therefore requires deleting and re-syncing
+# the ClusterPolicy — a cluster-wide change that does not belong in the same
+# commit as introducing a runner.
+#
+# What this file DOES buy, and it is the difference between a contained runner
+# and an exfiltration endpoint: egress to the internet is FQDN-scoped to GitHub.
+# A job cannot phone home to an attacker's server, cannot curl a payload from a
+# random host, and cannot POST stolen data anywhere except github.com. That
+# turns "steal every secret and exfiltrate" into "steal every secret and have
+# nowhere to send it".
+#
+# Deliberately NOT `toEntities: [world]` (the pattern used by cert-manager and
+# external-dns, which need arbitrary ACME/DNS endpoints). A runner has exactly
+# one legitimate upstream, so it gets exactly one.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-github
+  namespace: github-runner
+  labels:
+    app.kubernetes.io/managed-by: gitops
+spec:
+  endpointSelector: {}
+  egress:
+    # DNS via the cluster resolver. The `rules.dns` matchPattern is REQUIRED:
+    # Cilium can only enforce toFQDNs rules for names it saw resolved through
+    # its DNS proxy. Without this, every toFQDNs rule below silently matches
+    # nothing and all egress is dropped.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+          rules:
+            dns:
+              - matchPattern: "*"
+    # GitHub only.
+    #   github.com / codeload.github.com   — git clone + archive download
+    #   api.github.com                     — REST API used by actions/*
+    #   *.actions.githubusercontent.com    — the Actions broker + pipelines
+    #                                        service the runner long-polls
+    #                                        (this runner's serverUrl is
+    #                                        pipelinesghubeus25...; broker is
+    #                                        broker.actions.githubusercontent.com)
+    #   *.githubusercontent.com            — objects/raw (action tarballs)
+    #   *.blob.core.windows.net            — Actions cache + artifact storage,
+    #                                        which GitHub fronts on Azure blob
+    - toFQDNs:
+        - {matchName: "github.com"}
+        - {matchName: "api.github.com"}
+        - {matchName: "codeload.github.com"}
+        - {matchPattern: "*.actions.githubusercontent.com"}
+        - {matchPattern: "*.githubusercontent.com"}
+        - {matchPattern: "*.blob.core.windows.net"}
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}

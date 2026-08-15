@@ -1,7 +1,65 @@
 # etcd snapshots — design decision
 
 **Status:** implemented 2026-08-07 (WP2 / GAP-C2, GAP-M7).
+**Migrated 2026-08-15** off the retiring ops VM onto the Proxmox host
+`10.1.0.3` — see "Migration 2026-08-15" below. The decision *not* to run this
+in the cluster is unchanged and was re-affirmed.
 **Restore procedure:** [`docs/BACKUP-AND-RESTORE-RUNBOOK.md`](../../../docs/BACKUP-AND-RESTORE-RUNBOOK.md).
+
+---
+
+## Migration 2026-08-15 — ops VM → Proxmox host `10.1.0.3`
+
+The ops VM (`10.0.0.108`; this file previously said `10.1.0.108`, which was
+wrong) is being retired, and `/etc/cron.d/infraweaver-etcd-snapshot` on it was
+the ONLY etcd backup schedule in existence.
+
+**It was re-homed to a host, NOT converted to a Kubernetes CronJob.** Reasons 1
+and 2 in "Why not a Kubernetes CronJob" below are unaffected by the VM's
+retirement and remain decisive: an in-cluster CronJob cannot run when the
+cluster is down, which is the only scenario this backup exists for, and it would
+place an `os:admin` certificate inside the blast radius it is meant to survive.
+(For the record, the *destination* is not the obstacle — SMB/445 on
+`10.1.0.135` was measured reachable from a pod on 2026-08-15. The obstacle is
+the dependency and the credential.)
+
+The "Why not the Proxmox hypervisors" objection below was written when the ops
+host still existed and the trade was "spread the credential for no gain". With
+the ops host going away there is no longer an alternative holder, so the trade
+is now "spread it to exactly one host, or have no etcd backup at all".
+`10.1.0.3` was chosen over `10.1.0.4` because it already had **both**
+`talosctl` and `smbclient` installed and 23 GB free.
+
+What is live on `10.1.0.3`:
+
+| Item | Path |
+|---|---|
+| script | `/usr/local/sbin/etcd-snapshot.sh` (0700 root, byte-identical to the ops host copy) |
+| config | `/etc/infraweaver/etcd-snapshot.env` (0600) — only `TALOSCONFIG` changed, to `/root/.talos/config` |
+| SMB auth | `/etc/infraweaver/etcd-snapshot-smb.auth` (0600) |
+| talosconfig | `/root/.talos/config` (0600), from OpenBao `secret/platform/talosconfig` property `talosconfig_b64` |
+| schedule | `/etc/cron.d/infraweaver-etcd-snapshot`, `40 3 * * *` — same wall-clock as before (both hosts are CEST) |
+
+**`PATH` in the cron.d file is load-bearing.** `talosctl` is in `/usr/local/bin`,
+which is not on cron's default PATH. The first cron-driven run failed with
+`FATAL: talosctl not found in PATH`. The script fails loudly rather than
+exiting 0, so this was visible — but a manual run of the script succeeds while
+the cron silently does not, so **always verify via cron, not by hand.**
+
+Verified 2026-08-15 (`talosctl` v1.9.5 on the Proxmox host against Talos v1.13
+nodes — etcd ops work fine across that skew):
+
+* cron-driven run at 15:54:01Z produced a 49 MB gzipped snapshot and shipped it;
+* independently confirmed present on the NAS by listing the share:
+  `etcd-infraweaver-prod-20260815T155401Z.db.gz` (50 340 308 bytes), alongside
+  its `.sha256` and `.meta`.
+
+**Left for the operator:** the ops VM's own
+`/etc/cron.d/infraweaver-etcd-snapshot` is still enabled. It was deliberately
+NOT removed, so there is no backup gap while the VM is still alive. Remove it as
+part of decommissioning the VM. Until then both hosts snapshot daily, which
+halves the effective remote retention window (`REMOTE_RETAIN=30` copies ≈ 15
+days at 2/day).
 
 > **This directory intentionally contains no manifests.** It holds the design
 > record only. `kubernetes/bootstrap/appset-core.yaml` generates an ArgoCD
@@ -33,7 +91,11 @@ retention is essentially free.
 
 ---
 
-## Decision: the snapshot runs on the OPS HOST, not in the cluster
+## Decision: the snapshot runs on a HOST, not in the cluster
+
+> Originally the ops host; since 2026-08-15 the Proxmox host `10.1.0.3`. The
+> "not in the cluster" half of this decision is the part that matters and it
+> has not changed.
 
 **Chosen:** a cron job on the ops host (`10.1.0.108`) running
 [`scripts/etcd-snapshot.sh`](https://github.com/example-owner/InfraWeaver-base)
