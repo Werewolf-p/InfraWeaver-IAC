@@ -394,6 +394,22 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-metrics-cron-token
               optional: true
+        # DEDICATED token for the five-minutely WordPress WP-Cron sweep CronJob's
+        # POST to /api/wordpress/cron-sweep — the sweep that runs `wp cron event
+        # run --due-now` in every site. The sites set DISABLE_WP_CRON, so this is
+        # the fleet's ONLY remaining trigger for scheduled jobs, and that is
+        # exactly why it does not share a value with the health/rotation/metrics
+        # tokens: revoking a read-only sweep's credential must not be able to stop
+        # every site's clock as a side effect. Optional: absent = cron token auth
+        # disabled and the sweep is reachable only with a wordpress:write session
+        # — which fails closed, and is the direction that surfaces as "scheduled
+        # jobs stopped" rather than as an open endpoint.
+        - name: WORDPRESS_CRON_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-cron-cron-token
+              optional: true
         # Shared with the Game Hub power sweep CronJob, which POSTs to
         # /api/game-hub/power-sweep to re-apply every recorded stop. Its own
         # value so it is revocable without touching the WordPress sweeps.

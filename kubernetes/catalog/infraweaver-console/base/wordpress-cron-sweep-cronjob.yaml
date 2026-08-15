@@ -1,0 +1,120 @@
+# WordPress WP-Cron sweep — the external clock for a fleet that no longer has one.
+#
+# Every site in the `wordpress` namespace is INTENDED to set
+# `define('DISABLE_WP_CRON', true)` in wp-config.php. As of 2026-08-15 none of
+# them does yet, deliberately: this CronJob has to be deployed and seen running
+# green FIRST, because the moment that constant goes in, this is the only thing
+# left that runs a scheduled job. Deploy this, watch a few ticks succeed, then
+# set the constant per site.
+#
+# That constant does not move WordPress's scheduler somewhere else — it
+# removes the only trigger WordPress has, because WP-Cron fires opportunistically
+# on visitor page loads and nowhere else. Without this CronJob, no site publishes
+# a scheduled post, refreshes an update check, expires a transient, or runs any
+# plugin's background task ever again, and it fails silently: every pod stays
+# Running and Healthy while the work quietly stops.
+#
+# So this CronJob POSTs to the console's own /api/wordpress/cron-sweep endpoint,
+# which runs `wp cron event run --due-now` inside every provisioned site's LIVE
+# pod (the Service-selected slot — during a blue/green core update both slots
+# share one database, and running due events in the candidate would do real
+# scheduled work from a WordPress no visitor is served by).
+#
+# Schedule: every 5 minutes. WP-Cron's own expectation is roughly per-minute —
+# that is the granularity a busy site gets from visitor traffic — but per-minute
+# buys nothing here and costs real load: six low-traffic sites, one wp-cli exec
+# each, would be 8,640 execs a day against the API server to catch events whose
+# schedules are hourly, twice-daily and daily. Five minutes bounds the worst-case
+# lateness of a scheduled post at 5 minutes (well inside what WordPress itself
+# guarantees on a quiet site) at a twelfth of the exec volume. Raise the cadence
+# if a site ever schedules minute-granular work; that is the signal to change it.
+#
+# concurrencyPolicy: Forbid, NOT Replace like the sibling sweeps. Replace is right
+# when a run is a read that can be safely abandoned; this run EXECUTES scheduled
+# work, so killing a sweep mid-event to start the next one could interrupt a job
+# halfway through a partial write. Forbid instead lets a slow run finish and skips
+# the tick — the sweep's per-site exec timeout (90s) and activeDeadlineSeconds are
+# what stop a wedged run from blocking the schedule indefinitely.
+#
+# Auth: a DEDICATED token (key `wordpress-cron-cron-token` in the ESO-managed
+# `infraweaver-console-secret`, synced from OpenBao
+# `secret/platform/infraweaver-console`) — distinct from the health, rotation and
+# metrics sweep tokens so the crons stay independently gateable. That separation
+# earns its keep here more than anywhere: revoking a read-only sweep's credential
+# must not be able to stop every site's clock as a side effect. The console
+# middleware (proxy.ts) lets this request past the session gate only when the
+# token matches; the route handler re-validates it (defence in depth).
+#
+# Networking: the sweep pod carries `infraweaver.io/component: iwsl`, so it is
+# already covered by the existing health-sweep egress CiliumNetworkPolicy (CoreDNS
+# + console Service) and the ingress NetworkPolicy to the console pod on :3000 —
+# no new network policy required.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-cron-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  schedule: "*/5 * * * *" # every 5 min — see the schedule rationale in the header
+  concurrencyPolicy: Forbid # this run executes scheduled work; let a slow one finish rather than killing it mid-event
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cron-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-cron-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              #
+              # --max-time 300 is the sweep's real deadline, and the server side is
+              # sized to fit inside it: 4 concurrent lanes × a 90s per-site exec
+              # ceiling is ~180s worst case for this fleet. It also sits below the
+              # 5-minute schedule, so a run that does hit the wall is abandoned
+              # before the next tick rather than colliding with it under Forbid.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 300
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/cron-sweep

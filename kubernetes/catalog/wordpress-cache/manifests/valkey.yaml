@@ -1,0 +1,233 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# wordpress-cache — one shared Valkey serving the WordPress fleet's persistent
+# object cache.
+#
+# WHY ONE SHARED INSTANCE RATHER THAN ONE PER SITE
+# ------------------------------------------------
+# Measured 2026-08-15: the whole fleet's cacheable working set is tiny. The
+# largest site (yonavaarwater-nl) carries 652 autoloaded options totalling
+# ~151 KiB, 956 posts and 3316 postmeta rows; the other five sites are demo
+# sites with 4-5 posts each. The entire fleet fits inside a few tens of MiB.
+#
+# The `wordpress` LimitRange (kubernetes/core/limitranges/governed-namespaces.yaml)
+# sets defaultRequest.memory 256Mi and caps maxLimitRequestRatio.memory at 5.
+# Six per-site instances would therefore reserve 6 x 64Mi = 384Mi of request and
+# 6 x 256Mi = 1.5Gi of limit out of a namespace quota of 8Gi request / 24Gi limit
+# to hold well under 50 MiB of actual data, and would add six pods to a 40-pod
+# quota. One instance costs 64Mi request / 256Mi limit and one pod.
+#
+# Blast radius was the argument that could have gone the other way. It only
+# lands because of a setting that is NOT the default, so it is written down here
+# rather than assumed:
+#
+#   ⚠️ Every site using this cache MUST define WP_REDIS_GRACEFUL as true in its
+#      wp-config.php. Without it the redis-cache drop-in calls
+#      show_error_and_die() the instant the backend is unreachable and the site
+#      answers HTTP 500. This was verified the hard way on 2026-08-15 by scaling
+#      this Deployment to zero: yonavaarwater-nl returned 500 on every request
+#      until WP_REDIS_GRACEFUL was added, and 200 afterwards.
+#
+# WITH that constant set, a backend outage costs a site roughly 80 ms per request
+# (a refused connection attempt on each cache call) on top of its uncached
+# latency, and nothing else — measured 220 ms uncached, 300 ms with the cache
+# configured but down, 200 ms with it up. So a shared instance failing costs the
+# fleet its speedup and a little more, not its availability, which is an
+# acceptable trade for a 6x reduction in memory reservation and operational
+# surface. WP_REDIS_TIMEOUT/READ_TIMEOUT are pinned to 1s per site for the same
+# reason: a blackholed backend must not hold requests open.
+#
+# TENANCY. This namespace deliberately runs least-trusted code — site owners
+# install their own third-party plugins, which is exactly why PSA enforces
+# baseline here. An unauthenticated shared cache would let any site's PHP read
+# any other site's cached objects, including logged-in session data and nonces.
+# So the default user is DISABLED and every site gets its own ACL user pinned to
+# its own key prefix (`~<prefix>*`), plus its own logical database. The ACL key
+# pattern is what actually prevents cross-site reads: it is enforced regardless
+# of which database the client SELECTs.
+#
+# Sites are expected to set WP_REDIS_SELECTIVE_FLUSH so the plugin flushes by
+# prefix rather than calling FLUSHDB; the ACL grants neither @admin nor
+# @dangerous, so FLUSHDB is not available to a site user in the first place.
+#
+# NOT labelled `infraweaver.io/component: wordpress` on purpose — that label is
+# the selector for wordpress-lockdown.yaml and for the console's fleet listing,
+# and this is not a site.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wordpress-cache-config
+  namespace: wordpress
+  labels:
+    app.kubernetes.io/name: wordpress-cache
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/managed-by: infraweaver
+data:
+  valkey.conf: |
+    # Cache only. Nothing here is a source of truth, so persistence is off:
+    # a restart costs a cold cache, never data loss.
+    save ""
+    appendonly no
+    dir /data
+
+    port 6379
+    bind 0.0.0.0
+    # protected-mode is redundant once the default user is off and every real
+    # user needs a password, but it costs nothing to leave on.
+    protected-mode yes
+
+    # 192mb against a 256Mi container limit leaves room for allocator overhead
+    # and fragmentation. allkeys-lru because every key in here is a cache entry
+    # that is safe to evict — there are no volatile-only keys to protect.
+    maxmemory 192mb
+    maxmemory-policy allkeys-lru
+
+    # One logical database per site, on top of the per-site key prefix.
+    databases 16
+
+    # Users (including the disabled default) come from the ACL file, which is
+    # rendered from OpenBao by the ExternalSecret alongside this file.
+    aclfile /etc/valkey/acl/users.acl
+
+    # The fleet is small and every client is in-cluster; the default 10000 is
+    # far more than needed but harmless.
+    timeout 0
+    tcp-keepalive 300
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress-cache
+  namespace: wordpress
+  labels:
+    app.kubernetes.io/name: wordpress-cache
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/managed-by: infraweaver
+  annotations:
+    # yonavaarwater-nl is the site this cache exists for, and its wp-data PVC is
+    # local-path-pinned to talos-prod-cp1 so it can never move. Putting the cache
+    # anywhere else would hand that site a network hop per cache read and undo
+    # the point of the exercise. Soft, per the placement system's contract in
+    # kubernetes/catalog/infraweaver-console/base/placement-rebalance-cronjob.yaml.
+    infraweaver.io/preferred-node: talos-prod-cp1
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: this repo has no StatefulSets and a second
+  # Valkey briefly serving the same Service would hand clients a cold, divergent
+  # cache. A few seconds without a cache is a few seconds at baseline latency.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wordpress-cache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wordpress-cache
+        app.kubernetes.io/component: cache
+    spec:
+      enableServiceLinks: false
+      # Nothing here talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["talos-prod-cp1"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          # Pinned: kubernetes/core/kyverno/manifests/no-latest-tag-policy.yaml
+          # audits this namespace for floating tags.
+          image: valkey/valkey:8.1.1-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - valkey-server
+            - /etc/valkey/valkey.conf
+          ports:
+            - name: valkey
+              containerPort: 6379
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "64Mi"
+            limits:
+              # ratio 256/64 = 4.0, inside the namespace maxLimitRequestRatio of 5.
+              # No CPU limit: the LimitRange header and Kyverno's
+              # require-memory-request-and-limit both say CPU limits are
+              # deliberately not required here, to avoid CFS throttling.
+              memory: "256Mi"
+          # PING is answered before auth on a healthy server, so these probe
+          # liveness without needing credentials.
+          livenessProbe:
+            tcpSocket:
+              port: valkey
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: valkey
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/valkey/valkey.conf
+              subPath: valkey.conf
+              readOnly: true
+            - name: acl
+              mountPath: /etc/valkey/acl
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: wordpress-cache-config
+        - name: acl
+          secret:
+            secretName: wordpress-cache-auth
+        # A cache with persistence disabled still wants a working directory, and
+        # the root filesystem is read-only. emptyDir is the whole story: losing
+        # it on reschedule loses nothing that matters.
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress-cache
+  namespace: wordpress
+  labels:
+    app.kubernetes.io/name: wordpress-cache
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/managed-by: infraweaver
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wordpress-cache
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: valkey
+      protocol: TCP

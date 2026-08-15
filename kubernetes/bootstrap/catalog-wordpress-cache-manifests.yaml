@@ -1,0 +1,73 @@
+---
+# catalog-wordpress-cache — plain-manifest catalog app.
+#
+# The `platform-catalog-apps` ApplicationSet only generates Applications for
+# Helm-based apps (those with an `application.yaml`). Manifest-based catalog
+# apps get a hand-written Application here, alongside gatus, jellyfin and the
+# console.
+#
+# WHY this file exists: measured 2026-08-15, yonavaarwater-nl serves every page
+# with its web pod on talos-prod-cp1 and its database on talos-prod-cp3, at
+# 0.577 ms per query versus 0.08-0.10 ms for every co-located site. Both of its
+# PVCs are local-path and node-pinned, so the split cannot be fixed by moving
+# either pod — the only remaining lever is to stop issuing the queries, which is
+# what a persistent object cache does. This Application deploys the shared
+# Valkey that backs it.
+#
+# NOTE: no envsubst plugin here, unlike catalog-gatus-manifests. These manifests
+# contain no ${VAR} placeholders — the cache is cluster-internal and has no
+# IngressRoute or BASE_DOMAIN-derived host — so a plain directory source is
+# correct and avoids a dependency on the CMP.
+#
+# ⚠️ kubernetes/bootstrap/ is NOT synced by ArgoCD. This file is applied
+#    imperatively by scripts/deploy/deploy-argocd.sh, so it needs one
+#    `kubectl apply` (or one deploy run) before ArgoCD will manage the contents.
+#
+# ⚠️ Seed OpenBao BEFORE applying — see manifests/externalsecret.yaml. Without
+#    `secret/platform/wordpress-cache`, ESO renders no ACL file and Valkey will
+#    not start.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: catalog-wordpress-cache-manifests
+  namespace: argocd
+  labels:
+    infraweaver.io/type: catalog-app
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/catalog/wordpress-cache/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    # The namespace already exists and is PSA-labelled by kubernetes/core/psa.
+    # CreateNamespace is left ON for parity with the other catalog apps; it is a
+    # create-if-missing and does not touch labels on an existing namespace.
+    namespace: wordpress
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'

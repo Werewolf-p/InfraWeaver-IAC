@@ -1,0 +1,32 @@
+# wordpress-cache — shared Valkey backing the WordPress fleet's object cache.
+#
+# ⚠️ Deliberately kept OUT of platform.yaml `catalog.enabled`, following the
+#    nextcloud precedent: scripts/sync-catalog.sh DELETES any
+#    kubernetes/bootstrap/catalog-*.yaml whose app is not on that list, and it
+#    would regenerate this app's Application with a plain-directory source.
+#    The hand-written kubernetes/bootstrap/catalog-wordpress-cache-manifests.yaml
+#    is the Application for this component.
+#
+# ⚠️ This deploys INTO the `wordpress` namespace, which is created and PSA-labelled
+#    by kubernetes/core/psa/namespace-labels.yaml. No Namespace resource is shipped
+#    here — that would cause SSA ownership ping-pong over the PSA labels.
+name: wordpress-cache
+description: "Shared Valkey providing the persistent object cache for the WordPress fleet"
+namespace: wordpress
+source: infraweaver
+tier: simple
+image: valkey/valkey
+
+# No ingressroute: this is cluster-internal only. Reachability is already granted
+# by the intra-namespace allow in
+# kubernetes/core/network-policies/manifests/airgap-baseline.yaml.
+
+secrets:
+  path: platform/wordpress-cache
+  keys:
+    # One password per site that has the object cache switched on. Only sites
+    # listed here get an ACL user in manifests/externalsecret.yaml — adding a
+    # site means adding it in both places.
+    yonavaarwater-nl-password:
+      type: password
+      length: 32
