@@ -111,13 +111,26 @@ server:
   dataStorage:
     enabled: true
     size: 5Gi
-    # Was local-path to avoid Longhorn I/O errors on Raft BoltDB. Moved to
-    # Longhorn on 2026-08-14: a local-path PV is pinned to a single node, so
-    # retiring that node strands the vault outright — which is exactly what
-    # happened when cp2 was drained. Watch for BoltDB I/O errors after this
-    # change; if they return, the durable fix is 3 Raft replicas each on
-    # local-path, not a replicated volume. A Raft snapshot is taken first.
-    storageClass: longhorn
+    # local-path, deliberately — Longhorn gave I/O errors on the Raft BoltDB.
+    #
+    # 2026-08-14 tried to move this to `longhorn` because a local-path PV pins
+    # the vault to one node, and retiring that node strands it (which is what
+    # happened when cp2 was drained). THAT CHANGE COULD NEVER APPLY: a
+    # StatefulSet's `volumeClaimTemplates` is immutable, so every sync since
+    # failed with "updates to statefulset spec for fields other than 'replicas',
+    # 'ordinals', 'template', ... are forbidden" and core-openbao sat OutOfSync
+    # while the vault stayed on local-path regardless. Reverted 2026-08-15 so
+    # this file states what is actually running.
+    #
+    # THE NODE-PINNING RISK IS REAL AND STILL OPEN. As of 2026-08-15 the PV is
+    # pinned to talos-prod-cp2. Changing this value alone will never move it —
+    # a move requires an attended recreation: take a Raft snapshot, delete the
+    # StatefulSet with --cascade=orphan, delete the PVC, let ArgoCD recreate it
+    # against the new class, restore the snapshot, then verify every
+    # ClusterSecretStore. Do that BEFORE retiring or wiping whichever node the
+    # PV is pinned to. The durable fix is 3 Raft replicas each on local-path,
+    # not a replicated volume.
+    storageClass: local-path
     accessMode: ReadWriteOnce
 
   ingress:
