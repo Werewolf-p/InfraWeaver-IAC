@@ -1,0 +1,60 @@
+---
+# ArgoCD Application for cluster RBAC that is not owned by a component chart.
+#
+# WHY THIS FILE EXISTS. kubernetes/core/rbac/ has held
+# automation-harness-clusterrole.yaml and automation-harness-binding.yaml since
+# they were written, and NOTHING HAS EVER APPLIED THEM:
+#
+#     kubectl get clusterrole automation-harness              -> NotFound
+#     kubectl get sa -n infraweaver-system automation-harness -> NotFound
+#
+# The umbrella `core` Application points at kubernetes/core with no
+# `directory.recurse`, so it renders zero resources — a manifest added under a
+# NEW subdirectory of core/ is silently never deployed. That is the same shape as
+# a control that reports success while doing nothing, and it is why the scoped
+# read-only replacement for a standing cluster-admin credential has sat inert in
+# git while the credential it replaces stayed live.
+#
+# ⚠️ Adding an Application per directory is deliberate here rather than flipping
+# `recurse: true` on the umbrella. Recursing would adopt every subdirectory at
+# once, including trees that are unapplied ON PURPOSE, and would do it without
+# anyone choosing each one. Each directory that should be deployed gets a file
+# like this, so the set of deployed things stays an enumerated decision.
+#
+# ORDER OF OPERATIONS for retiring claude-platform-owner is in
+# kubernetes/core/rbac/README.md and is not optional: sync this, verify the
+# harness identity works, and only THEN delete the old ClusterRoleBinding and its
+# never-expiring token. Deleting first leaves no path back.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-rbac
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/rbac
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: infraweaver-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      # The namespace exists already and is not owned here.
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
