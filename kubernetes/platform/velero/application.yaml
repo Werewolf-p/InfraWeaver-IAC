@@ -1,0 +1,21 @@
+# Velero — Kubernetes object backup + kopia file-system backup for local-path PVCs.
+# Chart: https://vmware-tanzu.github.io/helm-charts
+#
+# Read by the git-FILES generator in kubernetes/bootstrap/appset-core-platform.yaml
+# (path glob "kubernetes/platform/*/application.yaml"). This is NOT an ArgoCD
+# Application object — it is the parameter file the AppSet templates from, and it
+# generates the Application named `platform-velero`.
+#
+# Replaces the old standalone kubernetes/bootstrap/app-velero.yaml.disabled, which
+# hardcoded repoURL http://onedev.onedev.svc.cluster.local/InfraWeaver-platform —
+# a repo that was removed from the platform (commit 125c21e) and no longer resolves.
+#
+# Chart 12.1.0 => appVersion 1.18.1. Constrained to "12.1.*" rather than "12.*" so a
+# minor chart bump cannot silently move the Velero server across a major version
+# boundary away from the pinned velero-plugin-for-aws v1.14.2 in values.yaml.
+repoURL: https://vmware-tanzu.github.io/helm-charts
+targetRevision: "12.1.*"
+chart: velero
+releaseName: velero
+namespace: velero
+replicas: "1"

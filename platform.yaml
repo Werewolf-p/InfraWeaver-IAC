@@ -113,9 +113,17 @@ groups:
       # EMBEDDED outpost's forward-auth provider (`route-truenas`), not LDAP.
 
       # ── OPTIONAL — set enabled: true to deploy ─────────────────────────────
+      # ENABLED 2026-08-15. Velero is NOT a second copy of Longhorn here — it
+      # covers the two things nothing else does: kopia file-system backup of the
+      # 19 bound local-path PVCs (which Longhorn physically cannot snapshot,
+      # including the GT New Horizons world) and granular per-namespace object
+      # restore (which an all-or-nothing etcd snapshot cannot give).
+      # See kubernetes/platform/velero/README.md for the full rationale and the
+      # restore runbook.
       velero:
-        description: "Kubernetes backup controller"
-        enabled: false
+        description: "Backup controller — local-path PVC data + granular object restore"
+        enabled: true
+        replicas: 1
       minio-velero:
         description: "S3-compatible storage for Velero backups"
         enabled: false

@@ -340,8 +340,13 @@ COMPANIONS = {
     "core-platform.falco": [
         "app-falco-manifests.yaml",
     ],
+    # Velero moved to the AppSet idiom on 2026-08-15: the Helm release is now
+    # generated from kubernetes/platform/velero/application.yaml by
+    # appset-core-platform.yaml, so there is no standalone app-velero.yaml any
+    # more (the old one was deleted — it hardcoded the removed onedev repoURL).
+    # Only the supplementary-manifests Application remains a companion.
     "core-platform.velero": [
-        "app-velero.yaml",
+        "app-velero-manifests.yaml",
     ],
     "core-platform.minio-velero": [
         "app-minio-velero.yaml",

@@ -338,17 +338,50 @@ metadata:
 # false, readOnlyRootFilesystem true, capabilities drop ALL add
 # NET_BIND_SERVICE, which is inside both the baseline and restricted sets).
 ---
-# ── Backup object store ──────────────────────────────────────────────────────
-# Velero itself is not deployed (GAP-C2); this namespace currently runs only
-# minio-velero. Verified both of its pods pass baseline before labeling:
-# hostNetwork false, volumes pvc + projected, no hostPort, containers set
-# allowPrivilegeEscalation: false and capabilities.drop: [ALL].
+# ── Backup object store + backup controller ──────────────────────────────────
+# RAISED baseline -> privileged 2026-08-15, together with the Velero deployment
+# (kubernetes/platform/velero/). This is a REQUIRED, BLOCKING change, not a
+# convenience: without it the Velero node-agent DaemonSet is rejected at
+# admission and the entire local-path backup capability silently does not exist.
+#
+# WHY: Velero's node-agent is the only mechanism in this cluster that can back up
+# a local-path PVC (Longhorn physically cannot — those are node-local bind
+# mounts, not Longhorn volumes; 19 bound local-path PVCs as of 2026-08-15,
+# including the GT New Horizons world on talos-prod-cp1). To read pod volumes it
+# mounts the kubelet pod directory:
+#     hostPath: /var/lib/kubelet/pods
+#     hostPath: /var/lib/kubelet/plugins
+# and the chart runs it with podSecurityContext.runAsUser: 0.
+# PSA `baseline` FORBIDS hostPath volumes outright, so those pods would never be
+# admitted. `privileged` is the level upstream Velero documents for node-agent.
+#
+# This is the same treatment already applied in this file to the other namespaces
+# whose pods legitimately need host-level access — longhorn-system, kube-system,
+# metallb-system, local-path-storage. Velero is storage infrastructure and lands
+# in the same category.
+#
+# CONTAINMENT — why raising this is acceptable here:
+#   * `velero` is already excluded from every Enforce Kyverno ClusterPolicy
+#     (require-non-root, disallow-privileged-containers,
+#     require-drop-all-capabilities, disallow-latest-tag) in
+#     core/kyverno/manifests/cluster-policies.yaml — the exclusion comment names
+#     `restic`, i.e. exactly this node-agent, as the reason.
+#   * The namespace deliberately does NOT carry `infraweaver.io/type: catalog-app`,
+#     the label that arms those Enforce policies. It must STAY absent.
+#   * Only two workloads run here: minio-velero (the S3 target) and Velero
+#     itself. No third-party or user-supplied code.
+#
+# audit/warn stay at `restricted` so any NEW pod added to this namespace that
+# does not need host access still shows up in the audit log as an outlier.
+# minio-velero itself remains restricted-clean (hostNetwork false, volumes pvc +
+# projected, no hostPort, allowPrivilegeEscalation false, capabilities drop ALL)
+# — raising enforce does not relax anything it was already satisfying.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: velero
   labels:
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 ---

@@ -1,113 +1,278 @@
-# Velero — Kubernetes backup solution using MinIO as S3-compatible backend
-# MinIO is deployed separately in the velero namespace to store backups on Longhorn PVC
+# Velero — Kubernetes OBJECT backup + file-system backup for local-path volumes.
 #
-# Backup schedule: daily at 2:00 AM (Europe/Amsterdam)
-# Retention: 7 days for daily, 4 weeks for weekly
+# ─────────────────────────────────────────────────────────────────────────────
+# !! NO ${PLACEHOLDERS} IN THIS FILE. THEY WOULD SHIP VERBATIM. !!
+# ─────────────────────────────────────────────────────────────────────────────
+# This is a Helm valueFile consumed by ArgoCD-NATIVE Helm (see
+# kubernetes/bootstrap/appset-core-platform.yaml: sources[].helm.valueFiles =
+# "$values/kubernetes/platform/velero/values.yaml"). Native Helm rendering does
+# NOT pass through the argocd-cmp-envsubst plugin — that plugin only runs for
+# sources declaring `plugin: { name: envsubst-v1.0 }`. The same rule is recorded
+# in core/longhorn/values.yaml, core/openbao/values.yaml and
+# platform/authentik/values.yaml.
 #
-# To restore a namespace:
-#   velero restore create --from-backup <backup-name> --include-namespaces <ns>
+# The PREVIOUS revision of this file carried
+#   publicUrl: https://minio-velero.int.${BASE_DOMAIN}
+# which would have reached the cluster as that literal string. It is removed —
+# publicUrl only rewrites download links in `velero backup logs`, and s3Url is
+# what the client actually connects to.
 #
-# To list backups:
-#   velero backup get
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT THIS DOES AND DOES NOT BACK UP — read before changing a schedule
+# ─────────────────────────────────────────────────────────────────────────────
+# Velero here is deliberately NOT a second copy of Longhorn. Measured 2026-08-15:
 #
-configuration:
-  # S3-compatible backend using in-cluster MinIO
-  backupStorageLocation:
-    - name: default
-      provider: aws
-      bucket: velero-backups
-      default: true
-      config:
-        region: minio
-        s3ForcePathStyle: "true"
-        s3Url: http://minio-velero.velero.svc.cluster.local:9000
-        publicUrl: https://minio-velero.int.${BASE_DOMAIN}
-  volumeSnapshotLocation:
-    - name: default
-      provider: aws
-      config:
-        region: minio
+#   Longhorn volumes  → ALREADY backed up. RecurringJobs truenas-backup-daily
+#                       (01:00, retain 7) and truenas-backup-weekly (Sun 02:00,
+#                       retain 4) cover the `default` group, which Longhorn
+#                       auto-applies to every volume. 185 Completed backups on
+#                       the NFS target. Velero MUST NOT duplicate this.
+#   etcd / API objects → ALREADY snapshotted daily by scripts/etcd-snapshot.sh
+#                       on the ops host (see core/etcd-maintenance/).
+#                       BUT an etcd snapshot is all-or-nothing: it cannot restore
+#                       one namespace without reverting the entire cluster.
+#   local-path PVCs   → **NOT COVERED BY ANYTHING.** 19 bound local-path PVCs.
+#                       Longhorn physically cannot snapshot them — they are
+#                       node-local bind mounts, not Longhorn volumes.
+#
+# So Velero's job is exactly two things:
+#   1. file-system backup (kopia) of local-path PVC data  → the real gap
+#   2. granular per-namespace object restore              → what etcd can't do
+#
+backupsEnabled: true
 
-# Credentials injected from ExternalSecret (minio-velero-credentials)
-credentials:
-  useSecret: true
-  existingSecret: velero-s3-credentials
+# NO CSI SNAPSHOTS. Measured 2026-08-15: this cluster has NO external-snapshotter.
+#   $ kubectl get volumesnapshotclass
+#   error: the server doesn't have a resource type "volumesnapshotclass"
+#   $ kubectl get crd | grep snapshot   →   snapshots.longhorn.io   (Longhorn's own, not CSI)
+# There is no snapshot-controller, no VolumeSnapshotClass, no
+# snapshot.storage.k8s.io CRDs. The previous revision of this file set
+# `features: "EnableCSI"` and declared a volumeSnapshotLocation — both were
+# inert at best. Volume-level snapshots are Longhorn's job and Longhorn already
+# does them natively to TrueNAS.
+snapshotsEnabled: false
 
-# Schedule backups
-schedules:
-  daily-all:
-    disabled: false
-    schedule: "0 2 * * *"
-    useOwnerReferencesInBackup: false
-    template:
-      ttl: "168h"  # 7 days
-      includedNamespaces:
-        - "*"
-      excludedNamespaces:
-        - kube-system
-        - kube-public
-        - kube-node-lease
-        - velero
-      storageLocation: default
-      volumeSnapshotLocations:
-        - default
-  weekly-full:
-    disabled: false
-    schedule: "0 3 * * 0"
-    useOwnerReferencesInBackup: false
-    template:
-      ttl: "672h"  # 28 days
-      includedNamespaces:
-        - "*"
-      excludedNamespaces:
-        - kube-system
-        - kube-public
-        - kube-node-lease
-        - velero
-      storageLocation: default
-      volumeSnapshotLocations:
-        - default
+# The node-agent DaemonSet is the ENTIRE reason Velero is here: kopia
+# file-system backup is the only mechanism that can read a local-path PVC.
+# It reads pod volumes from the kubelet pod dir on each node.
+deployNodeAgent: true
 
-# Longhorn CSI snapshot support
-features: "EnableCSI"
+image:
+  repository: docker.io/velero/velero
+  tag: v1.18.1
+  pullPolicy: IfNotPresent
 
-# Resource limits
-resources:
-  requests:
-    cpu: 100m
-    memory: 128Mi
-  limits:
-    cpu: 500m
-    memory: 512Mi
-
-# Init containers use the official velero image
+# velero-plugin-for-aws v1.14.x is the version matched to Velero v1.18.x by the
+# upstream compatibility table (https://github.com/vmware-tanzu/velero-plugin-for-aws).
+# The previous revision pinned v1.10.0, which pairs with Velero v1.14 — a
+# mismatch that predates the chart bump from 8.1.0 to 12.1.0.
 initContainers:
   - name: velero-plugin-for-aws
-    image: velero/velero-plugin-for-aws:v1.10.0
+    image: velero/velero-plugin-for-aws:v1.14.2
     imagePullPolicy: IfNotPresent
     volumeMounts:
       - mountPath: /target
         name: plugins
 
+configuration:
+  # kopia is the default and only supported uploader from Velero 1.15 onward.
+  uploaderType: kopia
+
+  # OPT-IN, not opt-out. With `true`, every schedule would file-system-copy every
+  # volume it sees — including the Longhorn volumes TrueNAS already holds — and
+  # would fill the 20Gi MinIO PVC with a redundant second copy. Each schedule
+  # below that needs volume data sets defaultVolumesToFsBackup on its own template.
+  defaultVolumesToFsBackup: false
+
+  logLevel: info
+
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero-backups
+      # Prefix keeps a future second cluster from colliding in the same bucket.
+      prefix: infraweaver-prod
+      default: true
+      validationFrequency: 1h
+      config:
+        region: minio
+        s3ForcePathStyle: "true"
+        # In-cluster MinIO. Service verified live: velero/minio-velero ClusterIP
+        # 10.96.59.43, ports 9000 (api) / 9001 (console).
+        s3Url: http://minio-velero.velero.svc.cluster.local:9000
+
+  # volumeSnapshotLocation intentionally ABSENT — snapshotsEnabled: false.
+
+# Credentials come from OpenBao via ExternalSecret, never from this file.
+# manifests/externalsecret.yaml renders secret/platform/minio-velero into an AWS
+# INI-format key named `cloud`; the chart mounts that secret at /credentials and
+# sets AWS_SHARED_CREDENTIALS_FILE=/credentials/cloud.
+credentials:
+  useSecret: true
+  existingSecret: velero-s3-credentials
+
+priorityClassName: platform-standard
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
 nodeAgent:
-  enabled: true
+  priorityClassName: platform-standard
+  # Talos default kubelet root. Confirmed: Talos v1.13.0 uses the standard
+  # /var/lib/kubelet path, so the chart default is correct here.
+  podVolumePath: /var/lib/kubelet/pods
+  pluginVolumePath: /var/lib/kubelet/plugins
   resources:
     requests:
       cpu: 100m
-      memory: 128Mi
+      memory: 256Mi
     limits:
-      cpu: 500m
-      memory: 512Mi
+      # kopia buffers while hashing. 512Mi (the previous value) is a plausible
+      # OOM on the 2.4G GTNH world; this box has a documented OOM history.
+      cpu: 1000m
+      memory: 1Gi
+  tolerations:
+    # Every node in this cluster is a control-plane node. The DaemonSet
+    # controller adds the unschedulable toleration itself, but control-plane
+    # taints must be tolerated explicitly if they are ever re-applied.
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
 
-# Pin kubectl image tag — bitnami/kubectl only publishes the 'latest' tag on Docker Hub.
-# However, bitnami/kubectl:latest uses a dynamically-linked sh that is incompatible
-# with the velero scratch container. Disable upgradeCRDs job and manage CRDs via
-# ArgoCD directly — the CRDs are already installed.
-kubectl:
-  image:
-    tag: "latest"
+# The chart's CRD upgrade hook now uses registry.k8s.io/kubectl (it used to use
+# bitnami/kubectl, whose dynamically-linked sh was incompatible with the velero
+# scratch image — that is the "disable upgradeCRDs" note in the previous
+# revision, and it no longer applies on chart 12.x).
+upgradeCRDs: true
 
-# Disable the upgrade-crds hook job — it uses bitnami/kubectl whose sh binary
-# requires libreadline.so.8 not available in the velero scratch container.
-# CRDs are managed by ArgoCD and are already up to date.
-upgradeCRDs: false
+metrics:
+  enabled: true
+  serviceMonitor:
+    # kube-prometheus-stack is deployed in this cluster; let it scrape Velero so
+    # a silently-failing backup is visible. A backup system nobody watches is
+    # the exact failure mode recorded as GAP-C2.
+    enabled: true
+    additionalLabels:
+      release: kube-prometheus-stack
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULES
+# ─────────────────────────────────────────────────────────────────────────────
+# Times are cluster-local UTC. Deliberately placed AROUND the existing backup
+# windows so nothing collides:
+#   00:00  game-hub-scale-down      (game-hub goes to ZERO replicas)
+#   00:00  longhorn local-snapshot-daily
+#   01:00  longhorn truenas-backup-daily
+#   02:00  longhorn truenas-backup-weekly (Sun)
+#   03:30  velero daily-objects        ← here
+#   03:45  velero daily-wordpress      ← here
+#   05:00  velero weekly-localpath     ← here (Sun)
+#   08:00  game-hub-scale-up           (game-hub returns)
+#   08:30  velero daily-gamehub        ← here, AFTER scale-up. See below.
+schedules:
+
+  # ── Tier 2: objects only, everything, cheap ────────────────────────────────
+  # No volume data at all — this is a few MB of YAML. Its whole purpose is the
+  # thing an etcd snapshot cannot do: restore ONE namespace, or one Deployment,
+  # without reverting the entire cluster to a point in time.
+  daily-objects:
+    disabled: false
+    schedule: "30 3 * * *"
+    template:
+      ttl: "720h"                      # 30 days — it costs almost nothing
+      snapshotVolumes: false
+      defaultVolumesToFsBackup: false
+      includeClusterResources: true
+      excludedNamespaces:
+        - kube-system
+        - kube-public
+        - kube-node-lease
+        - velero                       # never let Velero back up its own store
+      excludedResources:
+        - events
+        - events.events.k8s.io
+      storageLocation: default
+
+  # ── Tier 1: WordPress volume data ──────────────────────────────────────────
+  # 7 live sites. 10 of their PVCs are local-path-retain (hihi, lol,
+  # yonavaarwater-nl, zonnevaarwater-nl and test-db) and therefore have NO
+  # Longhorn coverage whatsoever.
+  #
+  # NOTE: this is a SECOND net, not the first. The console already runs an
+  # application-level WordPress backup chain (CronJob wordpress-backup-sweep,
+  # hourly at :20, into infraweaver-console/infraweaver-backup-datastore —
+  # measured 3.8G, last written 2026-08-14 22:20). That chain is the primary
+  # recovery path for site CONTENT. This schedule protects the raw volume so a
+  # lost node does not also lose plugin state, uploads and the live DB files.
+  daily-wordpress:
+    disabled: false
+    schedule: "45 3 * * *"
+    template:
+      ttl: "168h"                      # 7 days
+      includedNamespaces:
+        - wordpress
+      snapshotVolumes: false
+      defaultVolumesToFsBackup: true   # kopia FSB — the only local-path mechanism
+      storageLocation: default
+
+  # ── Tier 1: the GT New Horizons world ──────────────────────────────────────
+  # The single highest-value uncovered asset in the cluster.
+  # game-hub/gt-new-horizons-container-local — local-path-retain, 30Gi claim,
+  # 2.4G actual, PINNED to talos-prod-cp1. The running server pod mounts THIS
+  # PVC (not the longhorn-game one, which is detached). Longhorn cannot see it.
+  #
+  # !! THE 08:30 TIME IS LOAD-BEARING — DO NOT MOVE IT INTO THE NIGHT !!
+  # CronJob game-hub/game-hub-scale-down runs at 00:00 and scales game-hub to
+  # ZERO; game-hub-scale-up restores it at 08:00. Velero file-system backup
+  # reads volumes THROUGH A RUNNING POD. A 02:00 schedule — which is what the
+  # previous revision of this file used — would find no pod, back up nothing,
+  # and report Completed. That is precisely the "green job that backs up
+  # nothing" failure recorded as GAP-C2 for the Longhorn jobs.
+  #
+  # CAVEAT, accepted deliberately: the server is RUNNING at 08:30, so this is a
+  # crash-consistent copy of a live world, not a quiesced one. It is taken right
+  # after scale-up and before players are typically on, which is the quietest
+  # write window available without stopping the server.
+  daily-gamehub:
+    disabled: false
+    schedule: "30 8 * * *"
+    template:
+      ttl: "168h"                      # 7 days
+      includedNamespaces:
+        - game-hub
+      snapshotVolumes: false
+      defaultVolumesToFsBackup: true
+      storageLocation: default
+
+  # ── Tier 3: the remaining local-path workloads, weekly ─────────────────────
+  # Lower change-rate or independently recoverable, so weekly is enough.
+  #   n8n-prod   n8n-data + postgresql-n8n-data      (local-path-retain, cp1)
+  #   nextcloud  nextcloud-data-lp + pg lp           (local-path-retain, 1.1G actual)
+  #   jellyfin   jellyfin-data-0-lp                  (local-path-retain, config only)
+  #   authentik  postgres + redis                    (local-path; ALSO pg_dump'd
+  #              nightly at 00:15 into authentik-pg-dumps, a longhorn-retain PVC
+  #              that TrueNAS already holds — so this is a third net for it)
+  #
+  # DELIBERATELY EXCLUDED — see README "What is NOT backed up":
+  #   registry/zot-data (local-path-retain, cp3) — a container image cache.
+  #     Rebuildable from source via buildkit; not worth the MinIO footprint.
+  #   nextcloud + jellyfin NAS media (500Gi SMB PVs) — those live on TrueNAS
+  #     already and are not Velero's to copy.
+  weekly-localpath:
+    disabled: false
+    schedule: "0 5 * * 0"
+    template:
+      ttl: "336h"                      # 14 days = 2 weekly copies
+      includedNamespaces:
+        - n8n-prod
+        - nextcloud
+        - jellyfin
+        - authentik
+      snapshotVolumes: false
+      defaultVolumesToFsBackup: true
+      storageLocation: default
