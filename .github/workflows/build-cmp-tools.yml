@@ -89,7 +89,32 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           # Name-agnostic: replace whatever argocd-cmp-* image is currently pinned
           # (old name/tag/digest) with the freshly published digest.
+          # ⚠️ VERIFY THE PATTERN MATCHES BEFORE TRUSTING THE RESULT.
+          # This step silently did nothing for months: the sed matched
+          # `image: ghcr.io/<owner>/argocd-cmp*`, while the file has pinned
+          # `image: registry.int.example.com/argocd-cmp-tools:v3.4.4` since the
+          # CMP image moved to the internal registry. No match, no diff, and the
+          # branch below reported "digest unchanged; nothing to commit" on every
+          # run — a green check for work that never happened.
+          #
+          # The pattern is deliberately NOT widened to any registry host. Doing
+          # that would rewrite the pin to a ghcr digest and change where the
+          # cluster pulls this image from, and the ghcr credential is known dead
+          # (403). Which registry owns this image is a decision, not a regex
+          # tweak — so if the pin no longer matches, this fails and says so.
+          before="$(sha256sum "$f" | cut -d' ' -f1)"
           sed -i -E "s#image: ghcr.io/${owner}/argocd-cmp[^[:space:]]*#image: ${DIGEST}#" "$f"
+          after="$(sha256sum "$f" | cut -d' ' -f1)"
+          if [ "$before" = "$after" ]; then
+            echo "==> ERROR: no argocd-cmp image line matched the ghcr.io pattern in $f" >&2
+            echo "==> currently pinned:" >&2
+            grep -n 'argocd-cmp' "$f" >&2 || true
+            echo "==> Either the pin moved registries (decide which registry owns" >&2
+            echo "    this image, then update this workflow), or the file changed" >&2
+            echo "    shape. Refusing to report success for a substitution that" >&2
+            echo "    did not happen." >&2
+            exit 1
+          fi
           if git diff --quiet -- "$f"; then
             echo "==> digest unchanged; nothing to commit"
             exit 0

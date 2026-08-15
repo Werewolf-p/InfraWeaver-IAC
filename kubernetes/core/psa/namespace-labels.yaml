@@ -454,18 +454,25 @@ metadata:
 #
 # DO NOT "consolidate" those labels back into this file later. The reason they
 # live in the app manifests is the SSA collision above, and it does not expire.
----
-# ── Manually-labeled leftover, brought under GitOps ──────────────────────────
-# apps-grafana carries privileged PSA applied by hand (field manager
-# `kubectl-label`, an Update op with no ArgoCD Application behind it) and has
-# had 0 pods since. The level is reproduced here UNCHANGED so this commit stays
-# a no-op; tightening it to baseline is a separate, testable change and is
-# deliberately not bundled into the ratchet.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: apps-grafana
-  labels:
-    pod-security.kubernetes.io/enforce: privileged
-    pod-security.kubernetes.io/audit: privileged
-    pod-security.kubernetes.io/warn: privileged
+#
+# ── apps-grafana: REMOVED 2026-08-15 ────────────────────────────────────────
+# This file used to declare an `apps-grafana` Namespace with
+# `enforce/audit/warn: privileged`. It was a hand-labeled leftover adopted here
+# to stop the drift, with the level "reproduced UNCHANGED so this commit stays a
+# no-op" and tightening left as "a separate, testable change".
+#
+# This is that change, and the answer turned out to be deletion rather than
+# tightening. The namespace had 0 pods for its entire life, its chart is
+# `kubernetes/platform/grafana/application.yaml.disabled`, and no Grafana pod
+# exists anywhere in the cluster — dashboards are served by
+# kube-prometheus-stack. It also held three orphaned NetworkPolicies including
+# two default-denies, which read as active segmentation in an audit while
+# guarding an empty namespace.
+#
+# So the cluster carried its most permissive PSA level, indefinitely, for
+# nothing. Removing the declaration lets prune delete the namespace and the
+# policies with it.
+#
+# ⚠️ If Grafana is ever re-enabled, do NOT re-add a privileged namespace here.
+# Enable the Application, let it own its namespace, and give it the tightest
+# level it actually passes — the dry-run method is documented above.
