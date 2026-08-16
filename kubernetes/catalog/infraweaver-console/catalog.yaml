@@ -129,6 +129,14 @@ secrets:
     wordpress-sandbox-cron-token:
       type: password
       length: 64
+    # Dedicated token for the five-minute WP-Cron sweep CronJob. Referenced by
+    # that CronJob, by the console Deployment AND by the Retain-policy
+    # ExternalSecret since 0304251 (2026-08-15) without ever being declared here
+    # — which fails the seed gate, and on a fresh install would abort the ENTIRE
+    # console secret rather than just this one key.
+    wordpress-cron-cron-token:
+      type: password
+      length: 64
     # ── Remaining properties the console ExternalSecret pulls from THIS path ───
     # The ExternalSecret uses deletionPolicy: Retain, under which ESO fails the
     # ENTIRE secret sync if ANY referenced property is absent in OpenBao (a

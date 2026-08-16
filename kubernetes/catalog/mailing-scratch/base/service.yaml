@@ -1,0 +1,95 @@
+---
+# ClusterIP. Not LoadBalancer, not NodePort, and there is no IngressRoute anywhere
+# in this directory — nothing outside the cluster can reach this instance, and no
+# DNS record points at it.
+#
+# ── THIS SERVICE IS THE ANSWER TO THE CAPABILITY COLLISION ──────────────────
+# The container binds high because `require-drop-all-capabilities` (Enforce) plus
+# PSA `restricted` neuter the image's `cap_net_bind_service` FILE capability; the
+# Service maps the well-known ports onto those high ports. A Service does this for
+# free, in kube-proxy/eBPF, with no capability, no `hostPort`, and no Kyverno
+# exception to maintain. In step 5 the same mapping moves onto a `LoadBalancer`
+# with `externalTrafficPolicy: Local`, which preserves the client source IP with
+# no PROXY protocol at all — and source-IP fidelity is not a nicety for a mail
+# server, it is the input to every anti-abuse decision it makes (SPF, DMARC,
+# greylisting, per-IP rate limits, auto-ban).
+#
+# ── WHY THESE PORTS AND NOT OTHERS ──────────────────────────────────────────
+#   25  → 2525   SMTP, MTA→MTA. Present so the in-cluster open-relay assertion
+#                (design §11.3) has something to point at once the listeners are
+#                configured. Faces nothing here.
+#   465 → 4465   Submission, implicit TLS. The vendor's own hardening guide
+#                prefers 465 and says to DISABLE 587 if you use it.
+#   443 → 8443   JMAP + web admin. In production this is Traefik + Authentik
+#                forward-auth; here it is ClusterIP and nothing routes to it.
+#
+# DELIBERATELY ABSENT:
+#   993 (IMAPS), 143, 110, 995, 587, 4190   — design §4.1: "not enabled". The
+#     mailing addon is machine-to-machine (WordPress submission + a console UI);
+#     IMAP/JMAP client access and the ports for it are named YAGNI in §12. If 993
+#     is ever wanted the mapping is one more entry here, identical in shape —
+#     but adding the Service port is the SMALL half; the listener lives in the
+#     datastore and the exposure decision is the real one.
+#   8080 (management + /healthz/* + metrics)  — "the management port never leaves
+#     the pod" is a first-class claim of design §6, and a Service port would give
+#     it a stable, discoverable in-cluster name. The kubelet probes it on the POD
+#     IP, and Prometheus scrapes it on the POD IP through the ServiceMonitor-free
+#     path, so nothing needs it. See ciliumnetworkpolicy.yaml for who can actually
+#     reach 8080 today — the honest answer is not "nobody".
+apiVersion: v1
+kind: Service
+metadata:
+  name: stalwart
+  namespace: mailing-scratch
+  labels:
+    app.kubernetes.io/name: stalwart
+    app.kubernetes.io/part-of: mailing
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: stalwart
+  ports:
+    - name: smtp
+      port: 25
+      targetPort: smtp
+      protocol: TCP
+    - name: smtps
+      port: 465
+      targetPort: smtps
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+---
+# The StatefulSet's governing Service. Required for stable per-pod DNS
+# (`stalwart-0.stalwart-headless.mailing-scratch.svc`), which is what the runbook
+# and the crash/restore drill address the pod by — a ClusterIP would load-balance
+# to "the" pod and hide which one answered.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stalwart-headless
+  namespace: mailing-scratch
+  labels:
+    app.kubernetes.io/name: stalwart
+    app.kubernetes.io/part-of: mailing
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: stalwart
+  ports:
+    - name: smtp
+      port: 2525
+      targetPort: smtp
+      protocol: TCP
+    - name: smtps
+      port: 4465
+      targetPort: smtps
+      protocol: TCP
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP

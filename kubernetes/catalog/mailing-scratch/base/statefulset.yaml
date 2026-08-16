@@ -1,0 +1,375 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Stalwart Mail Server — step-4 scratch instance.
+#
+# ── FIRST-BOOT ORDER. READ THIS BEFORE DEPLOYING. ───────────────────────────
+# This pod comes up in RECOVERY MODE on purpose, and that is not a workaround —
+# it is the only posture in which "nothing pointed at it" is true at the protocol
+# level as well as the routing level. In recovery mode Stalwart starts NO mail
+# services and serves only the management API on STALWART_RECOVERY_MODE_PORT.
+# Every single proof design §11.2 asks step 4 for is a management-API operation:
+#
+#     stalwart-cli create domain|account/user|dkimsignature|apikey
+#     assert dnsManagement=Manual writes no DNS (watch the zone read-only, 1h)
+#     assert dnsZoneFile is readable and parseable in Manual mode
+#     DkimSignature/get → OpenBao → destroy → DkimSignature/set → same pubkey
+#     create Action @type=ReloadTlsCertificates
+#     hard-kill mid-write, restore the Longhorn snapshot, see if RocksDB survives
+#     measure RocksDB latency on longhorn-retain
+#
+# THE RUNBOOK:
+#   1. Pod starts in recovery mode. Only :8080 exists. Nothing attempts to bind a
+#      privileged port, so the capability collision below cannot happen yet.
+#        kubectl -n mailing-scratch port-forward sts/stalwart 8080:8080
+#      or exec straight into the pod for stalwart-cli.
+#   2. Rewrite EVERY listener bind to a high port before mail services ever start:
+#        smtp 2525, smtps 4465, https 8443, management 8080.
+#      Delete the listeners this design does not use at all: 587, 143, 993, 110,
+#      995, 4190, 80 (design §4.1 — two internet-facing mail ports, and this
+#      instance faces nothing).
+#   3. Remove the two STALWART_RECOVERY_MODE* env vars (a one-line patch in
+#      overlays/prod) and let it restart into normal operation.
+#   4. Only then run the in-cluster open-relay assertion against :2525 and
+#      unauthenticated :4465 (design §11.3) from a pod in this namespace.
+#
+#   ⚠️ IF STEP 2 IS NOT POSSIBLE IN RECOVERY MODE, THAT IS A STEP-4 FINDING, NOT
+#   A BLOCKER. Record it, drop the recovery env, boot into normal operation here
+#   in the scratch namespace, and measure what Stalwart actually does when it
+#   cannot bind :25 — abort, or log and degrade. That answer is worth having and
+#   it costs nothing to get here. It costs an inbound-mail outage to get in step 5.
+#
+# ── WHY HIGH PORTS, AND WHY NO EXCEPTION IS REQUESTED ───────────────────────
+# The image runs as unprivileged `stalwart` (UID 2000) and carries
+# `cap_net_bind_service` as a FILE capability so it can bind :25 without
+# `--privileged`. This cluster's Kyverno `require-drop-all-capabilities` is
+# ENFORCE for namespaces labelled `infraweaver.io/type: catalog-app` (see
+# namespace.yaml), and PSA `restricted` says the same thing independently: with
+# ALL capabilities dropped the permitted set is empty, and a file capability that
+# is not in the permitted set grants nothing. The binary will not bind :25.
+#
+# The answer is NOT an exclusion. An exception carved for a mail server is an
+# exception carved for the single most internet-exposed workload on the cluster,
+# and it would have to be maintained forever. Bind high in the container, map low
+# in the Service — a Service does that for free and the cost is zero. See
+# service.yaml. `hostPort` and `NET_BIND_SERVICE` are both refused for the same
+# reason.
+#
+# ⚠️ The bind addresses are NOT set here. On v0.16 the listener set is a DATASTORE
+# object, not a config key — see configmap.yaml. The containerPorts below are
+# therefore a DECLARATION OF INTENT that the runbook must make true, not a
+# constraint the kubelet enforces. containerPort is informational; a container can
+# listen on a port it never declared. Verify with `ss -ltnp` inside the pod after
+# step 2, not by reading this file.
+#
+# ── PLACEMENT ────────────────────────────────────────────────────────────────
+# `zone NotIn [hypatia]`, REQUIRED, not preferred. Three reasons, in order:
+#
+#   1. STORAGE, which is the binding one. The volume below is Longhorn. On
+#      2026-08-14 Longhorn replication across the stretched VLAN to hypatia
+#      destroyed volumes cluster-wide because the host MTU (1500) exceeded the
+#      overlay MTU (1370) — "volumes faulted cluster-wide … while every ping and
+#      every small API call kept working". `longhorn-retain` carries
+#      `dataLocality: best-effort`, so Longhorn PREFERS a replica on the pod's own
+#      node: pinning the pod to a local zone is what guarantees at least one
+#      replica is local. RocksDB is a write-amplifying LSM store; putting its
+#      hot replica 15 ms away is a latency decision as well as an integrity one.
+#
+#   2. LATENCY, measured. fleet-topology.yaml records 14.9-16.3 ms hypatia↔local
+#      against 0.19-0.63 ms local↔local. On 2026-08-15 exactly this — a singleton
+#      silently landing on cp4 — took authentik's Traefik p95 from 0.270 s to
+#      3.765 s with no change to any file.
+#
+#   3. NOT PTR. hypatia (talos-prod-cp4, Hetzner 162.55.99.90) is the only node in
+#      the fleet with a settable PTR, and for a mail server that normally decides
+#      the argument. It does not decide this one: design §3.2 relays ALL outbound
+#      through an authenticated smarthost and never dials :25 outward, so FCrDNS
+#      on the egress IP is irrelevant to v1. Outbound-via-cp4 is DEFERRED with
+#      four named preconditions (§3.2), and even then it is an EGRESS pin, not a
+#      workload pin — the storage must stay off hypatia either way. Step 4 sends
+#      and receives no mail at all, so PTR has no bearing here whatsoever.
+#
+# `NotIn [hypatia]` is written exactly as `scripts/fleet-topology.yaml`
+# `remote_zones` declares it, which is what makes scripts/validate-scheduling.py
+# G4 pass; and it is REQUIRED, not preferred, which is what makes G3 pass. A zone
+# is a WAN boundary, not a hint: a weight-100 preference is outscored by the
+# scheduler's resource ranking the moment the near nodes fill up, which is
+# precisely how the 2026-08-15 regression happened. Never `zone In [proxmox]` —
+# cp3 is its own zone (`microserver`), so `In` silently pins to one node.
+#
+# ⚠️ WHAT THIS RULE DOES **NOT** DO, STATED PLAINLY BECAUSE THE DESIGN ASSUMED IT
+# DID: a pod nodeAffinity constrains the POD. It does not constrain LONGHORN
+# REPLICA placement. Longhorn places replicas by its own scheduler, and today
+# `talos-prod-cp4` is Longhorn-schedulable, so the second replica of this volume
+# can legitimately land on hypatia and replicate across the WAN. That is live
+# drift against a constraint this repo already declared:
+#
+#     sites/hypatia.yaml:  constraints.longhorn_scheduling: disable
+#     measured 2026-08-16: kubectl -n longhorn-system get nodes.longhorn.io \
+#                            -o custom-columns=NAME:.metadata.name,ALLOWSCHED:.spec.allowScheduling
+#                          talos-prod-cp1 true / talos-prod-cp3 true / talos-prod-cp4 TRUE
+#
+# There is no way to express "replicas off hypatia" from this repo today: Longhorn
+# scopes replica placement by NODE TAG via a StorageClass `nodeSelector`, and no
+# Longhorn node in this cluster carries any tag. So this is NOT fixed here and it
+# is NOT assumed away — it is a PREFLIGHT the step-4 storage measurement depends
+# on. Run this before believing any latency number from this pod:
+#
+#     kubectl -n longhorn-system get replicas.longhorn.io \
+#       -l longhornvolume=$(kubectl -n mailing-scratch get pvc data-stalwart-0 \
+#          -o jsonpath='{.spec.volumeName}') \
+#       -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeID
+#
+# If a replica is on talos-prod-cp4, the number you measure is the WAN, not
+# Longhorn. Resolving the drift (either honour `longhorn_scheduling: disable`, or
+# delete the constraint from sites/hypatia.yaml because it is no longer intended)
+# is a deliberate decision for the operator, not a side effect of this file. The
+# same file's `metallb_speaker: exclude` is drifted too — the speaker IS running
+# on talos-prod-cp4, measured 2026-08-16 — which does not matter in step 4
+# (no LoadBalancer) and matters a great deal in step 5, when a mail VIP announced
+# from Falkenstein across the stretched VLAN becomes a specific and bad failure.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stalwart
+  namespace: mailing-scratch
+  labels:
+    app.kubernetes.io/name: stalwart
+    app.kubernetes.io/part-of: mailing
+    app.kubernetes.io/managed-by: infraweaver
+spec:
+  serviceName: stalwart-headless
+  # ONE replica, and not a parameter. Multi-replica Stalwart requires moving state
+  # to PostgreSQL + S3 and adding a coordination backend; a shared RocksDB volume
+  # corrupts. The failure mode of a split-brain mail store is lost mail, and a
+  # three-node cluster with one node 15 ms away across a WAN is a bad place to
+  # learn a new coordination protocol (design §10).
+  replicas: 1
+  # RWO + one replica: the new pod cannot attach until the old one detaches.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: stalwart
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: stalwart
+        app.kubernetes.io/part-of: mailing
+    spec:
+      # No API access is needed by a mail server, so it gets none. This also
+      # removes the token from the pod filesystem entirely, which matters for a
+      # process that parses attacker-supplied bytes for a living.
+      automountServiceAccountToken: false
+      # Suppresses the KUBERNETES_* / <SVC>_PORT env soup. Stalwart reads its
+      # configuration from the datastore; injected service env is noise it should
+      # never see.
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's own unprivileged user. Restated here so a base-image change
+        # that switches to root is REJECTED by admission rather than absorbed.
+        runAsUser: 2000
+        runAsGroup: 2000
+        fsGroup: 2000
+        # Only chown on mismatch: a full recursive chown of a mail store on every
+        # start is an outage that grows with the mailbox.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          # REQUIRED, not preferred. See the placement section in the header.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: NotIn
+                    values:
+                      - hypatia
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: stalwart
+          # Base carries the minor tag so `kubectl kustomize base` renders and
+          # passes `disallow-latest-tag` on its own. overlays/prod bakes the exact
+          # patch version AND its digest — that overlay line is the one place a
+          # Stalwart version bump is made, and it is what the staged update runner
+          # (plan → preview → gated waves) will target. Twelve releases in twelve
+          # weeks: pin-and-forget accumulates CVEs, `latest` runs a schema
+          # migration on a mail store at 03:00, and the cluster refuses `latest`
+          # anyway.
+          image: stalwartlabs/stalwart:v0.16
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config"
+            - "/etc/stalwart/config.json"
+          env:
+            # ── STEP-4 FIRST-BOOT POSTURE. Remove both when the runbook says so.
+            # Recovery mode starts no mail services and exposes only the
+            # management API, which is where every step-4 proof lives.
+            - name: STALWART_RECOVERY_MODE
+              value: "true"
+            - name: STALWART_RECOVERY_MODE_PORT
+              value: "8080"
+            # The break-glass admin. Directory-independent by design: this
+            # platform has twice had an Authentik restore leave join tables empty,
+            # and a mail server whose admin authority depends on Authentik groups
+            # inherits that failure mode. See externalsecret.yaml.
+            - name: STALWART_RECOVERY_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: stalwart-recovery-admin
+                  key: STALWART_RECOVERY_ADMIN
+          ports:
+            # DECLARATION OF INTENT, not enforcement — the real binds live in the
+            # datastore (see the header). Service maps 25→2525 and 465→4465.
+            - name: smtp
+              containerPort: 2525
+              protocol: TCP
+            - name: smtps
+              containerPort: 4465
+              protocol: TCP
+            # JMAP + web admin. Reached over ClusterIP only; in production it sits
+            # behind Traefik + Authentik forward-auth and is never exposed directly.
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            # Management + /healthz/* + metrics. NEVER leaves the pod: there is
+            # deliberately no Service port for it (service.yaml).
+            - name: mgmt
+              containerPort: 8080
+              protocol: TCP
+          # ⚠️ NOT COVERED BY POLICY: `require-pod-probes` matches kinds
+          # [Deployment] only, so a StatefulSet with no probes would have passed
+          # every gate in this repo. These are here because they are correct.
+          #
+          # startup/liveness are tcpSocket rather than httpGet /healthz/live on
+          # purpose: /healthz/* is served by the management listener, and whether
+          # it answers while the server is in RECOVERY mode is unverified. A TCP
+          # probe is true in both modes and still restarts a hung process.
+          # readiness IS the documented endpoint — and if it does not answer in
+          # recovery mode the pod reads NotReady, which is exactly the honest
+          # signal to show while the listeners have not been configured yet.
+          startupProbe:
+            tcpSocket:
+              port: mgmt
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            # RocksDB opening a large store after an unclean shutdown is the slow
+            # path this budget exists for: 5 minutes before the kubelet gives up.
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: mgmt
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: mgmt
+            periodSeconds: 30
+            failureThreshold: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            # ⚠️ UNVERIFIED HARDENING, shipped on purpose because its failure mode
+            # is loud and free HERE. If Stalwart writes anywhere outside
+            # /var/lib/stalwart and /tmp, this pod CrashLoops in a scratch
+            # namespace with nothing pointed at it — which is a step-4 finding
+            # delivered in 30 seconds. The remedy if it fires is one line
+            # (`readOnlyRootFilesystem: false`) plus a note saying which path.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/stalwart
+            - name: config
+              mountPath: /etc/stalwart
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            # Sized for a scratch instance that receives no mail. The memory limit
+            # is 4x the request, under the cluster's 8x `limit-memory-burst-ratio`
+            # cap — memory is incompressible, the scheduler packs on REQUESTS and
+            # the OOM killer enforces LIMITS, so a wide ratio is capacity the node
+            # cannot honour.
+            #
+            # ⚠️ THESE NUMBERS ARE AN INPUT TO STEP 4, NOT AN OUTPUT OF IT.
+            # RocksDB's default write buffer is 128 MB and its worker pool
+            # defaults to the CPU count, so a real mail store will want more of
+            # both. Record actual usage during the latency measurement and let
+            # step 5 size production from the measurement, not from this guess.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: stalwart-config
+            defaultMode: 0444
+        # Scratch space for a read-only root filesystem. `emptyDir` and not a
+        # PVC: nothing in /tmp survives a restart by design.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    # ── STORAGE DECISION: longhorn-retain. ──────────────────────────────────
+    # `volumeClaimTemplates`, not a shared PVC: the vendor's Kubernetes guidance
+    # is that each pod needs its own claim because a shared RocksDB volume
+    # corrupts. That is also why this is a StatefulSet at all.
+    #
+    # WHY NOT local-path (the cluster default):
+    #   It welds the pod to one node, and this repo has already paid for that
+    #   exactly once: retiring a node stranded local-path PVCs that NO Longhorn
+    #   check could see, and it took out Authentik SSO and OpenBao together.
+    #   Longhorn's dashboards show nothing wrong while it happens. Refused.
+    #
+    # WHY longhorn-retain AND NOT longhorn:
+    #   `reclaimPolicy: Retain`, so a `git revert` of this directory — or the
+    #   `Revert: delete the namespace` in the build order — RELEASES the volume
+    #   instead of deleting it. On a mail store, "the revert deleted the data" is
+    #   not a recoverable mistake.
+    #
+    # WHY THIS CLASS EVEN THOUGH THE DESIGN FLAGS RocksDB-ON-LONGHORN AS A RISK:
+    #   Because step 4 exists to answer that question, and the answer is only
+    #   worth having on the class production would actually use. Measuring
+    #   local-path here and shipping Longhorn in step 5 measures the wrong thing.
+    #   The two unknowns are named, both are step-4 deliverables, and BOTH CAN
+    #   STILL CHANGE THE DESIGN:
+    #     (a) LATENCY. Stalwart says RocksDB is "well suited to fast storage
+    #         devices such as SSDs" and the docs are SILENT on network
+    #         filesystems — the absence is the finding. Measure it. If a
+    #         replicated block device is too slow for an LSM store, the answer is
+    #         a PostgreSQL backend, not a quieter storage class.
+    #     (b) CRASH CONSISTENCY. A Longhorn snapshot is crash-consistent only, and
+    #         RocksDB's recovery behaviour under an unclean snapshot is
+    #         UNVERIFIED. Hard-kill the pod mid-write, restore the snapshot, and
+    #         see whether the store opens. IF IT DOES NOT, BACKUP TRACK 1 IS NOT
+    #         A BACKUP, and the design's whole "everything including config and
+    #         messages" claim collapses onto tracks 2 and 3 — which explicitly
+    #         exclude server config, ACLs and DKIM keys. That is a design-changing
+    #         result and it costs one afternoon to get here.
+    #   `longhorn-retain` is `numberOfReplicas: "2"`, `dataLocality: best-effort`.
+    #   Two replicas across three schedulable Longhorn nodes is why the replica
+    #   preflight in the header matters.
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: stalwart
+          app.kubernetes.io/part-of: mailing
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: longhorn-retain
+        resources:
+          requests:
+            # Scratch sizing. Mail growth is unbounded and monotonic, so
+            # production sizing is a quota-and-retention decision (design §13/
+            # research Q13), not a number copied from here.
+            storage: 5Gi

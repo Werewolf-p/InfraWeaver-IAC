@@ -1,0 +1,132 @@
+---
+# mailing-scratch — Stalwart Mail Server, STEP 4 of the mailing addon build order.
+#
+# Spec: docs/superpowers/specs/2026-08-16-mailing-addon-design.md §13 step 4:
+#   "Stalwart in a scratch namespace, ClusterIP only, nothing pointed at it.
+#    Catalog entry, manifests, CNP, ESO. Prove §11.2 in full — provisioning,
+#    `Manual` DNS, DKIM escrow round-trip, cert reload, RocksDB crash-and-restore,
+#    Longhorn latency. This is the step that can still change the engine decision,
+#    and it is cheap here. Revert: delete the namespace."
+#
+# ── WHAT THIS IS NOT ─────────────────────────────────────────────────────────
+# This is NOT the production mailing deployment. There is deliberately:
+#   * no LoadBalancer Service and no MetalLB VIP        (nothing from the internet)
+#   * no IngressRoute and no Traefik route              (nothing from the browser)
+#   * no MX, no A record, no DNS of any kind            (nothing in Cloudflare)
+#   * no cert-manager Certificate                       (nothing that solves DNS-01)
+#   * no relay credential                               (no provider chosen yet — §12)
+#   * no ServiceMonitor and no PrometheusRule           (nothing to alert on yet)
+# Every one of those belongs to steps 5-9 and each carries its own gate. The
+# whole point of step 4 is that it can be deleted without anything noticing.
+#
+# ── WHY A SEPARATE `mailing-scratch` AND NOT `mailing` ───────────────────────
+# The design's §4.3 names `kubernetes/catalog/mailing/` as the production home.
+# Step 4 uses a distinct name end-to-end — directory, namespace AND OpenBao path —
+# so that:
+#   * `Revert: delete the namespace` is literally true, with no production object
+#     and no production secret path sharing its fate;
+#   * the scratch break-glass password is not the production break-glass password,
+#     so a scratch instance that gets poked at by hand never becomes the thing
+#     that holds a customer's mail;
+#   * nobody can enable production mail by accident while reading a step-4 diff.
+# Promotion to step 5 is a `git mv` plus a namespace/path rename in one reviewable
+# commit, not a merge.
+#
+# ── HOW TO TURN IT ON (deliberately NOT done in this change) ─────────────────
+# This app is authored but NOT enabled. `scripts/sync-catalog.sh` only writes an
+# ArgoCD Application for apps listed in platform.yaml `catalog.enabled`, and
+# `scripts/seed-catalog-secrets.sh` only seeds those same apps. Enabling it is
+# the act of deploying it, and the order matters:
+#
+#   1. seed first — an ExternalSecret referencing an unseeded path syncs nothing
+#      and the pod never gets STALWART_RECOVERY_ADMIN:
+#        OPENBAO_ADDR=… VAULT_TOKEN=… bash scripts/seed-catalog-secrets.sh
+#   2. then add ONE line to platform.yaml under catalog.enabled:
+#        - mailing-scratch
+#   3. then: bash scripts/sync-catalog.sh   (writes kubernetes/bootstrap/catalog-mailing-scratch-manifests.yaml)
+#   4. ⚠️ VERIFY THE APP ACTUALLY MANAGES RESOURCES. Eight ArgoCD apps in this
+#      repo have managed ZERO resources because their source path rendered
+#      nothing. This app renders through kustomize (overlays/prod → base), so
+#      `directory.recurse` is irrelevant — but check anyway, because "Synced /
+#      Healthy over an empty resource list" is this repo's signature failure:
+#        kubectl -n argocd get app catalog-mailing-scratch-manifests \
+#          -o jsonpath='{range .status.resources[*]}{.kind}/{.name}{"\n"}{end}'
+#      Expect 6 resources. An empty list means the app is a no-op.
+#
+name: mailing-scratch
+description: "Stalwart Mail Server — step-4 scratch instance. ClusterIP only, nothing routed to it, no DNS. Exists to be measured and deleted."
+namespace: mailing-scratch
+source: infraweaver
+tier: platform
+image: stalwartlabs/stalwart
+
+# No `helm:` section on purpose. All six community Stalwart charts on ArtifactHub
+# report `official: false`, and the vendor presents its own chart as "a minimal,
+# complete reference … or used as a starting point", not as a hosted repo. Taking
+# an unowned third-party chart dependency for the most security-critical service
+# on the cluster is not a trade worth making — see design §1 and research §3.2.
+
+# No `ingressroute:` section on purpose. Nothing is routed to this instance.
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Read by scripts/seed-catalog-secrets.sh → secret/data/platform/mailing-scratch,
+# then pulled into `stalwart-recovery-admin[STALWART_RECOVERY_ADMIN]` by
+# base/externalsecret.yaml.
+#
+# DECLARING THE KEY HERE IS WHAT MAKES IT EXIST. The seeder generates only what
+# catalog.yaml declares, so an undeclared property means OpenBao never holds it,
+# ESO has nothing to sync, and the pod never receives its env — silently, on
+# every fresh install.
+#
+# THE SHARPER EDGE, and the reason this app has its OWN path rather than sharing
+# one: under `deletionPolicy: Retain` ESO aborts the ENTIRE Secret when any single
+# referenced property is missing, rather than skipping that one key. The console's
+# ExternalSecret is Retain, so a mail property added to a shared path and then
+# mistyped would take down the console's whole secret — every key in it, not just
+# the new one. A separate path plus a separate ExternalSecret makes that
+# structurally impossible: the blast radius of a missing mail property is mail.
+# (This ExternalSecret additionally does NOT set Retain, so even its own failure
+# mode is "this key is absent", not "this Secret is absent".)
+#
+# ⚠️ THREE CREDENTIALS FROM DESIGN §6.3 ARE DELIBERATELY NOT DECLARED HERE:
+#   * `console-api-key`  — minted by `stalwart-cli create apikey` against the
+#     running server and written BACK to OpenBao. A seeder-generated random string
+#     would be a value that is not the key: OpenBao would hold a credential that
+#     authenticates nothing, while every dashboard read green. That is precisely
+#     the "control that reports success while doing nothing" shape this repo has
+#     paid for six times. It lands in step 6, written by the addon.
+#   * `relay-password`   — issued by a relay provider. No provider is chosen
+#     (design §12 lists it as unresolved), so there is nothing to hold.
+#   * DKIM private keys  — live at their OWN path `platform/mailing-dkim` under
+#     ESO `dataFrom` (extract-all), so that adding a domain never edits a property
+#     list. The seeder supports exactly one path per app, and that path is written
+#     by the addon on every provisioning event — not seeded. Step 4 proves the
+#     escrow ROUND TRIP by hand (`DkimSignature/get` → `bao kv put` → destroy →
+#     `DkimSignature/set` → compare public keys); shipping an ExternalSecret that
+#     points at a path nothing has written yet would sit permanently red and teach
+#     everyone to ignore it.
+secrets:
+  path: platform/mailing-scratch
+  keys:
+    # Stalwart's break-glass administrator, as `username:password` in
+    # STALWART_RECOVERY_ADMIN. Two keys, composed by the ExternalSecret template.
+    #
+    # WHY IT IS DIRECTORY-INDEPENDENT AND STAYS THAT WAY (design §6.3): this
+    # platform has twice had an Authentik restore leave join tables empty —
+    # `authentik_core_user_groups` = 0 rows, and
+    # `authentik_core_provider_property_mappings` = 0 for 20 providers — so
+    # group-conferred superuser died and OIDC tokens carried no email/groups while
+    # every dashboard read healthy. A mail server whose admin authority depends on
+    # Authentik groups inherits that failure mode exactly. OIDC is for the web
+    # admin convenience path; THIS is the one that still works when the IdP is
+    # holding an empty directory.
+    recovery-admin-user:
+      type: static
+      value: "admin"
+    # 48 characters. The seeder builds passwords as base64 with `=+/` stripped,
+    # so the value is alphanumeric — which matters here and nowhere else: the env
+    # var is split on the FIRST colon, so a password containing ':' would silently
+    # truncate the credential rather than fail loudly.
+    recovery-admin-password:
+      type: password
+      length: 48

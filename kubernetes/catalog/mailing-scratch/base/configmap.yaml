@@ -1,0 +1,130 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# THE GIT / DATA-STORE BOUNDARY, IN ONE FILE.
+#
+# This ConfigMap is the ENTIRE declarative configuration of Stalwart v0.16.
+# One JSON object. One setting. That is not a simplification — it is the shape
+# of the product, and it is worse than the design assumed. Quoting the vendor's
+# own configuration overview:
+#
+#   "Stalwart uses a minimal config.json file passed via command line with the
+#    --config flag. The file contains a single DataStore object specifying the
+#    database location. … Once the server is running, config.json is rarely
+#    touched again. The datastore location is the only setting that cannot be
+#    changed through the API, because the API itself is served out of the
+#    datastore."
+#
+#   "hardened defaults covering 2,400+ settings across 117 configuration objects"
+#
+# ── WHAT GIT OWNS ────────────────────────────────────────────────────────────
+#   * where the database is                              (this file)
+#   * the pod, its image digest, its resources, its placement, its ports,
+#     its security context                               (statefulset.yaml)
+#   * which ports the Service maps onto which container ports  (service.yaml)
+#   * what the pod may talk to                           (ciliumnetworkpolicy.yaml)
+#   * which credentials exist and where they come from   (externalsecret.yaml,
+#                                                         ../../catalog.yaml)
+#
+# ── WHAT GIT DOES NOT OWN, AND ARGOCD DOES NOT RECONCILE ─────────────────────
+# Everything else. Specifically, all of this lives in RocksDB inside the PVC and
+# is invisible to `git diff`, invisible to ArgoCD, and invisible to a code review:
+#
+#     the network listeners and which ports they bind    ← yes, really; see below
+#     TLS certificates and their private keys
+#     domains, principals, mailboxes, app passwords, ACLs
+#     DKIM signature objects INCLUDING THEIR PRIVATE KEYS
+#     SMTP rules, Sieve scripts, spam rules, DNSBLs, greylisting
+#     rate limits, blocked/allowed IP lists, auto-ban state
+#     per-account quotas, and every message
+#
+# ⚠️ "THE LISTENERS ARE NOT IN GIT" IS THE FINDING OF THIS FILE. On v0.16 the
+# listener set is a datastore object, not a config key. The vendor's own reference
+# StatefulSet therefore just declares containerPorts 25/465/587/143/993/110/995/
+# 4190/80/443/8080 — the DEFAULT binds Stalwart creates for itself on first boot,
+# all of them privileged. On THIS cluster those defaults cannot bind: the image
+# carries `cap_net_bind_service` as a FILE capability, and Kyverno
+# `require-drop-all-capabilities` (Enforce, via the namespace label) removes it
+# from the permitted set, at which point a file capability grants nothing. See
+# statefulset.yaml for the ordering that makes that a non-event instead of a
+# CrashLoop, and service.yaml for the high-port mapping it produces.
+#
+# ── WHY THAT IS SURVIVABLE, AND WHAT MAKES IT SO ─────────────────────────────
+# Three consequences, each with an owner (design §4.3):
+#   1. The addon's ledger ConfigMap is the git-visible SHADOW of the mail-object
+#      state — which domains, at which phase, with which selector, against which
+#      zone. It is enumerable and diffable. It arrives in step 2.
+#   2. DKIM private keys are escrowed OUT of the PVC on creation, to OpenBao at
+#      `platform/mailing-dkim`, and re-read to verify before the DKIM DNS record
+#      is ever published. No verified escrow ⇒ no publish. Losing a DKIM private
+#      key is not recoverable by rotating it: archived signatures break and every
+#      receiver cache holding the selector sees a mismatch during the gap. Note
+#      the vendor's own backup tool (Vandelay) EXPLICITLY EXCLUDES server config,
+#      ACLs, DKIM keys and account provisioning — "these remain outside the
+#      account model" — so this escrow is not belt-and-braces, it is the ONLY
+#      thing standing between a lost PVC and permanently broken signatures.
+#   3. Provisioning is SCRIPTED, never clicked. Anything created through
+#      Stalwart's own web admin is invisible to the addon and is reported as
+#      drift, not adopted.
+#
+# ── AND THE BACKUP STORY FOR THE HALF GIT DOES NOT OWN ───────────────────────
+# Three tracks, none of which is sufficient alone (design §4.4):
+#   1. VOLUME     Longhorn snapshot + a Velero `mailing` schedule. Covers
+#                 everything including config and messages. Crash-consistent
+#                 ONLY, and RocksDB recovery under an unclean snapshot is
+#                 UNVERIFIED. Step 4 hard-kills the pod mid-write and restores.
+#                 If RocksDB does not survive that, track 1 IS NOT A BACKUP and
+#                 this design changes. That test is why this namespace exists.
+#   2. LOGICAL    Vandelay, per account, JMAP → SQLite. Portable off Stalwart
+#                 entirely. Excludes config, ACLs, DKIM keys, provisioning.
+#   3. CONFIG+KEYS  the addon: `Domain/query` + `DkimSignature/get` → OpenBao
+#                 (`platform/mailing-dkim`, ESO `dataFrom`) + the ledger
+#                 ConfigMap. Written on every provisioning event and verified by
+#                 READ-BACK, not by the write returning 200.
+# The restore drill is the deliverable. A backup that has never been restored is
+# a hypothesis.
+#
+# ── dnsManagement: Manual ────────────────────────────────────────────────────
+# Stalwart can publish MX/SPF/DKIM/DMARC/MTA-STS/TLS-RPT/SRV/CAA/TLSA straight to
+# Cloudflare on its own schedule. That is switched OFF, forever, and it CANNOT be
+# switched off from this file because `Domain.dnsManagement` is a per-domain field
+# in the datastore. It is therefore an invariant the step-4 runbook must PROVE and
+# the addon must ENFORCE on every `Domain/set`:
+#
+#     stalwart-cli create domain --field name=<d> --field dnsManagement=Manual
+#
+# and then watch the zone read-only for an hour and assert zero writes (§11.2).
+# The reason is not taste: Automatic mode publishes the full record set at once,
+# unordered and undiffed — TLSA on unsigned zones, CAA before the Universal SSL
+# CA set is known, the MTA-STS TXT before the policy endpoint is proven, and a
+# DMARC policy with no evidence behind it — from a Cloudflare credential living
+# inside a PVC, as an unscoped fourth writer against zones that already carry a
+# customer's live SPF. `Manual` keeps Stalwart as the INTENT source (the
+# server-set, read-only `dnsZoneFile` field still holds the computed record set)
+# and leaves the addon as the only actuator. One writer per zone.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stalwart-config
+  namespace: mailing-scratch
+  labels:
+    app.kubernetes.io/name: stalwart
+    app.kubernetes.io/part-of: mailing
+data:
+  # Mounted read-only at /etc/stalwart/config.json and passed as `--config`.
+  #
+  # READ-ONLY IS DELIBERATE AND IT IS WHAT KEEPS THE BOUNDARY CRISP. Stalwart
+  # enters "bootstrap mode" only when config.json is ABSENT — it then serves a
+  # setup wizard on STALWART_RECOVERY_MODE_PORT and WRITES config.json itself on
+  # completion. Under GitOps that is a file two writers own: the wizard writes it
+  # and ArgoCD reverts it. Shipping the file means the wizard never runs, the
+  # server never needs to write to /etc/stalwart, and the split is absolute —
+  # /etc/stalwart is 100% git, /var/lib/stalwart is 0% git.
+  #
+  # `@type` is Stalwart's discriminator for its configuration objects, the same
+  # shape as `DkimSignature.@type = Dkim1Ed25519Sha256`. RocksDB is the vendor's
+  # recommended backend for single-node installations; a shared RocksDB volume
+  # corrupts, which is why this is a StatefulSet with volumeClaimTemplates and
+  # not a Deployment with a shared PVC.
+  config.json: |
+    {"@type":"RocksDb","path":"/var/lib/stalwart/data"}

@@ -1,0 +1,48 @@
+---
+# The scratch namespace for step 4, and the two labels on it are the whole
+# security posture of this app — everything else follows from them.
+#
+# ── `infraweaver.io/type: catalog-app` — READ BEFORE REMOVING ────────────────
+# This is not descriptive metadata. It is the `namespaceSelector` on every
+# ClusterPolicy in kubernetes/core/kyverno/manifests/, several of which are
+# ENFORCE. Carrying it opts this namespace into admission-time BLOCKING for:
+#   require-drop-all-capabilities   Enforce   ← the one that shapes this app
+#   require-seccomp-profile         Enforce
+#   require-resource-limits         Audit
+#   require-pod-probes              Audit     (Deployments only — see below)
+# Every catalog app that carries it is held to that bar; a mail server is the
+# last workload that should be the exception. It is declared HERE, in the app's
+# own manifests, and NOT in kubernetes/core/psa/namespace-labels.yaml — that file
+# says so itself: two ArgoCD Applications applying the same Namespace share one
+# SSA field manager (`argocd-controller`), so each sync prunes the other's labels
+# and the two take turns undoing each other. `gatus` is the precedent and it
+# declares its own Namespace for exactly this reason.
+#
+# ⚠️ MEASURED GAP, STATED SO IT IS NOT ASSUMED AWAY: `require-pod-probes` matches
+# `kinds: [Deployment]` only. This workload is a StatefulSet, so it is OUT of that
+# policy's scope. The probes below are shipped because they are correct, not
+# because anything would have caught their absence. The design assumed that
+# policy covered them; it does not.
+#
+# ── PSA `restricted` ─────────────────────────────────────────────────────────
+# Pod Security Admission is enforced by the API server itself, so unlike a Kyverno
+# webhook it cannot fail open. `restricted` demands exactly what the StatefulSet
+# already sets: runAsNonRoot, no privilege escalation, all capabilities dropped,
+# a RuntimeDefault seccomp profile, and no host namespaces. Setting it here means
+# a future edit that quietly re-adds NET_BIND_SERVICE to get port 25 back is
+# rejected by two independent mechanisms rather than one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mailing-scratch
+  labels:
+    app.kubernetes.io/name: stalwart
+    app.kubernetes.io/part-of: mailing
+    infraweaver.io/type: catalog-app
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    infraweaver.io/purpose: >-
+      Step-4 scratch instance of Stalwart. ClusterIP only, nothing routed to it,
+      no DNS record anywhere. Exists to be measured and then deleted.

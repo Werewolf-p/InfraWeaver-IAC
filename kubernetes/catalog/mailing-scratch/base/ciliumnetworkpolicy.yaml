@@ -1,0 +1,175 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# The "as closed off as possible" artefact for the step-4 instance.
+#
+# ── WHAT ALREADY EXISTS, AND WHY THIS FILE DOES NOT TOUCH IT ────────────────
+# Kyverno `generate-default-deny-cnp` (ClusterPolicy, `synchronize: true`) creates
+# `auto-default-deny` in every namespace not on its exclude list. `mailing-scratch`
+# is not on that list, so this namespace gets it automatically, and what it grants
+# is exactly:
+#
+#     ingress   from any pod in mailing-scratch                    (any port)
+#               from any pod in the `traefik` namespace            (ANY PORT)
+#               from `monitoring` pods labelled
+#                 app.kubernetes.io/name=prometheus, on TCP
+#                 2112, 8080-8085, 9090-9999                       (scrape ranges)
+#     egress    to any pod in mailing-scratch                      (any port)
+#               to kube-system/kube-dns on 53 UDP+TCP, with DNS L7 visibility
+#
+# ⚠️ DO NOT ADD `mailing-scratch` TO THAT POLICY'S EXCLUDE LIST. Kyverno's own
+# admission webhook rejects EVERY update that touches a generate rule's `exclude`
+# ("change of immutable fields for a generate rule is disallowed"). Renaming the
+# rule does not help and `kubectl replace` does not help — only delete-then-create
+# is accepted, and the last time somebody edited that list the core-kyverno-policies
+# Application went permanently OutOfSync, dragged the app-of-apps to Degraded with
+# no message, and hid all real drift behind it for days. The correct move is the
+# one this file makes: leave the generated policy alone and ship an additive one
+# beside it.
+#
+# ── CILIUM UNIONS ALLOW-RULES. THIS FILE CAN ONLY WIDEN. ────────────────────
+# A restrictive policy cannot subtract from a permissive one; the widest rule in
+# the union wins. This repo has the scar: a hand-written NetworkPolicy in
+# `infraweaver-agent` admitted only traefik on 7681 and was DECORATIVE, because a
+# broader generated rule admitted the whole `monitoring` namespace on every port —
+# and an audit used it to reach ttyd and got a writable admin shell.
+#
+# So, honestly: **this file cannot make anything less reachable with an allow
+# rule.** The one thing that CAN narrow is a Cilium DENY rule, and deny beats
+# every allow, present and future. That is the only genuine narrowing below.
+#
+# ── WHY THIS FILE RESTATES ALLOWS THE GENERATED POLICY ALREADY GIVES ────────
+# Not decoration, and not audit-readability alone (though allowlists.yaml sets
+# that precedent explicitly: "DNS is already opened by the airgap baseline;
+# restated here so this hole is self-contained for audit"). The real reason is
+# FAIL-CLOSED. `generate-default-deny-cnp`'s own header records that a generate
+# rule which lacks RBAC "fails SILENTLY, which is the one failure mode that would
+# leave all 31 namespaces exposed while the policy reads as healthy in git" — and
+# under Cilium a namespace with NO policy is default-ALLOW in both directions.
+# Because this policy selects every endpoint in the namespace for BOTH ingress and
+# egress enforcement, `mailing-scratch` stays default-deny with exactly these
+# allows even if the generated policy never arrives or is later deleted. A mail
+# server is the last namespace that should depend on a background controller
+# having succeeded quietly.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# WHAT IS ACTUALLY REACHABLE, IN PLAIN WORDS (union of both policies):
+#
+#   FROM THE INTERNET: nothing. There is no LoadBalancer, no NodePort, no
+#     IngressRoute, no MetalLB VIP and no DNS record. The only path in would be a
+#     Service type this directory does not contain.
+#
+#   FROM INSIDE THE CLUSTER, into the Stalwart pod:
+#     * any pod in `mailing-scratch`, on any port  — this is the open-relay probe's
+#       path, and the reason it is run as a Job in this namespace;
+#     * ANY POD IN THE `traefik` NAMESPACE, ON EVERY PORT — including 8080, the
+#       management/`/healthz`/metrics listener. This comes from the GENERATED
+#       policy, not from this file, and Cilium's union means **this file cannot
+#       take it away.** "Nothing is pointed at it" is true at the routing layer
+#       (no IngressRoute exists, so Traefik has no router for it) and false at the
+#       network layer. Stated here rather than discovered later;
+#     * Prometheus server pods in `monitoring`, on 2112 / 8080-8085 / 9090-9999 —
+#       which includes 8080. No ServiceMonitor ships in step 4, so nothing scrapes
+#       it yet; the reachability exists regardless.
+#
+#   OUT OF THE STALWART POD:
+#     * pods in its own namespace;
+#     * kube-dns on 53 (UDP+TCP). CoreDNS then resolves upstream on the pod's
+#       behalf — that is the one indirect path to the outside world, it is
+#       DNS-only, and Cilium sees every query name at L7;
+#     * and NOTHING ELSE. No `world`. No `kube-apiserver`. No 443. No relay.
+#       A step-4 mail server that carries no mail needs no holes, so it gets none.
+#       Every hole design §4.2 lists for production — world:443 for MTA-STS policy
+#       fetch, 53 to public resolvers for DNSBL, 465 to the chosen relay endpoint,
+#       and `fromEntities: [world]` into 2525/4465 — is a step-5/6 addition, made
+#       one at a time, each with its reason written next to it, in this file.
+#
+#   AND, STRUCTURALLY, FOREVER: TCP/25 outbound is DENIED to every entity.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mailing-scratch-allow
+  namespace: mailing-scratch
+  labels:
+    app.kubernetes.io/name: stalwart
+    app.kubernetes.io/part-of: mailing
+    app.kubernetes.io/managed-by: gitops
+    infraweaver.io/posture: airgapped
+spec:
+  # Every pod in the namespace, not just Stalwart: the open-relay probe Job and
+  # anything else run here is held to the same egress rules, and in particular to
+  # the port-25 deny.
+  endpointSelector: {}
+
+  ingress:
+    # Intra-namespace. The in-cluster open-relay assertion (design §11.3) runs
+    # from here and must be able to reach 2525 and 4465.
+    - fromEndpoints:
+        - {}
+    # Prometheus scrape of the management listener. Narrowed to the single port
+    # Stalwart serves metrics on rather than the generated policy's ranges — which
+    # changes nothing today (union), and is the correct rule if the generated
+    # policy is ever absent.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            k8s:app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - {port: "8080", protocol: TCP}
+    # NOT PRESENT, deliberately: `fromEntities: [world]` into 2525/4465. That is
+    # the step-5 change, and it is gated on external inbound :25 reachability being
+    # PROVEN from an outside host first (design §11.4, §12.1). Publishing an MX or
+    # opening the world to these ports before that measurement is fiction.
+    #
+    # NOT PRESENT, deliberately: a traefik→8443 rule for the web admin. The
+    # generated policy already admits traefik on every port, so writing one would
+    # be a rule that reads like a restriction and is not — see the union note above.
+
+  egress:
+    # Intra-namespace.
+    - toEndpoints:
+        - {}
+    # Cluster DNS. `rules.dns` is what lets Cilium learn FQDNs, which is the
+    # prerequisite for the `toFQDNs` allows step 6 will need for the relay
+    # endpoint — and it means every name this pod resolves is visible in Hubble.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+          rules:
+            dns:
+              - matchPattern: "*"
+
+  egressDeny:
+    # ── THE ONE RULE IN THIS FILE THAT NARROWS ANYTHING. ────────────────────
+    # No egress on port 25. Anywhere. Ever. (design §4.2, §10.)
+    #
+    # This is not a formality. Egress :25 from this cluster's public IP is OPEN —
+    # measured: a TCP connection to gmail-smtp-in.l.google.com:25 returns
+    # `220 mx.google.com ESMTP`. That is the trap, not the opportunity: the PTR
+    # for 203.0.113.10 is `84-82-69-110.fixed.kpn.net` and cannot be changed, so
+    # forward-confirmed reverse DNS can never pass. Mail sent directly gets a 250,
+    # then lands in spam or is silently dropped, and you find out weeks later from
+    # a customer. Design §3.2 therefore refuses direct MTA-to-MTA outbound
+    # permanently and relays everything through an authenticated smarthost on 465.
+    #
+    # An ALLOW-list that merely omits port 25 is a promise. A DENY is a mechanism:
+    # Cilium evaluates deny before allow, so this rule survives any future additive
+    # policy in this namespace — including one written by somebody who has not read
+    # the design, and including the console's own "allow next time" feature. It is
+    # the difference between "the CNP must not contain an egress-25-to-world rule"
+    # and "an egress-25 rule cannot have any effect".
+    #
+    # `all` rather than `world` on purpose: §4.2 says "no egress 25. Anywhere",
+    # and an in-cluster relay hop on 25 would be the same reputation problem with
+    # an extra pod in front of it.
+    - toEntities:
+        - all
+      toPorts:
+        - ports:
+            - {port: "25", protocol: TCP}
