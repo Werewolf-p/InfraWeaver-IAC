@@ -24,7 +24,20 @@ defaultSettings:
   storageMinimalAvailablePercentage: 5
   storageOverProvisioningPercentage: 300
   # Reserve CPU for Longhorn instance managers so replica rebuilds do not starve.
-  guaranteedInstanceManagerCPU: 12
+  #
+  # ⚠️ PER-DATA-ENGINE JSON MAP SINCE 1.12, NOT A NUMBER. This was `12`, and on
+  # 1.12 the manager refused to start at all:
+  #
+  #   Error starting manager: failed to unmarshal setting
+  #   guaranteed-instance-manager-cpu value 12: json: cannot unmarshal number
+  #   into Go value of type map[v1beta2.DataEngineType]string
+  #
+  # That is fatal, not a warning: every longhorn-manager crashlooped, taking
+  # longhorn-csi-plugin and csi-snapshotter with it, and leaving prometheus and
+  # alertmanager stuck in Init waiting on volumes. Volumes stayed attached and
+  # healthy throughout — the data plane survives a dead control plane — but no
+  # new attach could happen.
+  guaranteedInstanceManagerCPU: '{"v1":"12","v2":"12"}'
   # 3 concurrent rebuilds per node — increased from 1 to recover faster after
   # rolling node reboots (which leave ~15 stopped replicas per node). Warm restarts
   # (data dir intact, just reconnecting) are low-I/O; the original 1-limit extended
