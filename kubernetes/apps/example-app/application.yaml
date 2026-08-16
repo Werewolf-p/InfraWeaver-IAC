@@ -8,7 +8,7 @@
 #   4. Push to your branch
 #   5. ArgoCD auto-deploys it!
 repoURL: https://charts.bitnami.com/bitnami
-targetRevision: "23.*"
+targetRevision: "25.0.21"
 chart: nginx
 releaseName: example-app
 namespace: apps-example

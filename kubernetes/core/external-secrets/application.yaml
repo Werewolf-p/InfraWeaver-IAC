@@ -2,7 +2,7 @@
 # The ClusterSecretStore `openbao` lives in manifests/cluster-secret-store.yaml and
 # authenticates via OpenBao kubernetes auth (SA JWT), role `external-secrets`.
 repoURL: https://charts.external-secrets.io
-targetRevision: "0.20.4"
+targetRevision: "2.9.0"
 chart: external-secrets
 releaseName: external-secrets
 namespace: external-secrets
