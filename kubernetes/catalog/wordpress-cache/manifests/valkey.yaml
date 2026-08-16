@@ -132,6 +132,27 @@ spec:
       automountServiceAccountToken: false
       affinity:
         nodeAffinity:
+          # HARD floor: never in zone `hypatia` (cp4, the Hetzner box across the
+          # stretched VLAN). This is required rather than preferred because the
+          # soft rule below is not strong enough on its own, and we know that
+          # because it already failed. On 2026-08-15 this pod was scheduled to
+          # cp4 while yonavaarwater-nl stayed on cp1, and every object-cache read
+          # became a 15.09 ms round trip. A WordPress page does 100+ of them:
+          # that site's p95 went 0.480 s -> 4.639 s (9.7x) while three sibling
+          # sites with no object cache stayed flat at 1.00x. The cache was making
+          # the only site it exists for dramatically SLOWER than no cache at all.
+          #
+          # cp3 remains eligible, so this does not pin the deployment to a single
+          # node and the placement system can still move it.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: NotIn
+                    values: ["hypatia"]
+          # Soft preference for cp1 stays, per the placement system's contract
+          # (see the infraweaver.io/preferred-node annotation above): that is
+          # where yonavaarwater-nl's local-path wp-data PVC is pinned.
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               preference:

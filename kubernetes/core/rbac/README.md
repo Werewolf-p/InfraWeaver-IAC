@@ -107,7 +107,51 @@ Rules:
    # ArgoCD (selfHeal) recreates it within ~3 minutes with a new UID.
    ```
 
-## 4. Retirement ordering — **do not reorder**
+## 4. Retirement ordering — **COMPLETED 2026-08-16**
+
+> ### ✅ Retired. Steps 0–5 are all done; this section is kept as the record.
+>
+> Executed 2026-08-16 with the operator's x509 `system:masters` cert:
+>
+> ```
+> secret "claude-platform-owner-token" deleted
+> clusterrolebinding.rbac.authorization.k8s.io "claude-platform-owner" deleted
+> serviceaccount "claude-platform-owner" deleted
+> ```
+>
+> Verified dead — the old kubeconfig now fails closed:
+>
+> ```
+> $ KUBECONFIG=~/.kube/config-claude-platform-owner kubectl get nodes
+> error: You must be logged in to the server (Unauthorized)
+> ```
+>
+> Also removed in the same pass, because a revoked credential left lying around
+> is still an inventory problem:
+>
+> * `~/.kube/config-claude-platform-owner` on the operations host — deleted.
+> * OpenBao `secret/platform/claude-platform-owner` — `bao kv metadata delete`,
+>   confirmed `No value found`. Nothing referenced it: no ExternalSecret, only
+>   prose in this repo's docs.
+> * The two consumers named in §7 were repointed **first** and verified working
+>   before anything was deleted: `fbhmac-test.sh` and `agent-browser/run.sh`
+>   (plus `agent-browser/.env.agent`) now use `~/.kube/config-platform-productie`.
+>   They need `get deploy`, `get secret` and `create pods/portforward` in six
+>   namespaces; all eight `kubectl auth can-i` checks returned `yes`.
+>
+> **Why the x509 cert and not the new `automation-harness` identity:** those two
+> scripts need `get secrets` and `create pods/portforward`, which
+> `automation-harness` deliberately does not grant and should not. Minting a
+> second standing ServiceAccount token to replace the one being retired would
+> have recreated the exact finding. The operator's x509 cert is issued by Talos,
+> is not stored in-cluster, and cannot be stolen by reading a Secret — which was
+> the whole substance of GAP-C3.
+>
+> Remaining cluster-admin subjects after this change, all reviewed and kept:
+> `Group/system:masters` (break-glass), `velero/velero-server`,
+> `longhorn-system/longhorn-support-bundle` (accepted risk, see §7).
+
+### The original ordering — **do not reorder**
 
 The credential being retired may be the one an operator or automation session is
 currently authenticated with. Removing it before a verified replacement exists

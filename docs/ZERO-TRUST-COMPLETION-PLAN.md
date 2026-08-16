@@ -10,8 +10,11 @@ skip verification. Stop and report if a P0/P1 step fails.
   (`talos-prod-cp1/2/3` = 10.0.0.90/.91/.92). `policyEnforcementMode: default`.
 - **Talos access** works: `~/.talos/config` (also in OpenBao `secret/platform/talosconfig`).
   Always `export TALOSCONFIG=/home/runner/.talos/config` before `talosctl`.
-- **Platform-owner kubeconfig**: `~/.kube/config-claude-platform-owner` (also OpenBao
-  `secret/platform/claude-platform-owner`). Default kubeconfig also works.
+- **Kubeconfig**: `~/.kube/config-platform-productie` (x509 admin, `system:masters`).
+  The former `~/.kube/config-claude-platform-owner` was **retired on 2026-08-16** —
+  its ServiceAccount, ClusterRoleBinding, static token Secret, the local kubeconfig
+  file and the OpenBao entry `secret/platform/claude-platform-owner` are all deleted.
+  The token now returns `Unauthorized`. Do not attempt to use it.
 - **App tier is airgapped** (CNP `airgap-baseline` in: tradesphere, private-test, build,
   infraweaver, infraweaver-system, n8n-prod, game-hub, game-servers). Allowlists live
   for console→argocd, cert-manager, external-dns, tradesphere→Binance.

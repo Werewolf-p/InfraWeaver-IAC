@@ -358,18 +358,26 @@ postgresql:
       limits:
         cpu: 500m
         memory: 1280Mi   # was 768Mi → OOMKilled (exit 137) under normal load; give real headroom
-    # Spread PostgreSQL to CP3 (lightest node after game servers go to CP2)
+    # ⚠️ MUST stay in a low-latency zone with authentik-server. Measured
+    # 2026-08-16: cp1<->cp3 is 0.19-0.63 ms, but either to cp4 (zone=hypatia, a
+    # Hetzner box across the stretched VLAN) is 14.9-16.3 ms. An Authentik
+    # request makes ~7.7 DB round trips, so a server/database split across that
+    # link costs >=125 ms per request -- and Authentik forward-auth backs 41 of
+    # 45 Traefik routes, so it is paid by nearly every surface on the platform.
+    #
+    # This is REQUIRED, not preferred. The previous rule was a weight-60
+    # preference naming talos-prod-cp2, a node that no longer exists, which left
+    # nothing but a soft hint -- and on 2026-08-15 the scheduler duly placed the
+    # server on cp4 and Traefik p95 for authentik went 0.274 s -> 3.881 s.
     affinity:
       nodeAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 80
-          preference:
-            matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+          - matchExpressions:
+            - key: topology.kubernetes.io/zone
+              operator: NotIn
               values:
-              - talos-prod-cp2
-              - talos-prod-cp1
+              - hypatia
 
 # No Redis. The authentik chart dropped the bundled Redis subchart in 2026.x and
 # the application dropped Redis entirely in 2025.10; the standalone StatefulSet
@@ -428,17 +436,17 @@ server:
               app.kubernetes.io/name: authentik
               app.kubernetes.io/component: server
           topologyKey: kubernetes.io/hostname
-    # Prefer CP1/CP2 — CP3 has PostgreSQL + Prometheus
+    # REQUIRED: never across the stretched VLAN from PostgreSQL. See the note on
+    # postgresql.affinity above -- ~15 ms x ~7.7 DB round trips per request.
+    # Leaves cp1 and cp3 eligible, so this does not collapse onto a single node.
     nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 60
-          preference:
-            matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: In
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: NotIn
                 values:
-                  - talos-prod-cp1
-                  - talos-prod-cp2
+                  - hypatia
   resources:
     requests:
       cpu: 200m
@@ -467,16 +475,17 @@ worker:
               app.kubernetes.io/name: authentik
               app.kubernetes.io/component: worker
           topologyKey: kubernetes.io/hostname
+    # REQUIRED: never across the stretched VLAN from PostgreSQL. See the note on
+    # postgresql.affinity above -- ~15 ms x ~7.7 DB round trips per request.
+    # Leaves cp1 and cp3 eligible, so this does not collapse onto a single node.
     nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 60
-          preference:
-            matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: In
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: NotIn
                 values:
-                  - talos-prod-cp1
-                  - talos-prod-cp2
+                  - hypatia
   # Give enough time for Django migrations on a fresh DB (292+ migrations)
   # NOTE: Authentik chart does NOT support livenessProbe.enabled field — use raw k8s probe fields only
   startupProbe:

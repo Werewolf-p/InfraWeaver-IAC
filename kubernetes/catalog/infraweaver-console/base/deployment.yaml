@@ -52,6 +52,26 @@ spec:
           matchLabels:
             app: infraweaver-console
       affinity:
+        # Keep every replica out of zone `hypatia` (cp4, the Hetzner box across
+        # the stretched VLAN). Measured 2026-08-16 against /api/health, straight
+        # at the pod with no Traefik and no auth in the path:
+        #   cp1 10.6 ms | cp3 14.5 ms | cp4 57.0 ms
+        # The console fans out to the API, ArgoCD and the Kubernetes API, all of
+        # which live in the other two zones, so a cp4 replica pays that crossing
+        # several times per page. With 4 replicas behind one Service, two of them
+        # on cp4 meant roughly half of all console traffic was 5.4x slower --
+        # which is a large part of "the console feels slower than earlier".
+        #
+        # HA is unaffected: cp1 and cp3 both remain eligible and the
+        # podAntiAffinity below still spreads replicas across them.
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: NotIn
+                values:
+                - hypatia
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
