@@ -124,12 +124,18 @@ No console rebuild is needed to publish. Rules:
   parseable version.
 - **Seeding:** a channel with no stored entry reads as the console image's
   bundled version. Reads never write.
-- **Auto-heal:** `reconcileChannelToDeliverable()` runs for *every* channel at
-  the start of a sweep, and again inside `updateConnectorPlugin` when the artifact
-  is missing. If a channel's pin cannot be built but a **strictly newer**
-  deliverable exists, the pin is advanced to it (actor
-  `system:auto-advance-on-sweep` / `-on-update`). It never downgrades, so a
-  deliberate rollback pin is respected.
+- **Auto-heal:** `reconcileChannelToDeliverable()` runs at the start of a sweep
+  and again inside `updateConnectorPlugin` when the artifact is missing. If a
+  channel's pin cannot be built but a **strictly newer** deliverable exists, the
+  pin is advanced to it (actor `system:auto-advance-on-sweep` / `-on-update`).
+  It never downgrades, so a deliberate rollback pin is respected.
+
+  > ⚠️ **It used to run for EVERY channel, and that was a defect** — see §5.1.
+  > As of platform `a53a7ea0` it runs **only for a channel declared
+  > `autoAdvance` in `channels.ts`, which is `alpha` alone**. prod and beta move
+  > only through `promote` / `set-version` / `rollback`; a stale pin there now
+  > fails closed at install time with an error naming the remedy. **Not yet in
+  > the running console image.**
 
 ### Hop 2 — the version must be materializable as bytes
 
@@ -164,6 +170,12 @@ only health-checks; it does not install.) Two operator-initiated paths:
   `target = registry[resolveChannel(site)]` and **skips** any site whose
   *recorded* `connectorVersion` already compares `>= target` (outcome `already`).
   Otherwise it calls `updateConnectorPlugin(site, target, channel)`.
+
+  > As of platform `a53a7ea0` that recorded-version check is only a cheap
+  > pre-filter. The authoritative "is there anything to do?" answer comes from
+  > `updateConnectorPlugin` probing the pod, so a stale record can no longer
+  > cause a downgrade — it comes back as `already` or as a named refusal. See
+  > §5.2.
 
 After the install, `updateConnectorPlugin` runs a signed `health.check`, persists
 the version the plugin itself reports, and re-pushes the site's current tier
@@ -263,23 +275,50 @@ use `node -e` with `fetch`.
 
 ## 5. Known gaps and trip hazards
 
-1. **Channels do not yet deliver different code.** With no
-   `IWSL_CONNECTOR_DIR_<CHANNEL>` volumes, all three channels resolve to the one
-   `main`-tracking git-sync dir. Combined with the forward-only auto-heal, the
-   first sweep after `main` moves silently advances **prod, beta and alpha alike**
-   to `main`'s version. Assigning a site to alpha today changes *which board
-   entry* it reads, not *which bytes* it gets. To make alpha real, add a second
-   git-sync loop tracking an alpha ref into `/connector-src/plugin-alpha` and set
-   `IWSL_CONNECTOR_DIR_ALPHA` on the console container (prod overlay
-   `kubernetes/catalog/infraweaver-console/overlays/prod/kustomization.yaml`).
+1. **Channels did not deliver different code, and a sweep could push `main` to
+   prod.** ~~With no `IWSL_CONNECTOR_DIR_<CHANNEL>` volumes, all three channels
+   resolve to the one `main`-tracking git-sync dir. Combined with the
+   forward-only auto-heal, the first sweep after `main` moves silently advances
+   **prod, beta and alpha alike** to `main`'s version.~~
+
+   **FIXED, NOT YET DEPLOYED** — platform `a53a7ea0`, infra `c760bdf`
+   (unpushed). Two halves:
+
+   - Auto-advance is now `alpha` only (`ChannelDefinition.autoAdvance`,
+     enforced inside `reconcileChannelToDeliverable`). `main` can no longer
+     reach prod or beta because a sweep ran.
+   - Bytes come from a **version-addressed artifact store**,
+     `IWSL_CONNECTOR_VERSIONS_DIR=/connector-src/versions`, one directory per
+     Connector version, filled by the *existing* `connector-git-sync` sidecar.
+     A channel is then a real version pin: alpha can ride 0.57.0 while prod
+     stays on 0.56.0, and a promote is immediately deliverable. `resolveDir`
+     also now **throws** when a declared `IWSL_CONNECTOR_DIR_<CHANNEL>` is
+     unusable, instead of quietly serving the shared `main` tree.
+
+   ⚠️ After the console image ships, **re-pin the board**: it currently reads
+   `prod/beta/alpha = 0.54.2`, all written by `system:auto-advance-*`, and with
+   auto-advance gone from prod/beta those pins fail closed until an operator
+   promotes or sets a deliverable version.
 2. **In-pod `tar | kubectl exec` deploys are invisible to the console until the
    next health sweep.** The sweep's skip check reads the *recorded*
    `connectorVersion` on the link record, which such a deploy does not update.
    For up to an hour the console believes the site is older than it is, and a
-   sweep in that window will reinstall (and, if the pod is genuinely ahead of the
-   channel target, **downgrade** it — `updateConnectorPlugin` has no
-   "pod already newer" guard). Fix the record immediately after a manual deploy
-   with a per-site `{"action":"health"}`, which persists the reported version.
+   sweep in that window will reinstall. Fix the record immediately after a
+   manual deploy with a per-site `{"action":"health"}`, which persists the
+   reported version.
+
+   ~~and, if the pod is genuinely ahead of the channel target, **downgrade** it
+   — `updateConnectorPlugin` has no "pod already newer" guard~~
+
+   **FIXED, NOT YET DEPLOYED** — platform `a53a7ea0`. `updateConnectorPlugin`
+   now reads the version the **pod** actually has on disk before installing
+   (`readConnectorVersionScript`) and `connector-install-guard.ts` decides:
+   older target ⇒ refused with a named reason quoting both versions; equal ⇒
+   `already` with no reinstall; newer ⇒ install. A deliberate rollback needs an
+   explicit per-call reason that lands in the audit log, and the fleet sweep
+   cannot pass one. Measured while writing this: zonnevaarwater-nl's pod ran
+   **0.56.4** while the record said **0.56.3** — the drift is real and routine,
+   not theoretical.
 3. **The release board pins are advisory until §5.1 lands.** They can only ever
    name a version the current source can build; anything else fails closed at
    install time.
