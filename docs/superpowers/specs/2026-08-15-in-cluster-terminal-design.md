@@ -191,10 +191,51 @@ clean.
 
 **Phase 3 — attribution (partial).** `-H X-authentik-username` on the admin
 shell, so `TTYD_USER` carries the signed-in identity and recordings are
-attributable. Verified in-pod: **407 without the header, 200 with it** — it fails
-closed, which also means a direct in-cluster connection bypassing the proxy gets
-no shell. T1/T2 (Kubernetes impersonation) remain open; this is attribution of
-the *session*, not of each API call.
+attributable. Verified in-pod: **407 without the header, 200 with it**.
+
+> ⚠️ **THE SENTENCE THAT USED TO FOLLOW HERE WAS WRONG, AND IT COST A BREACH.**
+> It read: *"it fails closed, which also means a direct in-cluster connection
+> bypassing the proxy gets no shell."* The premise is true and the conclusion
+> does not follow. ttyd's `check_auth()` verifies the header is **present** and
+> nothing else — no value, no signature, no notion of who set it. "407 without
+> the header" only means an attacker has to type one. On 2026-08-16 an audit
+> sent `curl -H 'X-authentik-username: totally-made-up-attacker'` from an
+> unrelated pod in `monitoring` and got **HTTP 200**, then upgraded `/ws` to
+> **101**. The read-only shell was worse: no `-H` at all, 200 to anyone.
+>
+> The deeper error is structural and worth more than the bug. §2.6 E2 says the
+> backend must not be reachable on a path that bypasses the proxy, and this
+> document treated the NetworkPolicy as satisfying it. That NetworkPolicy was
+> decorative: the Kyverno-generated `auto-default-deny` CiliumNetworkPolicy
+> additively re-allowed the whole `monitoring` namespace on every port, and
+> **Cilium unions allow-rules**. So the header gate was safe only because of the
+> network rule, and the network rule was never checked because the header gate
+> existed. **Two controls that are each only safe because of the other are one
+> control with extra words**, and neither will be audited on its own.
+>
+> Fixed 2026-08-16, as two controls that hold independently:
+> * **Generated CNP** narrowed to the Prometheus pods on metrics ports only
+>   (2112, 8080-8085, 9090-9999). 7681 is outside every range.
+>   `kubernetes/core/kyverno/manifests/resource-governance-policies.yaml`.
+> * **mTLS**: ttyd runs `-S -C -K -A`, so libwebsockets sets
+>   `LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT` and the handshake
+>   demands a certificate signed by a dedicated in-namespace CA whose only key
+>   holder is Traefik. A forged header never reaches HTTP.
+>   `kubernetes/platform/agent/manifests/certificate.yaml`.
+>
+> Measured after the fix, from a pod that **can** reach 7681 (so the network is
+> deliberately not the control under test): TCP open, then every HTTP attempt
+> dies at `curl exit 55` immediately after the server's `Request CERT (13)` —
+> no status code at all. Through Traefik with the client certificate: 200, and
+> `/ws` → 101.
+>
+> E2 is now satisfied by the transport, not by an assumption about the network.
+> **Do not restate "`-H` fails closed" as an authentication property.** It is
+> attribution, plus a fail-closed assertion that forward-auth-admin was
+> traversed. That is all it has ever been.
+
+T1/T2 (Kubernetes impersonation) remain open; this is attribution of the
+*session*, not of each API call.
 
 **Phase 4 — audit shipped off-pod.** A read-only sidecar tails every asciicast to
 stdout, where Loki already scrapes container logs. Verified end to end: a canary
@@ -217,6 +258,31 @@ Stated plainly so nobody reads the above as more than it is:
   the container is uid 1000 with no apt.
 * **C4** — a live session outlives its authorisation, as in every surveyed product.
 * **E4** — still running a ~2.5-year-old ttyd release.
+
+### Corrections applied 2026-08-16
+
+* **E4/E5 were not actually satisfied on 2026-08-15.** The purpose-built image's
+  own ttyd could never start: the runtime stage installed `libwebsockets17` but
+  not `libwebsockets-evlib-uv`, which Debian ships separately and which the
+  build stage got only transitively from `libwebsockets-dev`. Every invocation
+  died with `lws_create_context: unable to load evlib plugin evlib_uv`. The
+  smoke test did not catch it because `ttyd --version` returns before any
+  context is created. The pods looked healthy because `$HOME/bin` precedes
+  `/usr/local/bin` on PATH and the persistent home volume still carried the
+  curl-installed **ttyd 1.7.7 release from 2024-03-30** — the exact binary the
+  image exists to replace. Fixed: the plugin is installed, the build smoke test
+  binds a port and serves a request, both Deployments invoke
+  `/usr/local/bin/ttyd` by absolute path, and the stale binary is deleted from
+  the volume on every start.
+* **C4 is now partially satisfied.** `TMOUT=900` gives an idle timer that does
+  not reset on resize or reconnect (S5). A `timeout 3600` around the attach caps
+  one connection at an hour; ttyd's client reconnects on socket close, and a
+  reconnect is a fresh HTTP request back through `forward-auth-admin`, so the 1h
+  Authentik cookie is genuinely re-checked — without killing the tmux session,
+  so running work survives the re-auth. A daily reaper CronJob bounds the tmux
+  server itself; `agent-admin` had no reaper at all before.
+* **S1/S6 are satisfied** — tmux is in the image and both shells run
+  `tmux new -A -s ops`, so a refresh reattaches.
 
 ---
 
