@@ -19,6 +19,16 @@ spec:
     metadata:
       annotations:
         infraweaver.io/rebalance-memory: 'true'
+        # ⚠️ Velero MUST NOT file-system-back-up the NAS share.
+        # `velero-weekly-localpath` sets defaultVolumesToFsBackup: true, which
+        # opts in EVERY volume in this namespace — including this SMB mount to
+        # the TrueNAS media library. On 2026-08-16 that swept 48.79 GiB of media
+        # into the 50 GiB MinIO store, filled it to 100%, and every Velero backup
+        # cluster-wide has failed since. The transfer itself was Canceled, so it
+        # protected nothing and cost everything.
+        # The media lives on the NAS and is backed up there; only the local-path
+        # config volume needs Velero.
+        backup.velero.io/backup-volumes-excludes: nas-media-ro
       labels:
         app.kubernetes.io/name: jellyfin
     spec:

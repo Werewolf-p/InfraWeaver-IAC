@@ -16,6 +16,12 @@ spec:
       app.kubernetes.io/name: nextcloud
   template:
     metadata:
+      annotations:
+        # ⚠️ Velero MUST NOT file-system-back-up the NAS share — see the same
+        # note in jellyfin. `velero-weekly-localpath` opts in every volume in
+        # this namespace; on 2026-08-16 the pair of NAS mounts filled the 50 GiB
+        # MinIO store to 100% and broke every backup cluster-wide.
+        backup.velero.io/backup-volumes-excludes: nas-media-rw
       labels:
         app.kubernetes.io/name: nextcloud
     spec:

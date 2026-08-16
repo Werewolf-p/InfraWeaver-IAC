@@ -253,12 +253,32 @@ rules:
       - serviceaccounts
       - events
     verbs: ["get", "list", "watch", "update", "patch", "delete"]
+  # ⚠️ SECOND ATTEMPT AT THIS BOUNDARY. Removing `create pods` + `pods/exec`
+  # earlier today closed the wrong half: a Deployment's container command and its
+  # `serviceAccountName` are both attacker-controlled, so you never needed exec.
+  # Re-proven live AFTER that fix:
+  #
+  #   kubectl apply --dry-run=server -f <deployment, serviceAccountName:
+  #     infraweaver-console> --as=system:serviceaccount:infraweaver-agent:agent-admin
+  #   -> deployment.apps/audit-escalation-probe created (server dry run)
+  #
+  # and `infraweaver-console` holds cluster-wide `argoproj.io/applications`
+  # write, which ArgoCD applies as `argocd-application-controller` (`*` on
+  # `*/*`), into an AppProject whose clusterResourceWhitelist is `*/*`.
+  #
+  # `update`/`patch` are gone for the same reason `create` is: both can rewrite a
+  # pod template's serviceAccountName. Restarting a workload does not need them —
+  # delete the pod and the controller recreates it.
+  #
+  # ⚠️ Do NOT restore write here to make the shell more useful. The real fix is a
+  # Kyverno rule constraining which `serviceAccountName` this identity may name;
+  # until that exists, read + delete is the honest boundary.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
