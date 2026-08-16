@@ -229,6 +229,17 @@ spec:
         # this decision.
         - name: WORDPRESS_CLIENT_ROOMS_ENABLED
           value: "1"
+        # Headers middleware newly provisioned WordPress site IngressRoutes
+        # reference (<namespace>/<name>). wp-secure-headers (external-routes,
+        # 2026-08-16) is the PUBLIC-SITE variant of secure-headers: identical
+        # except X-Frame-Options SAMEORIGIN (DENY broke Elementor's same-origin
+        # editor preview) and no noindex X-Robots-Tag (which was de-indexing
+        # public sites). The 7 existing site routes were repointed live the same
+        # day; this keeps every FUTURE site consistent with them. Unset, the
+        # console falls back to traefik/secure-headers — the admin-portal
+        # variant — which reintroduces both regressions for new sites.
+        - name: WORDPRESS_SECURE_HEADERS_MIDDLEWARE
+          value: "traefik/wp-secure-headers"
         # ── The remaining five NEVER_DEFAULTED gates (2026-08-03) ────────────
         # Set explicitly, on the operator's repeated and specific instruction to
         # enable every feature. PLATFORM_ENABLE_ALL still structurally cannot
