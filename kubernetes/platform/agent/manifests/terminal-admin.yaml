@@ -227,18 +227,32 @@ metadata:
   labels:
     app.kubernetes.io/name: agent-admin
 rules:
+  # ⚠️ `create` on pods and ALL of `pods/exec` were removed 2026-08-16.
+  #
+  # The cluster-wide pair was already removed once, on 2026-08-15, because
+  # "create a pod as any ServiceAccount, then exec into it" IS "widen yourself",
+  # spelled in a different API group. It survived HERE, scoped to the four bound
+  # namespaces — and that was still enough. Proven by server-side dry-run:
+  # create a pod as SA `infraweaver-console` in `infraweaver-console`, exec in,
+  # and that SA holds cluster-wide `argoproj.io/applications` write, which ArgoCD
+  # then applies as `argocd-application-controller` — `*` on `*/*`. Cluster-admin,
+  # two hops from a shell. `infraweaver-api` is a second path via cluster-wide
+  # secrets/configmaps write.
+  #
+  # A namespace grant is not a boundary when the namespace contains a
+  # ServiceAccount more powerful than the grant itself. Restarting a workload
+  # does not need either verb: delete the pod, or patch the Deployment.
   - apiGroups: [""]
     resources:
       - pods
       - pods/log
-      - pods/exec
       - pods/portforward
       - services
       - endpoints
       - persistentvolumeclaims
       - serviceaccounts
       - events
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "deployments/scale", "statefulsets/scale"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -384,7 +398,37 @@ metadata:
     app.kubernetes.io/name: agent-admin
     app.kubernetes.io/component: terminal-admin
 spec:
-  replicas: 1
+  # ⚠️ SCALED TO ZERO 2026-08-16 — LIVE SECURITY EXPOSURE, DO NOT SCALE UP UNTIL FIXED
+  #
+  # An audit obtained a WRITABLE, UNAUTHENTICATED admin shell on this service from
+  # an unrelated pod in the `monitoring` namespace. Two independent failures had to
+  # line up, and both are still true as of this commit:
+  #
+  #  1. NETWORK. The k8s NetworkPolicy here admits only the `traefik` namespace on
+  #     7681 — but the Kyverno-generated `auto-default-deny` CiliumNetworkPolicy in
+  #     this namespace ADDITIVELY re-allows `fromEndpoints: [{}]` (the whole
+  #     namespace), `traefik`, AND `monitoring`, with NO port restriction. Cilium
+  #     UNIONS allow-rules, so the NetworkPolicy is decorative. `monitoring` runs
+  #     node-exporter on every node. You cannot fix a too-permissive allow by
+  #     adding another allow — the generated rule itself has to change.
+  #  2. AUTH. ttyd's `-H` header gate is PRESENCE-ONLY. A forged
+  #     `X-authentik-username: anything` returns HTTP 200 and upgrades /ws to 101.
+  #     The design doc's safety argument for `-H` rests entirely on the
+  #     NetworkPolicy in (1) admitting traefik alone, which it does not.
+  #
+  # Chained with the still-live `create pods` + `pods/exec` in
+  # agent-admin-workloads, that shell reaches cluster-admin one namespace over:
+  # create a pod as SA `infraweaver-console`, exec in, and that SA holds
+  # cluster-wide `argoproj.io/applications` write — which ArgoCD applies as
+  # `argocd-application-controller` (`*` on `*/*`).
+  #
+  # Scaled in GIT, not with `kubectl scale`: this Application runs selfHeal=true
+  # and reverted a live scale-to-0 within seconds.
+  #
+  # To restore: fix the generated CNP so `monitoring` may reach scrape ports ONLY,
+  # make `-H` verify something unforgeable (or drop it and rely on the proxy being
+  # the sole path), then set this back to 1.
+  replicas: 0
   strategy: { type: Recreate }
   selector:
     matchLabels:
