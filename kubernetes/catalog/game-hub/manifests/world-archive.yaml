@@ -1,0 +1,345 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Nightly off-node archive of the GT New Horizons world
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS — and why the backup that was supposed to cover it does not
+# ---------------------------------------------------------------------------
+# `game-hub/gt-new-horizons-container-local` is a `local-path-retain` PVC, 30Gi
+# claimed / 2.9G actual, pinned to ONE node's disk (PV nodeAffinity →
+# talos-prod-cp1, measured 2026-08-16). The running server pod mounts THIS PVC;
+# the two `longhorn-game` / `longhorn` PVCs of similar name are detached
+# leftovers. Longhorn cannot see a local-path volume, so none of the three
+# RecurringJobs touch it.
+#
+# ⚠️ `velero-daily-gamehub` DOES NOT BACK THIS UP, and has never backed it up.
+# Measured 2026-08-16 on the run that reported Completed:
+#
+#     kubectl -n velero get podvolumebackups.velero.io \
+#       -l velero.io/backup-name=velero-daily-gamehub-20260816083024
+#     → No resources found.        (ZERO PodVolumeBackups. Zero bytes.)
+#
+# The cause is structural, not a misconfiguration anyone can tune away: the
+# local-path provisioner emits PVs whose source is `hostPath`
+#   kubectl get pv pvc-9e4bfeab-682f-41ee-8640-ad1000f36f94 -o jsonpath='{.spec.hostPath.path}'
+#   → /opt/local-path-provisioner/pvc-…_game-hub_gt-new-horizons-container-local
+# and Velero's file-system backup skips hostPath volumes by design. So
+# `defaultVolumesToFsBackup: true` can never reach a local-path PVC. This is the
+# same "green job that backs up nothing" shape recorded as GAP-C2 for the
+# Longhorn jobs — see the corrected comment in
+# kubernetes/platform/velero/values.yaml.
+#
+# The 08:30 schedule time over there was chosen to sit after a scale-up window
+# that does not exist either: game-hub-scale-down / -up are shipped DORMANT
+# (scaleDownEnabled=false, targetDeployments="" — see ../scale-schedule.yaml and
+# the live ConfigMap). Both jobs log "…is disabled; exiting". The server runs
+# 24/7. There is no quiet window to schedule into.
+#
+# WHAT THIS JOB COPIES, AND WHY IT IS QUIESCED RATHER THAN CRASH-CONSISTENT
+# ---------------------------------------------------------------------------
+# The obvious design — tar the live world directory — is crash-consistent only:
+# a chunk file half-written by the server lands in the archive half-written.
+# That is not needed here, because the server already produces a consistent
+# world snapshot for us. Measured inside the running pod 2026-08-16:
+#
+#     /home/container/backups/2026-08-16-14-59-22.zip   177,152,156 bytes
+#     …one every 30 minutes, 12 retained ≈ 6 hours of history
+#     unzip -l → World/…   (the world tree, written by the server's own
+#                           backup routine with the save flushed)
+#
+# Those zips are the best-quiesced artefact available without stopping the
+# server, and they already exist. This job's whole job is to get one of them
+# OFF cp1's disk before it ages out. Retention inside the pod is ~6 hours, so
+# today the entire history dies with the node it sits on.
+#
+# The zip carries `World/` ONLY. A world without its modpack does not load, so
+# the second artefact captures the server identity: config, coretweaks,
+# libraries, mods, World2, the jars and the top-level server files. That set is
+# ~880M and changes only on a modpack update, hence its shorter retention.
+#
+# HOW THE ARCHIVE REACHES OFF-BOX STORAGE — the trick is the destination
+# ---------------------------------------------------------------------------
+#   00:00  local-snapshot-daily     (Longhorn, retain 3)
+#   00:15  authentik-pg-dump
+#   00:20  nextcloud-pg-dump
+#   00:25  n8n-pg-dump
+#   00:30  THIS JOB  → world zip + server tarball onto the LONGHORN PVC below
+#   01:00  truenas-backup-daily     (Longhorn → nfs://10.1.0.135:/mnt/pool/k8s-longhorn-backups)
+#
+# Writing to a `longhorn-retain` PVC moves the data off a node-pinned local disk
+# that nothing can back up and onto a volume the existing recurring jobs already
+# ship to the NAS. Longhorn auto-labels any volume with no recurring job of its
+# own into the group `default`, and all three RecurringJobs target
+# [default, truenas-backup] — so enrolment is a consequence of being a Longhorn
+# volume. A `recurring-job-group.longhorn.io/*` annotation on the PVC would NOT
+# propagate to the Volume CR and is deliberately absent (measured; recorded at
+# length in kubernetes/core/longhorn/manifests/backup-jobs.yaml).
+#
+# VERIFY ENROLMENT AFTER THE FIRST SYNC — do not assume it:
+#   V=$(kubectl -n game-hub get pvc gt-new-horizons-archive -o jsonpath='{.spec.volumeName}')
+#   kubectl -n longhorn-system get volumes.longhorn.io "$V" --show-labels
+#   # WANT: recurring-job-group.longhorn.io/default=enabled
+#
+# RPO / RTO
+# ---------
+# RPO ≈ 24h for the copy that survives loss of cp1 (the NAS copy), and ≈ 30
+# minutes for the in-pod zips while cp1 is alive. RTO = restore the two
+# artefacts into a fresh PVC, unzip the world, untar the server, start.
+#
+# ⚠️ WHAT THIS DOES NOT BUY. The NAS VM shares a Proxmox host with cp1. If that
+# HOST dies, the archive and the original die together. This closes "cp1's disk
+# is lost", not "the host is lost"; the latter needs a genuinely off-site target
+# and is not something a schedule change can fake.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gt-new-horizons-archive
+  namespace: game-hub
+  labels:
+    app.kubernetes.io/name: gt-new-horizons-archive
+    infraweaver.io/automation: backup
+spec:
+  accessModes: [ReadWriteOnce]
+  # longhorn-retain: reclaimPolicy Retain, so `git revert`-ing this file releases
+  # the PV instead of destroying accumulated archives.
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      # Sized against MEASURED usage, not the 30Gi claim of the source:
+      #   5 world zips   × 180M ≈ 0.9G   (measured 141M→177M across 2026-08-16)
+      #   2 server tars  × 560M ≈ 1.1G   (880M raw: mods 411M, coretweaks 94M,
+      #                                   config 44M, libraries 31M, World2 25M,
+      #                                   jars ~20M — jars do not compress)
+      #   steady state   ≈ 2.0G
+      # 6Gi is 3× headroom for world growth, not a forecast. It costs 12G of
+      # physical Longhorn (numberOfReplicas: 2 on the longhorn-retain class).
+      storage: 6Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gt-new-horizons-archive
+  namespace: game-hub
+  labels:
+    app.kubernetes.io/name: gt-new-horizons-archive
+    infraweaver.io/automation: backup
+spec:
+  schedule: "30 0 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # 20 minutes. The measured run copies ~180M and compresses ~880M, which is
+      # single-digit minutes; the deadline exists so a wedged Job cannot still be
+      # holding the volume when truenas-backup-daily starts at 01:00.
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: gt-new-horizons-archive
+            infraweaver.io/automation: backup
+        spec:
+          restartPolicy: OnFailure
+          # Set on the POD, not the ServiceAccount: Kubernetes never copies
+          # automountServiceAccountToken down from the SA to the pod. This job
+          # talks to no API and needs no identity.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            # 1000:1000 = the `ubuntu` uid the server runs as. MEASURED inside
+            # the running pod: /home/container and its children are 1000:1000
+            # mode 2775. A different uid cannot read the world.
+            runAsUser: 1000
+            runAsGroup: 1000
+            # The Longhorn volume is formatted root:root on first attach; fsGroup
+            # is what makes /archive writable for gid 1000. Without it the very
+            # first run fails on "Permission denied" at 00:30 with nobody
+            # watching.
+            #
+            # fsGroup does NOT touch the source volume: hostPath is not an
+            # ownership-managed volume plugin, so kubelet applies no chown to it.
+            # The source is ALSO mounted readOnly below — belt and braces, because
+            # this must never modify a live game world.
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: archive
+              # Already in the cluster's image census (restrict-image-registries
+              # allowlist) and already cached on the nodes. busybox gives tar,
+              # gzip, sha256sum and find; nothing else is needed.
+              image: docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              # Must satisfy LimitRange game-hub-limits (../manifests/resource-quota.yaml):
+              # min cpu 100m / memory 256Mi against requests AND limits, max cpu 6 /
+              # memory 12Gi. A LimitRange has no selector, so a short-lived helper
+              # Job cannot be exempted from the floor — it matches the floor instead.
+              resources:
+                requests: {cpu: 200m, memory: 256Mi}
+                limits:   {cpu: "1",  memory: 512Mi}
+              env:
+                - name: HOME
+                  value: /tmp
+              command:
+                - sh
+                - -ec
+                - |
+                  set -o pipefail
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  SRC=/world-src
+                  DST=/archive
+
+                  # ── 1. The world: copy the server's newest own snapshot ──────
+                  # These are written by the server with the save flushed, so the
+                  # archive is QUIESCED. Tarring $SRC/World directly would be
+                  # crash-consistent, which is materially worse for a live
+                  # Minecraft server holding region files open.
+                  NEWEST="$(ls -1t "$SRC"/backups/*.zip 2>/dev/null | head -1)"
+                  if [ -z "$NEWEST" ]; then
+                    echo "FATAL: no server-produced world snapshot in $SRC/backups"
+                    echo "       the in-server backup routine has stopped; refusing to"
+                    echo "       report success on a world nobody has snapshotted."
+                    exit 1
+                  fi
+
+                  # A snapshot older than 26h means the in-pod backup routine died
+                  # days ago and this job would otherwise keep re-archiving the
+                  # same stale world while reporting OK every night. That is the
+                  # exact failure mode this file exists to stop being repeated.
+                  if [ -n "$(find "$NEWEST" -mtime +1 2>/dev/null)" ]; then
+                    echo "FATAL: newest world snapshot $NEWEST is >26h old"
+                    exit 1
+                  fi
+                  # Softer signal: the routine runs every 30 minutes, so anything
+                  # over 6h is already wrong even though it is still worth saving.
+                  if [ -n "$(find "$NEWEST" -mmin +360 2>/dev/null)" ]; then
+                    echo "WARN: newest world snapshot $NEWEST is >6h old — the"
+                    echo "      in-server backup routine may have stopped."
+                  fi
+
+                  WORLD="$DST/gtnh-world-$STAMP.zip"
+                  cp "$NEWEST" "$WORLD"
+
+                  # A copy that does not match its source is not a backup. This is
+                  # the integrity gate: it reads both files end to end, so a short
+                  # write or a full volume fails HERE rather than during an
+                  # incident.
+                  SRC_SUM="$(sha256sum "$NEWEST" | cut -d' ' -f1)"
+                  DST_SUM="$(sha256sum "$WORLD"  | cut -d' ' -f1)"
+                  if [ "$SRC_SUM" != "$DST_SUM" ]; then
+                    echo "FATAL: sha256 mismatch copying $NEWEST -> $WORLD"
+                    rm -f "$WORLD"
+                    exit 1
+                  fi
+                  echo "$DST_SUM  $(basename "$WORLD")" > "$WORLD.sha256"
+                  echo "world:  $(basename "$NEWEST") -> $WORLD ($(stat -c%s "$WORLD") bytes)"
+
+                  # ── 2. The server identity: what the world zip does NOT carry ─
+                  # An explicit include list rather than an exclude list, so that
+                  # what is protected is stated rather than inferred. Deliberately
+                  # OUT: backups/ (2.0G, the source of artefact 1 — copying it
+                  # would triple the footprint), logs/, crash-reports/, lost+found,
+                  # hs_err_*.log, minetweaker.log, .healer.log, updates.html,
+                  # startserver-java9.bat, and World/ (artefact 1 has the quiesced
+                  # copy).
+                  #
+                  # scripts/, serverutilities/ and visualprospecting/ are in this
+                  # list because the "not captured" report below caught them
+                  # falling out of a first draft: scripts/ is the modpack's
+                  # minetweaker recipe set, serverutilities/ holds ranks and
+                  # permissions, and visualprospecting/ is per-world ore
+                  # discovery data that the World zip does not carry. That report
+                  # is the whole reason an include list is safe to use here.
+                  SERVER="$DST/gtnh-server-$STAMP.tar.gz"
+                  cd "$SRC"
+                  # shellcheck disable=SC2086
+                  tar -czf "$SERVER" \
+                      config coretweaks libraries mods World2 blueprints journeymap \
+                      scripts serverutilities visualprospecting .infraweaver-backups \
+                      $(ls -1 *.jar *.txt *.json *.properties *.sh *.lang *.so *.png 2>/dev/null | tr '\n' ' ')
+
+                  # gzip -t decompresses the whole stream; tar -tzf walks every
+                  # header. Together they prove the archive is readable, which is
+                  # the property "Completed" does not.
+                  gzip -t "$SERVER"
+                  ENTRIES="$(tar -tzf "$SERVER" | wc -l)"
+                  if [ "$ENTRIES" -lt 1000 ]; then
+                    echo "FATAL: $SERVER holds only $ENTRIES entries — expected thousands"
+                    rm -f "$SERVER"
+                    exit 1
+                  fi
+                  sha256sum "$SERVER" > "$SERVER.sha256"
+                  echo "server: $SERVER ($(stat -c%s "$SERVER") bytes, $ENTRIES entries)"
+
+                  # Anything at the top level this job did NOT capture, so a new
+                  # directory added by a future modpack shows up in the log
+                  # instead of silently falling out of coverage.
+                  echo "not captured (top level):"
+                  ls -1A "$SRC" | grep -vxE 'config|coretweaks|libraries|mods|World2|blueprints|journeymap|scripts|serverutilities|visualprospecting|\.infraweaver-backups|.*\.(jar|txt|json|properties|sh|lang|so|png)|World|backups|logs|crash-reports|lost\+found|\.installed|\.healer\.log|minetweaker\.log|updates\.html|startserver-java9\.bat|hs_err_pid.*\.log|.*\.md' \
+                    | sed 's/^/  /' || true
+
+                  # ── 3. Retention ────────────────────────────────────────────
+                  # Longhorn keeps 7 daily + 4 weekly images of this whole PVC on
+                  # the NAS on top of these, so the on-volume depth only has to
+                  # cover "last night's archive is bad AND the NAS is unreachable".
+                  ls -1t "$DST"/gtnh-world-*.zip 2>/dev/null | tail -n +6 \
+                    | while read -r f; do rm -f "$f" "$f.sha256"; done
+                  ls -1t "$DST"/gtnh-server-*.tar.gz 2>/dev/null | tail -n +3 \
+                    | while read -r f; do rm -f "$f" "$f.sha256"; done
+
+                  echo "OK $(ls -1 "$DST"/gtnh-world-*.zip | wc -l) worlds + $(ls -1 "$DST"/gtnh-server-*.tar.gz | wc -l) server archives retained; $(du -sh "$DST" | cut -f1) on volume"
+              volumeMounts:
+                # readOnly is load-bearing: this job must never be able to write
+                # into a live game world, whatever the script does.
+                - {name: world-src, mountPath: /world-src, readOnly: true}
+                - {name: archive,   mountPath: /archive}
+                - {name: tmp,       mountPath: /tmp}
+          volumes:
+            - name: world-src
+              persistentVolumeClaim:
+                claimName: gt-new-horizons-container-local
+                readOnly: true
+            - name: archive
+              persistentVolumeClaim:
+                claimName: gt-new-horizons-archive
+            - name: tmp
+              emptyDir: {}
+# ═══════════════════════════════════════════════════════════════════════════
+# SCHEDULING: this pod is NOT given a nodeSelector or an affinity rule, and that
+#   is deliberate — the source PV carries its own
+#   nodeAffinity: kubernetes.io/hostname In [talos-prod-cp1]
+#   so the scheduler is already forced onto the one node that can serve it.
+#   Writing a second, hand-maintained copy of that constraint would be a way to
+#   get it wrong later. RWO is not a conflict: ReadWriteOnce is per-NODE, so this
+#   pod and the server pod share the volume because they share cp1.
+#
+# ADMISSION: game-hub is PSA enforce=baseline / warn=restricted, and the Kyverno
+#   Enforce policies (require-non-root, require-seccomp-profile,
+#   require-drop-all-capabilities, disallow-privilege-escalation,
+#   disallow-hostpath-volumes) match only namespaces labelled
+#   `infraweaver.io/type: catalog-app` — which `game-hub` is not. The pod above
+#   is written restricted-compliant regardless, so it neither trips the `warn`
+#   level nor depends on that label never being added. It mounts PVCs, never a
+#   hostPath, so disallow-hostpath-volumes is satisfied even though the PV behind
+#   the claim is hostPath-backed — the policy reads the pod spec.
+#
+# QUOTA: ResourceQuota game-hub-quota allows 20 PVCs / 500Gi requests.storage;
+#   this namespace holds 3 PVCs and 150Gi today, so +1 PVC / +6Gi is inside it.
+#   `longhorn-retain` has no per-class ceiling in that quota, only the generic one.
+#
+# NETWORK: no policy change is required, and that was checked rather than assumed
+#   — this pod opens no socket at all. The CNPs in this namespace
+#   (airgap-baseline, allow-game-downloads, allow-game-ingress,
+#   apiserver-egress-*) all default-deny egress for pods that need none.
+# ═══════════════════════════════════════════════════════════════════════════

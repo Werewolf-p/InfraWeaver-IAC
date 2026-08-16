@@ -1,0 +1,258 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Nightly off-node archive of the Nextcloud instance state (NOT the media)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# READ THIS FIRST: THE 100 GiB NUMBER IS A CLAIM, NOT A MEASUREMENT
+# -----------------------------------------------------------------
+# The 2026-08-16 stability audit put `nextcloud/nextcloud-data-lp` at the top of
+# the "RPO = infinity" column at 100 GiB and called it "user files". Measured
+# inside the running pod on 2026-08-16, before designing anything:
+#
+#   df  /var/www/html   →  the 696G local-path filesystem on cp1, 221G used
+#                          (that is the NODE's disk, shared with every other
+#                           local-path PVC — it is not this volume's usage)
+#   du -sh /var/www/html                    →  1.1G   ← the actual volume
+#     apps        448M   core   104M   3rdparty 84M   dist 58M   lib 15M
+#       ^ all four of these are the Nextcloud 29 distribution. They come back
+#         byte-for-byte from `nextcloud:29-apache`. Backing them up is backing
+#         up a container image.
+#     data        320M   custom_apps 19M   themes 64K   config 132K
+#       ^ THIS is the irreplaceable part: 340M, not 100 GiB.
+#
+# The 100Gi is an unused claim on a thin-provisioned local-path directory; the
+# provisioner enforces no quota, so the number describes an intention from
+# provisioning time and nothing else.
+#
+# WHERE THE ACTUAL USER FILES LIVE: not here. `nas-infraweaver-media-rw` is a
+# separate 500Gi SMB PV mounted at /mnt/nas-media and served on TrueNAS. It is
+# NOT backed up by this job and must not be — a cancelled Velero copy of exactly
+# that mount is what filled the 50 GiB Velero object store to 100% on 2026-08-16
+# and took every backup in the cluster down. It is TrueNAS's to protect.
+#
+# So the honest framing is: this is a 340M problem wearing a 100 GiB label, and
+# 340M fits comfortably in the same trick the three pg-backup jobs already use.
+#
+# ⚠️ WHAT WAS SUPPOSED TO COVER THIS, AND DOES NOT
+# `velero-weekly-localpath` names this namespace with
+# `defaultVolumesToFsBackup: true`. On the run that reported PartiallyFailed on
+# 2026-08-16 it produced ZERO PodVolumeBackups:
+#   kubectl -n velero get podvolumebackups.velero.io \
+#     -l velero.io/backup-name=velero-weekly-localpath-20260816050024
+#   → No resources found.
+# The cause is structural: local-path emits PVs whose source is `hostPath`, and
+# Velero's file-system backup skips hostPath volumes by design. See the corrected
+# comment in kubernetes/platform/velero/values.yaml.
+#
+# HOW THE ARCHIVE REACHES OFF-BOX STORAGE — the trick is the destination
+# ---------------------------------------------------------------------------
+#   00:00  local-snapshot-daily     (Longhorn, retain 3)
+#   00:15  authentik-pg-dump
+#   00:20  nextcloud-pg-dump        (the DATABASE — pg-backup.yaml, next door)
+#   00:25  n8n-pg-dump
+#   00:30  gt-new-horizons-archive
+#   00:35  wp-data-archive-group-a
+#   00:40  wp-data-archive-group-b
+#   00:45  THIS JOB  → tar.gz onto the LONGHORN PVC below
+#   01:00  truenas-backup-daily     (Longhorn → nfs://10.1.0.135:/mnt/pool/k8s-longhorn-backups)
+#
+# This is the FILES half of the pair. pg-backup.yaml in this same directory
+# already covers the database and says at its foot that it is not the files.
+# Neither is a backup of Nextcloud on its own: config/config.php carries the
+# instance secret and passwordsalt, without which the database's encrypted
+# fields are unreadable. They restore together or not at all.
+#
+# VERIFY ENROLMENT AFTER THE FIRST SYNC — do not assume it:
+#   V=$(kubectl -n nextcloud get pvc nextcloud-data-archive -o jsonpath='{.spec.volumeName}')
+#   kubectl -n longhorn-system get volumes.longhorn.io "$V" --show-labels
+#   # WANT: recurring-job-group.longhorn.io/default=enabled
+#
+# RPO ≈ 24h. RTO = fresh nextcloud:29-apache + restore config/, data/,
+# custom_apps/, themes/ + pg_restore --create the matching dump + `occ
+# maintenance:repair`.
+#
+# ⚠️ WHAT THIS DOES NOT BUY. Availability, and off-host durability. The NAS VM
+# shares a Proxmox host with cp1, so the NAS copy is not an off-site copy for a
+# HOST failure. The durable fix for this volume is migrating it to Longhorn —
+# at 1.1G actual that is now a cheap, boring maintenance window rather than the
+# 100 GiB problem the audit described. This job is what makes it safe to
+# schedule that window at leisure instead of urgently.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-data-archive
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud-data-archive
+    infraweaver.io/automation: backup
+spec:
+  accessModes: [ReadWriteOnce]
+  # longhorn-retain: reclaimPolicy Retain, so `git revert`-ing this file releases
+  # the PV instead of destroying accumulated archives.
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      # 340M measured payload, ~300M compressed, 3 retained ≈ 0.9G.
+      # 3Gi is headroom, not a forecast. Costs 6G of physical Longhorn
+      # (numberOfReplicas: 2 on the longhorn-retain class).
+      storage: 3Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nextcloud-data-archive
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud-data-archive
+    infraweaver.io/automation: backup
+spec:
+  schedule: "45 0 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 900
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # 10 minutes. 340M compresses in well under one; the deadline exists so a
+      # wedged Job cannot still be holding the volume when truenas-backup-daily
+      # starts at 01:00.
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: nextcloud-data-archive
+            infraweaver.io/automation: backup
+        spec:
+          restartPolicy: OnFailure
+          # Set on the POD, not the ServiceAccount: Kubernetes never copies
+          # automountServiceAccountToken down from the SA to the pod. This job
+          # talks to no API and needs no identity.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            # 33:33 = www-data. MEASURED inside the running pod: /var/www/html
+            # and config/ are 33:33 mode 2775 and data/ is 33:33 mode 2770 —
+            # data/ is not group- or world-readable by any other uid.
+            runAsUser: 33
+            runAsGroup: 33
+            # Makes the Longhorn archive volume writable for gid 33 — without it
+            # the very first run fails on "Permission denied" at 00:45 with
+            # nobody watching. It does NOT touch the source volume: hostPath is
+            # not an ownership-managed volume plugin, so kubelet applies no chown
+            # to it, and it is mounted readOnly below regardless.
+            fsGroup: 33
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: archive
+              # Already in the cluster's image census (restrict-image-registries
+              # allowlist) and already cached on the nodes.
+              image: docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: {cpu: 100m, memory: 256Mi}
+                limits:   {cpu: "1",  memory: 512Mi}
+              env:
+                - name: HOME
+                  value: /tmp
+              command:
+                - sh
+                - -ec
+                - |
+                  set -o pipefail
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  SRC=/nextcloud-src
+                  OUT="/archive/nextcloud-data-${STAMP}.tar.gz"
+
+                  # config/config.php is the file without which the database is
+                  # unreadable. If it is absent this is not a Nextcloud root and
+                  # anything produced here would be a backup of nothing.
+                  if [ ! -f "$SRC/config/config.php" ]; then
+                    echo "FATAL: $SRC/config/config.php missing — refusing to report success"
+                    exit 1
+                  fi
+
+                  # An explicit include list, so that what is protected is stated
+                  # rather than inferred. Deliberately OUT: apps/ core/ 3rdparty/
+                  # dist/ lib/ ocm-provider/ ocs/ resources/ and the top-level PHP
+                  # entrypoints — 700M of the nextcloud:29-apache image, which
+                  # restores from the image. Also out: /mnt/nas-media, which is a
+                  # different volume entirely and belongs to TrueNAS.
+                  tar -czf "$OUT" -C "$SRC" config data custom_apps themes
+
+                  # An archive that cannot be read is not a backup. gzip -t
+                  # decompresses the whole stream and tar -tzf walks every header,
+                  # so a truncated or half-written file fails HERE rather than
+                  # during an incident.
+                  gzip -t "$OUT"
+                  ENTRIES="$(tar -tzf "$OUT" | wc -l)"
+                  if [ "$ENTRIES" -lt 100 ]; then
+                    echo "FATAL: $OUT holds only $ENTRIES entries"
+                    rm -f "$OUT"
+                    exit 1
+                  fi
+                  # Prove the one file that matters is actually inside it, rather
+                  # than trusting that tar was pointed at the right place.
+                  if ! tar -tzf "$OUT" | grep -c '^config/config\.php$' > /dev/null; then
+                    echo "FATAL: $OUT does not contain config/config.php"
+                    rm -f "$OUT"
+                    exit 1
+                  fi
+
+                  sha256sum "$OUT" > "$OUT.sha256"
+
+                  # Retention: 3 on the volume. Longhorn keeps 7 daily + 4 weekly
+                  # images of this whole PVC on the NAS on top of these.
+                  ls -1t /archive/nextcloud-data-*.tar.gz 2>/dev/null | tail -n +4 \
+                    | while read -r f; do rm -f "$f" "$f.sha256"; done
+
+                  echo "OK $OUT $(stat -c%s "$OUT") bytes, $ENTRIES entries; $(ls -1 /archive/nextcloud-data-*.tar.gz | wc -l) retained"
+              volumeMounts:
+                # readOnly is load-bearing: this job must never be able to write
+                # into a live Nextcloud instance, whatever the script does.
+                - {name: nextcloud-src, mountPath: /nextcloud-src, readOnly: true}
+                - {name: archive,       mountPath: /archive}
+                - {name: tmp,           mountPath: /tmp}
+          volumes:
+            - name: nextcloud-src
+              persistentVolumeClaim:
+                claimName: nextcloud-data-lp
+                readOnly: true
+            - name: archive
+              persistentVolumeClaim:
+                claimName: nextcloud-data-archive
+            - name: tmp
+              emptyDir: {}
+# ═══════════════════════════════════════════════════════════════════════════
+# SCHEDULING: no nodeSelector and no affinity rule, deliberately — the source PV
+#   carries its own nodeAffinity (kubernetes.io/hostname In [talos-prod-cp1]), so
+#   the scheduler is already forced onto the one node that can serve it. RWO is
+#   not a conflict: ReadWriteOnce is per-NODE, so this pod and the Nextcloud pod
+#   share the volume because they share cp1.
+#
+# CMP: this directory renders through the envsubst plugin (see
+#   kubernetes/bootstrap/catalog-nextcloud.yaml). Its allowlist is exactly
+#   BASE_DOMAIN, DEPLOY_REPO_URL, METALLB_*, PUBLIC_INGRESS_IP, MGMT_SUBNET_CIDR,
+#   NODE_SUBNET_CIDR, GITHUB_REPO, ADMIN_EMAIL, TRUENAS_HOST, TARGET_REPLICAS —
+#   none of which appear above. The shell variables here (STAMP, SRC, OUT,
+#   ENTRIES) are outside the allowlist and survive substitution untouched, which
+#   is the same convention pg-backup.yaml next door already relies on. There are
+#   no secret-class placeholders for the plugin's fail-closed grep to catch.
+#
+# ADMISSION: nextcloud is PSA enforce=baseline / warn=baseline. The pod above is
+#   written restricted-compliant anyway. It mounts a PVC, never a hostPath, so
+#   the Enforce policy disallow-hostpath-volumes is satisfied even though the PV
+#   behind the claim is hostPath-backed — the policy reads the pod spec.
+#
+# NETWORK: no policy change is required, and that was checked rather than assumed
+#   — this pod opens no socket at all.
+# ═══════════════════════════════════════════════════════════════════════════

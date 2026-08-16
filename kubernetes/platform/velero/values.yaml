@@ -163,17 +163,69 @@ metrics:
 # ─────────────────────────────────────────────────────────────────────────────
 # SCHEDULES
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# ╔═════════════════════════════════════════════════════════════════════════╗
+# ║ ⚠️ READ FIRST — VELERO FILE-SYSTEM BACKUP CANNOT SEE A local-path PVC.   ║
+# ║                                                                          ║
+# ║ Every claim below about `defaultVolumesToFsBackup: true` protecting      ║
+# ║ local-path volumes was WRONG, and it was wrong from the first run. The   ║
+# ║ local-path provisioner emits PVs whose source is `hostPath`:             ║
+# ║   kubectl get pv <pv> -o jsonpath='{.spec.hostPath.path}'                ║
+# ║   → /opt/local-path-provisioner/pvc-…_game-hub_gt-new-horizons-…-local   ║
+# ║ and Velero's FSB skips hostPath volumes by design. There is no setting   ║
+# ║ that turns this on.                                                      ║
+# ║                                                                          ║
+# ║ MEASURED 2026-08-16 on runs that all reported Completed:                 ║
+# ║   velero-daily-gamehub-20260816083024      →  0 PodVolumeBackups         ║
+# ║   velero-weekly-localpath-20260816050024   →  0 PodVolumeBackups         ║
+# ║   velero-daily-wordpress-20260816034524    → 13 PVBs, and every `data`   ║
+# ║       one belongs to a LONGHORN PVC (hi2, lolll, lol-slot-b + 2 dbs).    ║
+# ║       hihi / lol / yonavaarwater-nl / zonnevaarwater-nl produced a       ║
+# ║       `wp-cli` PVB (an emptyDir) and NO `data` PVB at all.               ║
+# ║   Reproduce:                                                             ║
+# ║     kubectl -n velero get podvolumebackups.velero.io \                   ║
+# ║       -l velero.io/backup-name=<backup> -o wide                          ║
+# ║                                                                          ║
+# ║ So these three schedules are GAP-C2 again — green jobs that back up      ║
+# ║ nothing — for exactly the volumes they were written to protect. They are ║
+# ║ kept because their OBJECT capture is real and useful (PVC specs,         ║
+# ║ Deployments, ConfigMaps: enough to rebuild the shape of a namespace),    ║
+# ║ but they are NOT volume coverage and must not be counted as such.        ║
+# ║                                                                          ║
+# ║ The actual volume coverage for local-path now comes from three archive   ║
+# ║ CronJobs that write onto `longhorn-retain` PVCs and ride the existing    ║
+# ║ Longhorn → TrueNAS chain, the same trick the pg-backup jobs use:         ║
+# ║   kubernetes/catalog/game-hub/manifests/world-archive.yaml       00:30   ║
+# ║   kubernetes/catalog/wordpress-cache/manifests/wp-data-archive.yaml  00:35/00:40 ║
+# ║   kubernetes/catalog/nextcloud/manifests/data-archive.yaml       00:45   ║
+# ╚═════════════════════════════════════════════════════════════════════════╝
+#
 # Times are cluster-local UTC. Deliberately placed AROUND the existing backup
 # windows so nothing collides:
-#   00:00  game-hub-scale-down      (game-hub goes to ZERO replicas)
 #   00:00  longhorn local-snapshot-daily
+#   00:15  authentik-pg-dump
+#   00:20  nextcloud-pg-dump
+#   00:25  n8n-pg-dump
+#   00:30  game-hub world archive        (local-path → longhorn-retain)
+#   00:35  wordpress wp-data archive A   (local-path → longhorn-retain)
+#   00:40  wordpress wp-data archive B   (local-path → longhorn-retain)
+#   00:45  nextcloud data archive        (local-path → longhorn-retain)
 #   01:00  longhorn truenas-backup-daily
 #   02:00  longhorn truenas-backup-weekly (Sun)
 #   03:30  velero daily-objects        ← here
 #   03:45  velero daily-wordpress      ← here
 #   05:00  velero weekly-localpath     ← here (Sun)
-#   08:00  game-hub-scale-up           (game-hub returns)
-#   08:30  velero daily-gamehub        ← here, AFTER scale-up. See below.
+#   08:30  velero daily-gamehub        ← here. See below.
+#
+# ⚠️ `game-hub-scale-down` (00:00) and `game-hub-scale-up` (08:00) are NOT in
+# that list any more, because they do nothing. MEASURED 2026-08-16 in the live
+# ConfigMap game-hub/game-hub-scale-schedule-config:
+#   scaleDownEnabled: "false"   scaleUpEnabled: "false"   targetDeployments: ""
+# and in the job logs: "scale-down is disabled; exiting". The machinery ships
+# dormant on purpose (see kubernetes/catalog/game-hub/scale-schedule.yaml). The
+# GT New Horizons server runs 24/7 and there is no quiet window to schedule a
+# backup into — which is why the world archive takes the server's OWN
+# 30-minutely save-flushed zip instead of tarring a live directory.
 schedules:
 
   # ── Tier 2: objects only, everything, cheap ────────────────────────────────
@@ -198,17 +250,32 @@ schedules:
         - events.events.k8s.io
       storageLocation: default
 
-  # ── Tier 1: WordPress volume data ──────────────────────────────────────────
-  # 7 live sites. 10 of their PVCs are local-path-retain (hihi, lol,
-  # yonavaarwater-nl, zonnevaarwater-nl and test-db) and therefore have NO
-  # Longhorn coverage whatsoever.
+  # ── WordPress: covers the LONGHORN site volumes only ───────────────────────
+  # 7 live sites. The local-path-retain ones (hihi, lol, yonavaarwater-nl,
+  # zonnevaarwater-nl) are the reason this schedule was written — and are
+  # precisely the ones it does not reach.
   #
-  # NOTE: this is a SECOND net, not the first. The console already runs an
-  # application-level WordPress backup chain (CronJob wordpress-backup-sweep,
-  # hourly at :20, into infraweaver-console/infraweaver-backup-datastore —
-  # measured 3.8G, last written 2026-08-14 22:20). That chain is the primary
-  # recovery path for site CONTENT. This schedule protects the raw volume so a
-  # lost node does not also lose plugin state, uploads and the live DB files.
+  # ⚠️ MEASURED 2026-08-16, velero-daily-wordpress-20260816034524, Completed:
+  #   13 PodVolumeBackups. Every `data` PVB belongs to a LONGHORN PVC —
+  #     hi2 90.0Mi, lolll 90.0Mi, lol-slot-b 90.0Mi, hi2-db 171.1Mi,
+  #     lolll-db 162.5Mi
+  #   The four local-path sites produced a `wp-cli` PVB (that is an emptyDir)
+  #   and NO `data` PVB at all. hihi-db / lol-db / yonavaarwater-nl-db /
+  #   zonnevaarwater-nl-db produced nothing.
+  # The PVs are hostPath-backed; Velero's FSB skips hostPath by design — see the
+  # banner above the schedules block. Those four sites are covered instead by
+  # kubernetes/catalog/wordpress-cache/manifests/wp-data-archive.yaml at
+  # 00:35 / 00:40.
+  #
+  # NOTE on the console chain, which is also weaker than it reads. CronJob
+  # wordpress-backup-sweep runs hourly at :20 into
+  # infraweaver-console/infraweaver-backup-datastore (a longhorn-retain volume
+  # that does reach the NAS — 3.9G on disk). But it is DB-only, and measured
+  # 2026-08-16 the newest artefact per site was:
+  #   hihi 08-16, yonavaarwater-nl 08-16 | test 08-14 | lolll 08-12,
+  #   zonnevaarwater-nl 08-12 | hi2 08-11 | lol 08-10
+  # Five of seven sites are days stale. "Hourly sweep" is not "RPO 1h" — that is
+  # a console-side defect and is tracked there, not here.
   daily-wordpress:
     disabled: false
     schedule: "45 3 * * *"
@@ -220,24 +287,34 @@ schedules:
       defaultVolumesToFsBackup: true   # kopia FSB — the only local-path mechanism
       storageLocation: default
 
-  # ── Tier 1: the GT New Horizons world ──────────────────────────────────────
-  # The single highest-value uncovered asset in the cluster.
+  # ── Tier 2 in practice: game-hub OBJECTS only. NOT the world. ──────────────
   # game-hub/gt-new-horizons-container-local — local-path-retain, 30Gi claim,
-  # 2.4G actual, PINNED to talos-prod-cp1. The running server pod mounts THIS
-  # PVC (not the longhorn-game one, which is detached). Longhorn cannot see it.
+  # 2.9G actual, PINNED to talos-prod-cp1. The running server pod mounts THIS
+  # PVC (not the longhorn-game one, which is detached).
   #
-  # !! THE 08:30 TIME IS LOAD-BEARING — DO NOT MOVE IT INTO THE NIGHT !!
-  # CronJob game-hub/game-hub-scale-down runs at 00:00 and scales game-hub to
-  # ZERO; game-hub-scale-up restores it at 08:00. Velero file-system backup
-  # reads volumes THROUGH A RUNNING POD. A 02:00 schedule — which is what the
-  # previous revision of this file used — would find no pod, back up nothing,
-  # and report Completed. That is precisely the "green job that backs up
-  # nothing" failure recorded as GAP-C2 for the Longhorn jobs.
+  # ⚠️ THIS SCHEDULE HAS NEVER BACKED UP THE WORLD AND CANNOT. Measured
+  # 2026-08-16 on the run that reported Completed:
+  #   kubectl -n velero get podvolumebackups.velero.io \
+  #     -l velero.io/backup-name=velero-daily-gamehub-20260816083024
+  #   → No resources found.
+  # The PV is hostPath-backed and Velero's FSB skips hostPath by design — see the
+  # banner above the schedules block. `defaultVolumesToFsBackup: true` below is
+  # therefore inert here; it is left in place only so that a future migration of
+  # this PVC onto a CSI-backed class starts working without another edit.
   #
-  # CAVEAT, accepted deliberately: the server is RUNNING at 08:30, so this is a
-  # crash-consistent copy of a live world, not a quiesced one. It is taken right
-  # after scale-up and before players are typically on, which is the quietest
-  # write window available without stopping the server.
+  # The world is covered instead by
+  # kubernetes/catalog/game-hub/manifests/world-archive.yaml at 00:30, which
+  # copies the server's own 30-minutely save-flushed zip onto a longhorn-retain
+  # PVC — a QUIESCED artefact, which no file-system copy of a live Minecraft
+  # server can be.
+  #
+  # ⚠️ THE 08:30 TIME IS NOT LOAD-BEARING, and the reasoning that said it was
+  # rested on a false premise. It read: "game-hub-scale-down runs at 00:00 and
+  # scales game-hub to ZERO; scale-up restores it at 08:00, and FSB reads volumes
+  # through a running pod, so a 02:00 run would find no pod." Both scale jobs are
+  # shipped DORMANT (scaleDownEnabled=false, targetDeployments="") and log
+  # "…is disabled; exiting" — the server is never scaled down, so every hour of
+  # the day has a running pod. The time may be moved freely.
   daily-gamehub:
     disabled: false
     schedule: "30 8 * * *"
@@ -249,14 +326,26 @@ schedules:
       defaultVolumesToFsBackup: true
       storageLocation: default
 
-  # ── Tier 3: the remaining local-path workloads, weekly ─────────────────────
-  # Lower change-rate or independently recoverable, so weekly is enough.
-  #   n8n-prod   n8n-data + postgresql-n8n-data      (local-path-retain, cp1)
-  #   nextcloud  nextcloud-data-lp + pg lp           (local-path-retain, 1.1G actual)
-  #   jellyfin   jellyfin-data-0-lp                  (local-path-retain, config only)
-  #   authentik  postgres + redis                    (local-path; ALSO pg_dump'd
-  #              nightly at 00:15 into authentik-pg-dumps, a longhorn-retain PVC
-  #              that TrueNAS already holds — so this is a third net for it)
+  # ── Tier 3: OBJECTS for the remaining local-path workloads, weekly ─────────
+  # ⚠️ ZERO VOLUME DATA. Measured 2026-08-16:
+  #   kubectl -n velero get podvolumebackups.velero.io \
+  #     -l velero.io/backup-name=velero-weekly-localpath-20260816050024
+  #   → No resources found.       (and the backup was PartiallyFailed)
+  # Every PVC named below is local-path, i.e. hostPath-backed, i.e. invisible to
+  # Velero's FSB — see the banner above the schedules block. What this schedule
+  # really delivers for these namespaces is their object graph, which is worth
+  # keeping but is not a volume backup.
+  #
+  #   n8n-prod   n8n-data + postgresql-n8n-data      → pg covered by
+  #              kubernetes/platform/n8n/manifests/pg-backup.yaml (00:25).
+  #              n8n-data (2Gi claim) has NO volume coverage.
+  #   nextcloud  nextcloud-data-lp (1.1G actual, of which 340M is irreplaceable)
+  #              → covered by catalog/nextcloud/manifests/data-archive.yaml (00:45);
+  #              postgresql-nextcloud-data-lp → pg-backup.yaml (00:20)
+  #   jellyfin   jellyfin-data-0-lp  (config only)  → NO volume coverage
+  #   authentik  postgres + redis                   → pg_dump'd nightly at 00:15
+  #              into authentik-pg-dumps, a longhorn-retain PVC TrueNAS holds.
+  #              Redis is deliberately not backed up (sessions/cache).
   #
   # DELIBERATELY EXCLUDED — see README "What is NOT backed up":
   #   registry/zot-data (local-path-retain, cp3) — a container image cache.

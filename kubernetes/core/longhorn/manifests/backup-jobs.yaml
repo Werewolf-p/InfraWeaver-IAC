@@ -32,6 +32,73 @@
 # label — do not narrow these jobs back to a single group without first checking
 # `kubectl get volumes.longhorn.io -n longhorn-system --show-labels`.
 # ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# 2026-08-16 — THE NIGHTLY CHAIN WAS DOWN, AND NOTHING SAID SO IN WORDS THAT
+#              MEANT "NO BACKUPS TONIGHT"
+# ---------------------------------------------------------------------------
+# Symptom, measured while adding the local-path archive jobs:
+#   kubectl -n longhorn-system get jobs
+#     truenas-backup-daily-29780700       Failed   0/1   (01:00)
+#     truenas-backup-weekly-29780760      Failed   0/1   (02:00)
+#     longhorn-backup-verifier-29780850   Failed   0/1   (03:30)
+#   kubectl -n longhorn-system logs job/truenas-backup-daily-29780700
+#     → "error: timed out waiting for the condition"
+#   ZERO Backup CRs dated 2026-08-16 existed. The newest were 2026-08-15.
+#   19 of 40 Longhorn volumes had NEVER been backed up at all — including
+#   openbao/data-openbao-0, both new *-pg-dumps volumes, and the five wordpress
+#   volumes migrated onto Longhorn on 08-14 specifically to make them safe.
+#
+# Root cause: a Longhorn upgrade migration gap, not a configuration mistake.
+# Longhorn ≥1.8 moved backup identity into the CR spec (`spec.volumeName`,
+# `spec.backupTargetName`) and added a validating webhook that requires both.
+# Every BackupVolume CR created before the upgrade carried neither:
+#   kubectl -n longhorn-system get backupvolume <name> -o jsonpath='{.spec}'
+#   → {"syncRequestedAt":"…"}            ← that is the whole spec
+# so the backup-target controller could not reconcile —
+#   error="failed to find the backup target  for the backup volume <vol>:
+#          backuptarget.longhorn.io \"\" not found"
+# and its own repair path was blocked by its own webhook —
+#   "failed to add label delete-custom-resource-only …: admission webhook
+#    \"validator.longhorn.io\" denied the request: backup target name cannot be
+#    empty"
+# The recurring job then sat waiting on a backup-volume sync that could never
+# complete, and exited on its deadline. `Failed` with a timeout message is a
+# poor description of "the whole estate has no off-node backup".
+#
+# Fix applied 2026-08-16 (live CR repair — Longhorn owns these objects, there is
+# nothing to declare in git). Values were DERIVED FROM EACH CR'S OWN LABELS,
+# not guessed: legacy CRs already carry `backup-target` and `backup-volume`.
+#
+#   for n in $(kubectl -n longhorn-system get backupvolumes.longhorn.io \
+#               -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+#     tgt=$(kubectl -n longhorn-system get backupvolume "$n" \
+#             -o jsonpath='{.metadata.labels.backup-target}'); : "${tgt:=default}"
+#     vol=$(kubectl -n longhorn-system get backupvolume "$n" \
+#             -o jsonpath='{.metadata.labels.backup-volume}'); : "${vol:=$n}"
+#     kubectl -n longhorn-system patch backupvolume "$n" --type=merge \
+#       -p "{\"spec\":{\"backupTargetName\":\"$tgt\",\"volumeName\":\"$vol\"}}"
+#   done
+#
+# 27 CRs patched, 0 failures; target-related reconcile errors went from a
+# continuous stream to zero within a minute.
+#
+# ⚠️ IF LONGHORN IS UPGRADED AGAIN, RE-CHECK THIS. The one-line probe:
+#   kubectl -n longhorn-system get backupvolumes.longhorn.io \
+#     -o jsonpath='{range .items[*]}{.spec.backupTargetName}{"\n"}{end}' | sort -u
+#   # WANT: exactly "default". A blank line means the chain is jammed again.
+#
+# ⚠️ AND DO NOT TRUST A GREEN JOB. The check that actually means something is
+# whether new Backup CRs appeared, not whether the CronJob says Complete:
+#   kubectl -n longhorn-system get backups.longhorn.io \
+#     -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{"\n"}{end}' \
+#     | cut -c1-10 | sort | uniq -c
+#   # WANT: today's date, with roughly one entry per volume.
+# 189 historical Backup CRs also lack `spec.backupTargetName`. They were left
+# alone deliberately: they are records of completed backups, the controller
+# stopped erroring on them once the BackupVolumes were repaired, and patching
+# 189 objects to fix nothing observable is risk without benefit.
+# ---------------------------------------------------------------------------
 apiVersion: longhorn.io/v1beta2
 kind: RecurringJob
 metadata:

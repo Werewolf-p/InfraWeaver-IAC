@@ -4,4 +4,5 @@ resources:
   - namespace.yaml
   - manifests/resource-quota.yaml
   - manifests/rbac.yaml
+  - manifests/world-archive.yaml
   - scale-schedule.yaml
