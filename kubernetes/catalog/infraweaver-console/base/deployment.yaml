@@ -703,6 +703,42 @@ spec:
               name: infraweaver-console-secret
               key: wordpress-sandbox-cron-token
               optional: true
+        # DEDICATED token for the two-minute WordPress Staging pickup sweep's
+        # POST to /api/wordpress/staging-sweep. Separate from the sandbox token
+        # above on the same rule that split that one out, applied in the other
+        # direction: the sandbox sweep only DELETES expired clones, this one
+        # PROVISIONS — a pass can copy an entire production database into a new
+        # environment and enroll it. Neither credential may drive the other.
+        # `optional: true` for the same reason as every sibling: a console that
+        # has not been given the secret must start and fail closed on this one
+        # path, not CrashLoop on every path.
+        - name: WORDPRESS_STAGING_CRON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: wordpress-staging-cron-token
+              optional: true
+        # The WordPress Staging feature switch is DELIBERATELY NOT SET HERE.
+        #
+        # A staging clone is a SECOND FULL COPY of a production site's database
+        # and uploads, provisioned on this cluster's disks and served on its own
+        # hostname behind Authentik — so being able to stop it mid-incident
+        # matters more than declaring it on. Writing the variable here would PIN
+        # it (`envPinReason`, src/lib/feature-defaults.ts): env vars in a running
+        # Deployment are immutable, so a pinned flag moves only by editing this
+        # file and rolling new pods, and the console's runtime kill switch would
+        # stop working for precisely the feature whose failure mode is copying
+        # production databases.
+        #
+        # Unset is not the same as off. This cluster runs PLATFORM_ENABLE_ALL=1
+        # and WORDPRESS_STAGING_ENABLED is not in NEVER_DEFAULTED, so the master
+        # default already arms the machinery — and leaves the toggle live.
+        # Which SITES may use it is a separate, per-site operator switch in the
+        # ConfigMap `infraweaver-wordpress-staging-enabled`, default off for
+        # every site; BOTH must be true before a button press is served.
+        # Staging also requires the sandbox switch, because it is that pipeline
+        # with a different seal — same createSite, same PVCs, same wildcard DNS,
+        # same fleet storage budget.
         # DEDICATED token for the daily patch-sweep CronJob's POST to
         # /api/wordpress/patch/sweep — the unattended remediation pass. Distinct
         # value because this one can change production code on every site.

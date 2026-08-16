@@ -1,0 +1,133 @@
+# WordPress Staging pickup sweep — every 2 minutes.
+#
+# THIS IS THE CONSUMER. A site's "Create staging site" button writes a request
+# into a local WordPress option (`iwsl_staging_request`) and stops there, because
+# there is deliberately no site→console network path on this platform — the
+# managed transport is k8s exec, and opening an inbound path from every
+# WordPress site in the fleet to save two minutes on a multi-minute operation is
+# a bad trade twice over. Something has to come and look. This is that something.
+#
+# WHY THIS EXISTS AT ALL, stated plainly: the connector side shipped first, and
+# for a while nothing consumed the outbox. The plugin reported that honestly —
+# "recorded N minutes ago and still sitting on this site; nothing has collected
+# it, so nothing is being built yet" — and it was right every single time. An
+# operator pressed the button and watched that sentence for half an hour. The
+# popup was not the bug; the missing consumer was.
+#
+# WHY EVERY 2 MINUTES rather than the sandbox reaper's hourly cadence. They are
+# different jobs. The reaper enforces a retention promise, where running a few
+# minutes late costs a few minutes of extra exposure. This one is UI LATENCY A
+# HUMAN IS STARING AT: somebody has just pressed a button and is watching a modal
+# poll for progress. Two minutes is the difference between "it has been picked
+# up" and "is this thing broken?". A pass with nothing pending is one `wp eval`
+# per parent site and returns immediately.
+#
+# WHAT ONE PASS MAY DO: read every parent site's outbox, start AT MOST ONE spawn,
+# tear down at most one clone, and push state back to sites over the signed
+# channel. A spawn streams an entire database and an entire wp-content between
+# pods, so `concurrencyPolicy: Forbid` plus the one-spawn-per-pass cap in
+# `runStagingSweep` is what keeps a tight cluster from having two of those in
+# flight at once.
+#
+# PER-SITE ENABLEMENT IS THE REAL GATE, and it is not theoretical. The sweep
+# reads every site's outbox but may only ACT on sites an operator has explicitly
+# switched on (ConfigMap `infraweaver-wordpress-staging-enabled`, default off
+# everywhere). A request on a site that is NOT enabled is never provisioned and —
+# equally important — never consumed: it is left in the outbox exactly as the
+# person left it, and the site is told once, in words, that staging is not
+# switched on for it. As of 2026-08-16 there is a live example of precisely that
+# on zonnevaarwater-nl, where a connector deploy carried the staging UI onto a
+# production site by accident and the operator pressed the button they were
+# shown. That request must still be there when staging is enabled for that site.
+#
+# Auth: dedicated `wordpress-staging-cron-token`, NOT shared with the sandbox
+# reaper, the health sweep or any other. This sweep PROVISIONS — a pass can copy
+# an entire production database into a new environment and enroll it — and a
+# token that reaps expired sandboxes has no business doing that, nor the reverse.
+# The console middleware (src/proxy.ts) admits this request past the session gate
+# only on an exact path + method + token match, and the handler re-validates the
+# token itself with a constant-time compare (defence in depth). A missing or
+# unset token fails closed.
+#
+# The handler answers `enabled: false` and reads NOTHING when
+# WORDPRESS_STAGING_ENABLED is off — unlike the sandbox reaper, which must keep
+# running after its switch is flipped because it is the thing that cleans up. A
+# console that has not opted into staging must not be exec'ing into every
+# WordPress pod in the fleet every two minutes for a feature it does not serve.
+#
+# Networking: carries the iwsl component labels, so the existing
+# ciliumnetworkpolicy-wp-health-egress.yaml (egress to CoreDNS + console) and
+# networkpolicy-wp-health.yaml (ingress to the console pod on :3000) already
+# cover it — no extra NetworkPolicy needed.
+#
+# To suspend: `kubectl -n infraweaver-console patch cronjob
+# wordpress-staging-sweep -p '{"spec":{"suspend":true}}'` — note that suspending
+# it means button presses are recorded and never collected, which is the exact
+# state this CronJob was created to end. Prefer turning the feature switch off.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wordpress-staging-sweep
+  namespace: infraweaver-console
+  labels:
+    app.kubernetes.io/managed-by: infraweaver-console
+    infraweaver.io/component: iwsl
+spec:
+  suspend: false
+  schedule: "*/2 * * * *" # a human is watching a modal — this is UI latency, not housekeeping
+  concurrencyPolicy: Forbid # a pass that started a spawn must never overlap the next tick
+  startingDeadlineSeconds: 60
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # Shorter than the reaper's: a pass only READS and hands the spawn to the
+      # console, which runs it in the background. A pass still going after two
+      # minutes is stuck, and the next tick is more useful than waiting for it.
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: infraweaver-console
+            infraweaver.io/component: iwsl
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: staging-sweep
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: infraweaver-console-secret
+                      key: wordpress-staging-cron-token
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              command: ["/bin/sh", "-c"]
+              # The Origin header matches the request host so the console's CSRF
+              # same-origin guard passes even independently of the token bypass.
+              args:
+                - >-
+                  curl --fail --silent --show-error --max-time 110
+                  -X POST
+                  -H "x-internal-cron-token: ${CRON_TOKEN}"
+                  -H "Origin: http://infraweaver-console.infraweaver-console.svc.cluster.local:3000"
+                  http://infraweaver-console.infraweaver-console.svc.cluster.local:3000/api/wordpress/staging-sweep

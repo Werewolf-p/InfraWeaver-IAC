@@ -28,6 +28,7 @@ resources:
   - replica-floor-sweep-cronjob.yaml
   - backup-sweep-cronjob.yaml
   - wordpress-sandbox-sweep-cronjob.yaml
+  - wordpress-staging-sweep-cronjob.yaml
   - wordpress-patch-sweep-cronjob.yaml
   - wordpress-cron-sweep-cronjob.yaml
   - wiki-atlas-sweep-cronjob.yaml
