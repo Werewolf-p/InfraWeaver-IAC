@@ -46,11 +46,20 @@ controller:
       enabled: true
   resources:
     requests:
+      # ⚠️ 300Mi under-counted this pod by ~1.16 GiB. It steadily works at
+      # 550-800 MiB and peaks at 1463 MiB, so the scheduler was placing it as if
+      # it were a small pod. Requests are what the scheduler reserves; limits are
+      # only what the kernel kills at.
       cpu: 250m
-      memory: 300Mi
+      memory: 1Gi
     limits:
       cpu: 2000m
-      memory: 1500Mi  # raised from 900Mi — controller was OOMKilled at 879Mi under load
+      # 1500Mi -> 2560Mi. THIRD sizing of this container: 900Mi OOMKilled at
+      # 879Mi, then 1500Mi OOMKilled at 1463Mi (97.6% of the limit) — 20 restarts
+      # and 17 in a single 24h window on 2026-08-16. While this pod is dead
+      # NOTHING in the cluster syncs or self-heals, so its OOM is a control-plane
+      # outage, not one app's problem.
+      memory: 2560Mi
   # Increase probe timeouts — default 1s causes false-positive failures when controller
   # is busy reconciling 50+ apps (1200m+ CPU observed, healthz can't respond in 1s)
   readinessProbe:
@@ -434,8 +443,13 @@ notifications:
       cpu: 10m
       memory: 32Mi
     limits:
-      cpu: 100m
-      memory: 128Mi
+      # Measured 2026-08-16 from the container cgroup: 69.0% of CFS periods
+      # throttled against the 100m ceiling, and 84.2% of the 128Mi memory limit
+      # in use. Bursty sub-second work against a tiny quota — average use looks
+      # idle while two thirds of periods are capped, which is invisible to both
+      # `kubectl top` and the HPA.
+      cpu: 300m
+      memory: 256Mi
   # Discord notifications for important ArgoCD events
   # Webhook URL is pulled from argocd-discord-secret (ExternalSecret in this namespace)
   # RBAC grant is in kubernetes/core/argocd/manifests/notifications-rbac.yaml

@@ -728,7 +728,20 @@ spec:
             # and the pod was SIGTERM-killed (exit 143) ~1×/hr. 1 CPU + 1Gi gives
             # headroom to answer probes while a heavy request is in flight.
             memory: 1Gi
-            cpu: "1"
+            # 1 -> 2, the SECOND raise for the same cause. Measured 2026-08-16
+            # straight from the container cgroup, not `kubectl top`:
+            #   nr_periods 349, nr_throttled 129 (36.9%), throttled 5.29s
+            #   against 20.36s of CPU actually consumed — a 26% wall-clock tax.
+            # Sustained 7%-43% every 5 minutes over 3 hours.
+            #
+            # ⚠️ This is invisible to the HPA, which averages CPU against
+            # REQUESTS over 15s+: `kubectl get hpa` reads 1%/70% while a third of
+            # periods are capped. Adding replicas does not fix throttling; only
+            # raising the ceiling does.
+            #
+            # 2 is exactly the `workload-defaults` LimitRange max.cpu for this
+            # namespace, so this is the last raise available here.
+            cpu: "2"
         startupProbe:
           httpGet:
             path: /api/ping

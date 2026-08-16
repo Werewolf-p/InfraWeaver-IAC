@@ -94,7 +94,11 @@ spec:
                   cpu: 50m
                   memory: 64Mi
                 limits:
-                  cpu: 200m
+                  # 200m -> 500m. Measured 2026-08-16: 90.2% of CFS periods
+                  # throttled — the worst in the cluster. It runs every 5 minutes
+                  # (288 times a day) and spends most of each run stalled rather
+                  # than working, which stretches every self-heal pass.
+                  cpu: 500m
                   memory: 128Mi
               command: ["/bin/bash", "-c"]
               args:
