@@ -60,3 +60,12 @@ spec:
       jqPathExpressions:
         - '.status'
         - '.spec.admission'
+        # Added 2026-08-16 with the kyverno 3.2.8 -> 3.8.2 (v1.12.6 -> v1.18.2)
+        # upgrade. 1.18 defaults `spec.emitWarning: false` on every ClusterPolicy,
+        # which our manifests predate, so all 21 policies reported OutOfSync
+        # immediately after a sync that had itself Succeeded. Same shape and same
+        # remedy as `.spec.admission` above.
+        #
+        # A top-level SCALAR, which is the safe kind per the note above — it does
+        # not reach inside the atomic `.spec.rules` list.
+        - '.spec.emitWarning'
