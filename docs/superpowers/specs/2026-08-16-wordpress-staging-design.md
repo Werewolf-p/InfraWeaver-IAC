@@ -1,6 +1,39 @@
 # WordPress Staging — design
 
-**Status:** proposed 2026-08-16. Design only; nothing here is implemented.
+**Status:** proposed 2026-08-16; **built 2026-08-16 (evening)** — §10 steps 1, 2
+and 4 are implemented and tested; step 3 is implemented but **unreachable**; step
+5 (hi2 soak) has not started. Nothing is deployed yet.
+
+## Build status — 2026-08-16 evening
+
+| §10 step | State | Note |
+|---|---|---|
+| 1. Connector seal, `staging.state.set`, tab/outbox | **shipped** | `4b5b352f` (0.57.0), popup `1aae0934`; connector now 0.59.0 |
+| 2. Console `lib/staging/`, routes, sweep CronJob | **built, uncommitted** | all 7 hops traced; the sweep never consumes a request from a non-enabled site, pinned by a mutation-checked test |
+| 3. Merge Lane completion + review UI | **built, UNREACHABLE** | lanes shipped in `c2283f8c`; `ChangesetReviewPanel` is imported by nothing — see the trap below |
+| 4. Environments/Manage UI, expiry warnings | **built** | 8 components; extend-TTL and merge status deliberately excluded |
+| 5. hi2 soak, then per-site enablement | **not started** | |
+
+⚠️ **The flag in §10 step 3 is already on.** `changesetsEnabled()` and
+`stagingEnabled()` both fall through to `platformDefaultFor()`, and the live
+console runs `PLATFORM_ENABLE_ALL=1` — so "then `WORDPRESS_CHANGESETS_ENABLED=true`"
+is already satisfied here, and **writing either variable into the manifest would
+PIN it**, removing the runtime kill switch for the feature whose failure mode is
+copying production databases. Neither is set, deliberately.
+
+⚠️ **Step 3's real blocker is scope, not the flag.** A changeset session lives on
+the STAGING site, and `wordpressSiteScopeFrom`
+(`apps/infraweaver-console/src/app/api/v1/_lib/scopes.ts:73`) resolves scope
+literally as `/wordpress/sites/${id}`, so reviewing a merge means calling a scope
+no operator holds a grant on. The fix is a resolver mapping a `--stg-`/`--sbx-`
+derived id to its PARENT's scope, which is defensible because parent
+`wordpress:admin` already governs whether the clone exists at all. Until then the
+review panel cannot be mounted.
+
+⚠️ **Before these manifests may be pushed:** seed `wordpress-staging-cron-token`
+into OpenBao FIRST — the console ExternalSecret is `deletionPolicy: Retain`, so
+one missing property aborts the sync for all 36 keys — and ship the console image
+BEFORE the CronJob, or every two-minute tick 404s into a failed Job.
 
 **Operator's requirement, verbatim (abridged):** "staging functionality, so someone can make a staging site (fully behind authentik) with a simple press on the button in the plugin in wordpress itself … once ready someone can set it to prod … seeable in infraweaver in the manage part … make sure that it won't make additional images in CDN that are not bound to a website. fully plan this out."
 
