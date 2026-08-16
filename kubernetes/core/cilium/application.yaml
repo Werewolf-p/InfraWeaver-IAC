@@ -4,7 +4,7 @@
 # CNI leaves cilium-agent pods Pending/CrashLooping until the CNI handoff. See
 # docs/CILIUM-HUBBLE-MIGRATION-RUNBOOK.md.
 repoURL: https://helm.cilium.io
-targetRevision: "1.17.4"
+targetRevision: "1.21.0-pre.0"
 chart: cilium
 releaseName: cilium
 namespace: kube-system
