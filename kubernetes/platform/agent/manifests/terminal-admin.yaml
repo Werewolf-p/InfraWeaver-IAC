@@ -454,11 +454,16 @@ spec:
   #
   # ⚠️ Scale in GIT, never with `kubectl scale` — selfHeal=true reverts a live
   # scale within seconds.
-  # ⚠️ STILL 0 IN THIS COMMIT — the fixes above are LANDED but NOT YET
-  # PROVEN on the live cluster. Scale-up is a second, separate commit
-  # made only after the four restore criteria are demonstrated with real
-  # probes. Do not flip this to 1 to "see if it works".
-  replicas: 0
+  # PROVEN BEFORE THIS LINE WAS FLIPPED, on the live cluster, 2026-08-16:
+  #   monitoring pod   -> agent ns :7681   BLOCKED (connect times out)
+  #   monitoring pod   -> agent ns :9100   BLOCKED (source is not Prometheus)
+  #   PROMETHEUS       -> agent ns :9100   target UP — scraping still works
+  #   PROMETHEUS       -> agent ns :7681   target DOWN, context deadline
+  #                                         exceeded — same source, same pod,
+  #                                         same namespace, one port allowed
+  #                                         and one refused
+  #   53/53 pre-existing scrape targets still UP
+  replicas: 1
   strategy: { type: Recreate }
   selector:
     matchLabels:
