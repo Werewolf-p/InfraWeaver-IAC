@@ -55,6 +55,63 @@ spec:
           - '{{ if eq (default "true" .serverSideApply) "false" }}ServerSideApply=false{{ else }}ServerSideApply=true{{ end }}'
           - RespectIgnoreDifferences=true
       ignoreDifferences:
+        # ── kyverno 1.18 policy CRDs: apiserver-defaulted conversion ──────────
+        # These 11 CRDs arrived with the 3.2.8 -> 3.8.2 upgrade. The chart does
+        # not set `spec.conversion`, so the apiserver defaults it to
+        # `{strategy: None}` and ArgoCD reports every one of them OutOfSync
+        # forever while the sync itself reports Succeeded.
+        #
+        # ⚠️ Scoped BY NAME on purpose. This ApplicationSet templates every
+        # core-* Application, including core-longhorn, whose CRDs legitimately
+        # declare `conversion.strategy: Webhook`. A blanket
+        # `kind: CustomResourceDefinition` ignore would hide a real change to
+        # that wiring -- and a stale longhorn conversion webhook pointing at a
+        # Service with zero endpoints is a bug that was cleaned up on the same
+        # day this was written.
+        - kind: CustomResourceDefinition
+          name: deletingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: generatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: imagevalidatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: mutatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: namespaceddeletingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: namespacedgeneratingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: namespacedimagevalidatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: namespacedmutatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: namespacedvalidatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: policyexceptions.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+        - kind: CustomResourceDefinition
+          name: validatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
         - kind: Secret
           jqPathExpressions:
             - '.data["admin-password"]'
