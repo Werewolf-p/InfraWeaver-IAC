@@ -68,47 +68,58 @@ spec:
         # that wiring -- and a stale longhorn conversion webhook pointing at a
         # Service with zero endpoints is a bug that was cleaned up on the same
         # day this was written.
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: deletingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: generatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: imagevalidatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: mutatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: namespaceddeletingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: namespacedgeneratingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: namespacedimagevalidatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: namespacedmutatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: namespacedvalidatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: policyexceptions.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
-        - kind: CustomResourceDefinition
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
           name: validatingpolicies.policies.kyverno.io
           jsonPointers:
             - /spec/conversion
