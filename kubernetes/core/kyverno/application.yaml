@@ -3,7 +3,7 @@
 # Chart: https://kyverno.github.io/kyverno/
 # Access: cluster-internal only (no ingress needed)
 repoURL: https://kyverno.github.io/kyverno/
-targetRevision: "3.9.0-rc.3"
+targetRevision: "3.2.8"
 chart: kyverno
 releaseName: kyverno
 namespace: kyverno
