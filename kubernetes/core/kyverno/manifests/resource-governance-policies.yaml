@@ -84,6 +84,10 @@ metadata:
       because nobody remembered to write a LimitRange for its namespace.
       Self-healing via synchronize.
 spec:
+  # Pinned explicitly rather than ignored: kyverno 1.18 defaults this in, and
+  # `.spec.validationFailureAction` is the Enforce/Audit switch -- ignoring it
+  # would mean a future Enforce change in git could never apply.
+  validationFailureAction: Audit
   admission: true
   background: true
   rules:
@@ -282,6 +286,10 @@ metadata:
       simply because nobody remembered to hand-write an airgap block for it.
       Self-healing via synchronize.
 spec:
+  # Pinned explicitly rather than ignored: kyverno 1.18 defaults this in, and
+  # `.spec.validationFailureAction` is the Enforce/Audit switch -- ignoring it
+  # would mean a future Enforce change in git could never apply.
+  validationFailureAction: Audit
   admission: true
   background: true
   rules:
@@ -477,6 +485,12 @@ spec:
                 - registry
                 - infraweaver-console
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Memory limit must not exceed 8x the memory request. Memory is
           incompressible: the scheduler packs nodes by request but the kernel
@@ -542,6 +556,12 @@ spec:
                 - metallb-system
                 - monitoring
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Containers must declare resources.requests.cpu,
           resources.requests.memory and resources.limits.memory.

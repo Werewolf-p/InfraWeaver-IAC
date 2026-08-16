@@ -161,6 +161,12 @@ spec:
                 - kube-public
                 - kube-node-lease
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           ServiceAccount "default" in namespace "{{ request.object.metadata.namespace }}"
           does not set automountServiceAccountToken: false. Every pod that does not
@@ -200,6 +206,12 @@ spec:
             operator: Equals
             value: default
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Pod "{{ request.object.metadata.name }}" runs as the `default`
           ServiceAccount and does not set automountServiceAccountToken: false.
@@ -254,6 +266,10 @@ metadata:
     # permission does not exist yet at the moment the policy is validated.
     argocd.argoproj.io/sync-wave: "1"
 spec:
+  # Pinned explicitly rather than ignored: kyverno 1.18 defaults this in even on
+  # a mutate-only policy, and `.spec.validationFailureAction` is the Enforce/Audit
+  # switch -- ignoring it would mean a future Enforce change could never apply.
+  validationFailureAction: Audit
   admission: true
   background: true
   # FALSE, deliberately. Admission-time mutation only.

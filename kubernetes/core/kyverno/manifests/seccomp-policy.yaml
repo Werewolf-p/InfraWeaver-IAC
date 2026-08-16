@@ -58,6 +58,12 @@ spec:
                 - falco
                 - velero
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Pod "{{ request.object.metadata.name }}" should set
           spec.securityContext.seccompProfile.type to RuntimeDefault or Localhost.
@@ -137,6 +143,12 @@ spec:
                 - stirling-pdf
                 - registry
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Pod "{{ request.object.metadata.name }}" should set
           spec.securityContext.seccompProfile.type to RuntimeDefault or Localhost.
@@ -187,6 +199,12 @@ spec:
                 matchLabels:
                   infraweaver.io/type: catalog-app
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Pod "{{ request.object.metadata.name }}" has automountServiceAccountToken enabled (default).
           If this pod does not call the Kubernetes API, set automountServiceAccountToken: false

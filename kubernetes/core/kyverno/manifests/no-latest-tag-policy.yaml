@@ -53,6 +53,12 @@ spec:
                 - falco
                 - velero
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Image tag ':latest' is not allowed. Pin to a specific version (e.g. 'myapp:1.2.3')."
         pattern:
           spec:
@@ -131,6 +137,12 @@ spec:
                 - stirling-pdf
                 - registry
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Image tag ':latest' is not allowed. Pin to a specific version (e.g. 'myapp:1.2.3')."
         pattern:
           spec:

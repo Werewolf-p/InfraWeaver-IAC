@@ -104,6 +104,12 @@ spec:
                 matchLabels:
                   infraweaver.io/type: catalog-app
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Every container that declares a port must define a readinessProbe.
           Without it, the pod is added to Service endpoints before it can serve.
@@ -124,6 +130,12 @@ spec:
                 matchLabels:
                   infraweaver.io/type: catalog-app
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Every container that declares a port must define a livenessProbe.
           Without it, a deadlocked container is never restarted.

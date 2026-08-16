@@ -31,6 +31,11 @@ metadata:
       (the cluster's kubernetes service IP) instead of the node IP so the check
       works on all nodes regardless of whether they run their own apiserver.
 spec:
+  # Pinned explicitly rather than ignored: kyverno 1.18 defaults this in, and
+  # `.spec.validationFailureAction` is the Enforce/Audit switch -- ignoring it
+  # would mean a future Enforce change in git could never apply.
+  validationFailureAction: Audit
+  background: true
   rules:
     - name: inject-wait-for-apiserver
       skipBackgroundRequests: true

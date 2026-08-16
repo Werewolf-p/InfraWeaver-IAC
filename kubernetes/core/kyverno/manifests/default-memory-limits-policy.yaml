@@ -49,6 +49,10 @@ metadata:
       Prevents a single uncapped pod from consuming all node memory and
       triggering an OOM crash of the entire Talos node.
 spec:
+  # Pinned explicitly rather than ignored: kyverno 1.18 defaults this in even on
+  # a mutate-only policy, and `.spec.validationFailureAction` is the Enforce/Audit
+  # switch -- ignoring it would mean a future Enforce change could never apply.
+  validationFailureAction: Audit
   background: false
   rules:
     - name: add-default-memory-limits

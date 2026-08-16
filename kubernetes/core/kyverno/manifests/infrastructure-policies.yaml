@@ -34,6 +34,12 @@ spec:
                 - ExternalSecret
                 - ClusterExternalSecret
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           ExternalSecret secretStoreRef.name must be "openbao" (the platform's ClusterSecretStore).
           Found: "{{ request.object.spec.secretStoreRef.name }}".
@@ -82,6 +88,12 @@ spec:
                 - monitoring
                 - openbao
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           CronJob "{{ request.object.metadata.name }}" has failedJobsHistoryLimit {{ request.object.spec.failedJobsHistoryLimit }}.
           For infrastructure CronJobs, set failedJobsHistoryLimit: 0 (or max 1) to prevent
@@ -123,6 +135,12 @@ spec:
                 - cert-manager
                 - traefik
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: >-
           Pod "{{ request.object.metadata.name }}" should define a securityContext
           with at least runAsNonRoot: true for better security posture.

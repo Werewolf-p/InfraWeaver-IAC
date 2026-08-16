@@ -133,6 +133,12 @@ spec:
                 # discovery — see kubernetes/catalog/plex/manifests/.
                 - plex
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Containers must set runAsNonRoot: true or runAsUser > 0."
         pattern:
           spec:
@@ -175,6 +181,12 @@ spec:
                 matchLabels:
                   infraweaver.io/type: catalog-app
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Containers must define resource limits (cpu and memory)."
         pattern:
           spec:
@@ -240,6 +252,12 @@ spec:
                 - dns-system
                 - plex
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Containers must not set privileged: true."
         pattern:
           spec:
@@ -300,6 +318,12 @@ spec:
                 - falco
                 - velero
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Containers should drop ALL capabilities (securityContext.capabilities.drop: [ALL])."
         pattern:
           spec:
@@ -370,6 +394,12 @@ spec:
                 - stirling-pdf
                 - registry
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Containers should drop ALL capabilities (securityContext.capabilities.drop: [ALL])."
         pattern:
           spec:
@@ -439,6 +469,12 @@ spec:
                 # this line the moment plex moves to a MetalLB LoadBalancer.
                 - plex
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Pods must not use hostPID, hostIPC, or hostNetwork."
         pattern:
           spec:
@@ -497,6 +533,12 @@ spec:
                 - dns-system
                 - plex
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Containers should set allowPrivilegeEscalation: false."
         pattern:
           spec:
@@ -560,6 +602,12 @@ spec:
                 - dns-system
                 - plex
       validate:
+        # Pinned, not ignored: kyverno 1.18 defaults this onto every validate
+        # rule, and it lives INSIDE the atomic .spec.rules list where an
+        # ignoreDifferences entry is forbidden here. Same treatment as
+        # skipBackgroundRequests. true is the 1.18 default and matches what
+        # is live; tightening it is a deliberate change, not a default.
+        allowExistingViolations: true
         message: "Pods should not use hostPath volumes."
         pattern:
           spec:
