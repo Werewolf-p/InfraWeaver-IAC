@@ -39,6 +39,23 @@ spec:
           matchLabels:
             app: infraweaver-api
       affinity:
+        # Keep every replica out of zone `hypatia` (cp4, across the stretched
+        # VLAN, ~15 ms vs 0.19-0.63 ms between the other two). The console calls
+        # this API on essentially every page, and the API in turn calls the
+        # Kubernetes API and ArgoCD, so a replica out there pays the crossing
+        # several times per request. Measured 2026-08-16: 2 of 5 replicas had
+        # landed on cp4, so ~40% of console API traffic was taking the slow path.
+        #
+        # HA is unaffected -- cp1 and cp3 stay eligible and the podAntiAffinity
+        # below still spreads replicas across them.
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: NotIn
+                values:
+                - hypatia
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
