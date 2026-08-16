@@ -1,5 +1,5 @@
 repoURL: https://openbao.github.io/openbao-helm
-targetRevision: "0.27.2"
+targetRevision: "0.29.1"
 chart: openbao
 releaseName: openbao
 namespace: openbao
