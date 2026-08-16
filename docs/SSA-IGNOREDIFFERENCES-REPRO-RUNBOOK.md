@@ -332,3 +332,71 @@ Nothing else was created. `kubernetes/repro-p27/` never reaches `main`.
 | Fix commit 1 (pins) | Revert. Live values are unchanged either way — they mirror webhook defaults, so there is no cluster impact. |
 | Fix commit 2 (ignore removal) | Revert re-adds the ignore line; behaviour returns to today's, including the hazard. |
 | Detector CronJob | Delete the manifest from `kubernetes/core/kyverno/manifests/`; the app prunes it. |
+
+---
+
+## 2026-08-16 — an ignoreDifferences entry that is correct and still does nothing
+
+**Status: UNRESOLVED and cosmetic. Recorded so nobody re-derives it.**
+
+After the kyverno 3.2.8 -> 3.8.2 upgrade, `core-kyverno` reports `OutOfSync`
+while `Healthy`, on the 11 policy CRDs new in kyverno 1.18
+(`validatingpolicies.policies.kyverno.io` and friends) plus the completed
+`kyverno-migrate-resources` Helm hook Job.
+
+### What was established
+
+A deep, field-by-field comparison of the rendered chart against the live object
+finds **exactly one** difference, and it is an apiserver default:
+
+    spec.conversion: ONLY-LIVE   ({'strategy': 'None'})
+
+`metadata` differences: 0. `spec` differences: 1. The chart does not set
+`spec.conversion`; the apiserver defaults it. There is nothing to fix in git.
+
+### What was tried, in order
+
+1. `ignoreDifferences` for `.spec.emitWarning` — correct and necessary for the
+   ClusterPolicies, irrelevant to the CRDs.
+2. Name-scoped `ignoreDifferences` entries, one per CRD, with
+   `jsonPointers: [/spec/conversion]`. **No effect.**
+3. Adding `group: apiextensions.k8s.io` to those entries — a real bug, since an
+   omitted group means the CORE ("") group rather than "any group", so the
+   entries had matched nothing. Fixed, confirmed present on the generated
+   Application. **Still no effect.**
+4. Deleting the completed `kyverno-migrate-resources` hook Job. **No effect.**
+
+The entry is confirmed on the live Application:
+
+    {"group":"apiextensions.k8s.io","kind":"CustomResourceDefinition",
+     "name":"deletingpolicies.policies.kyverno.io",
+     "jsonPointers":["/spec/conversion"]}
+
+### Leading hypothesis
+
+These are very large CEL-schema CRDs. ArgoCD is believed to skip diff
+normalisation above a size threshold, which would explain an entry that is
+syntactically correct, present on the Application, and still not applied. Not
+proven.
+
+### Why this is being left
+
+Kyverno 1.18.2 is running and healthy; all 28 ClusterPolicies are Synced and
+**enforcing** — verified with a live probe, a Pod with `image: nginx:latest` in
+namespace `gatus` is denied by `disallow-latest-tag`. 68 of 69 Applications are
+Synced+Healthy. The residue is an ArgoCD display artefact over an apiserver
+default on CRDs nothing in this repo uses yet.
+
+### ⚠️ Consequence for the update-safety preflight
+
+`docs/superpowers/specs/2026-08-16-update-safety-design.md` §5 defines a
+`FLEET_NOT_CLEAN` blocker that refuses a bulk update run while any app is
+OutOfSync. **A permanently-OutOfSync app would block every bulk run forever**,
+which is exactly how a safety control gets switched off by the person it
+protects.
+
+So that blocker MUST key on real failure — `operationState.phase` of
+`Error`/`Failed`, or a `SyncError` / `ComparisonError` condition — and NOT on
+raw `sync.status == OutOfSync`. `core-kyverno` has neither a SyncError
+condition nor a failed phase; it is `opPhase: Succeeded`. Add it to the
+benign-OutOfSync allowlist in `update-policies.ts` if raw status is ever used.
