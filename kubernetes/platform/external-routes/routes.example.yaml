@@ -1,3 +1,10 @@
+# gitops-coverage: dormant - worked example, not a route.
+#
+# It sits one level ABOVE manifests/ precisely so the external-routes Application
+# (which renders kubernetes/platform/external-routes/manifests) never picks it up.
+# Applying it would publish an IngressRoute for a service that does not exist.
+# Copy it into manifests/ and edit; never move it.
+#
 # ─────────────────────────────────────────────────────────────────────────────
 # routes.example.yaml — TEMPLATE for exposing your own apps through Traefik.
 #

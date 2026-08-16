@@ -28,6 +28,13 @@ DOCKER_BUILDKIT=0 docker build -t "${REF}" "${HERE}"
 echo "docker build OK"
 
 # Fail here rather than in a pod at 3am.
+#
+# ⚠️ `ttyd --version` IS NOT ENOUGH AND NEVER WAS. It parses argv and exits
+# before libwebsockets builds its context, so it passed happily on the image
+# published 2026-08-15 whose ttyd could not start at ALL (the runtime stage was
+# missing libwebsockets-evlib-uv; see the Dockerfile). The verify below BINDS A
+# PORT and makes a real request, which is the smallest check that catches it.
+# Do not weaken it back to a version print.
 echo "=== [2/3] verify ==="
 docker run --rm --entrypoint sh "${REF}" -c '
   set -e
@@ -35,7 +42,17 @@ docker run --rm --entrypoint sh "${REF}" -c '
   echo "ttyd commit: $(cat /usr/local/share/ttyd.commit)"
   tmux -V
   asciinema --version
+  command -v vim >/dev/null || { echo "no vim in image"; exit 1; }
+  command -v nano >/dev/null || { echo "no nano in image"; exit 1; }
   test "$(id -u)" = "1000" || { echo "image does not run as uid 1000"; exit 1; }
+  # Real start: this is the check that would have caught the evlib_uv gap.
+  /usr/local/bin/ttyd -p 7699 -i 127.0.0.1 true &
+  TP=$!
+  i=0
+  while [ $i -lt 20 ]; do curl -fsS -o /dev/null http://127.0.0.1:7699/ && break; i=$((i+1)); sleep 0.5; done
+  curl -fsS -o /dev/null http://127.0.0.1:7699/ || { echo "ttyd did not serve a request"; exit 1; }
+  kill $TP
+  echo "ttyd smoke test OK (served 127.0.0.1:7699)"
 '
 echo "verify OK"
 

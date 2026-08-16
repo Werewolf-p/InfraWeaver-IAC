@@ -1,3 +1,13 @@
+# gitops-coverage: dormant - the alternative monitoring stack. Parked on purpose.
+#
+# This platform runs kube-prometheus-stack. VictoriaMetrics is the documented
+# swap for it (~320Mi lighter) and ships complete but switched off:
+# ../application.yaml.disabled holds the chart definition and the swap procedure.
+# This datasource would point Grafana at a VMSingle that does not exist.
+# To turn it on: follow ../application.yaml.disabled - rename it to
+# application.yaml, disable kube-prometheus-stack's, and add a bootstrap
+# Application for this manifests/ directory in the same change.
+#
 # Grafana datasource ConfigMap for VictoriaMetrics
 # This is picked up by the Grafana sidecar (grafana.sidecar.datasources.enabled=true)
 # Replaces the kube-prometheus-stack datasource (prometheus:9090) with

@@ -1,3 +1,15 @@
+# gitops-coverage: dormant - Falco is deliberately not running.
+#
+# Falco is a privileged DaemonSet on three converged control-plane nodes; README.md
+# in this directory holds the measured resource case and a canary plan that starts
+# with exactly one node (values.yaml gates it behind nodeSelector falco-enabled=true,
+# and no node carries that label). The chart Application is parked at
+# ../application.yaml.disabled. These supplementary manifests - the namespace and
+# its NetworkPolicies - describe a namespace that has no reason to exist until the
+# chart does.
+# To turn it on: work through README.md's canary stage, enable the chart, and wire
+# this directory in the same change.
+#
 ---
 # Falco runtime security namespace.
 # pod-security: privileged — Falco requires kernel-level access via eBPF

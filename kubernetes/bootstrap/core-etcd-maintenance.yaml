@@ -1,0 +1,69 @@
+---
+# ArgoCD Application for kubernetes/core/etcd-maintenance/.
+#
+# WHY THIS FILE EXISTS — same class as core-rbac-manifests.yaml.
+# defrag-job.yaml has been in git since ~2026-08-07 and nothing had ever applied
+# it. Measured 2026-08-16, before this file:
+#
+#     kubectl get clusterrole etcd-metrics-logger            -> NotFound
+#     kubectl get sa -n kube-system etcd-metrics-logger      -> NotFound
+#     kubectl get cronjob -A | grep etcd                     -> (nothing)
+#
+# The umbrella `core` Application points at kubernetes/core with no
+# `directory.recurse`, so a manifest under a NEW subdirectory of core/ is never
+# rendered. The failure is silent in both directions: ArgoCD reports Synced and
+# Healthy for an Application that manages zero resources, and the manifest looks
+# deployed in `git log`. The gate that now catches this is
+# scripts/validate-gitops-coverage.py.
+#
+# WHY WIRE IT RATHER THAN PARK IT. The CronJob is the diagnostic half of the etcd
+# maintenance runbook (kubernetes/core/etcd-maintenance/snapshot-README.md): it
+# logs the apiserver-exposed etcd_* / apiserver_storage_* series weekly so an
+# operator opening a defrag window has history to compare against instead of a
+# single point reading. It is read-only by construction — the ClusterRole grants
+# exactly `get` on the non-resource URL /metrics and nothing else — and runs once
+# a week. There is no reason for it to be off, and it had no author deciding it
+# should be.
+#
+# NOT the etcd SNAPSHOT schedule. That is deliberately NOT in this cluster and
+# must stay out of it: an in-cluster CronJob cannot run when the cluster is down,
+# which is the only scenario the snapshots exist for, and it would place an
+# os:admin certificate inside the blast radius it is meant to survive. It runs on
+# the Proxmox host 10.1.0.3. See snapshot-README.md.
+#
+# No envsubst plugin: nothing under this path contains a placeholder token. Add
+# the plugin block at the same moment one does — the CMP is opt-in per
+# Application, and an unsubstituted placeholder otherwise ships verbatim.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: core-etcd-maintenance
+  namespace: argocd
+  labels:
+    infraweaver.io/type: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/core/etcd-maintenance
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      # kube-system obviously exists and its labels are not owned here.
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

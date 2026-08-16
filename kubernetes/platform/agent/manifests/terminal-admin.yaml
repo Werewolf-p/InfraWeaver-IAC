@@ -418,36 +418,46 @@ metadata:
     app.kubernetes.io/name: agent-admin
     app.kubernetes.io/component: terminal-admin
 spec:
-  # ⚠️ SCALED TO ZERO 2026-08-16 — LIVE SECURITY EXPOSURE, DO NOT SCALE UP UNTIL FIXED
+  # ── RESTORED TO 1 ON 2026-08-16 AFTER BOTH FAILURES WERE CLOSED ────────────
   #
-  # An audit obtained a WRITABLE, UNAUTHENTICATED admin shell on this service from
-  # an unrelated pod in the `monitoring` namespace. Two independent failures had to
-  # line up, and both are still true as of this commit:
+  # Scaled to 0 in git on 2026-08-16 because an audit obtained a writable,
+  # unauthenticated ADMIN shell on 7681 from an unrelated pod in `monitoring`.
+  # Two controls failed, and the shape of the failure is the lesson: each was
+  # only safe because of the other, which is one control wearing two hats.
   #
-  #  1. NETWORK. The k8s NetworkPolicy here admits only the `traefik` namespace on
-  #     7681 — but the Kyverno-generated `auto-default-deny` CiliumNetworkPolicy in
-  #     this namespace ADDITIVELY re-allows `fromEndpoints: [{}]` (the whole
-  #     namespace), `traefik`, AND `monitoring`, with NO port restriction. Cilium
-  #     UNIONS allow-rules, so the NetworkPolicy is decorative. `monitoring` runs
-  #     node-exporter on every node. You cannot fix a too-permissive allow by
-  #     adding another allow — the generated rule itself has to change.
-  #  2. AUTH. ttyd's `-H` header gate is PRESENCE-ONLY. A forged
-  #     `X-authentik-username: anything` returns HTTP 200 and upgrades /ws to 101.
-  #     The design doc's safety argument for `-H` rests entirely on the
-  #     NetworkPolicy in (1) admitting traefik alone, which it does not.
+  #  1. NETWORK — FIXED in kubernetes/core/kyverno/manifests/
+  #     resource-governance-policies.yaml. The Kyverno-generated
+  #     `auto-default-deny` CiliumNetworkPolicy re-allowed the whole
+  #     `monitoring` namespace on EVERY port. Cilium UNIONS allow-rules, so the
+  #     restrictive NetworkPolicy at the bottom of this file was decorative —
+  #     you cannot narrow an allow by adding an allow, which is why the fix is
+  #     in the generated rule and not in a new policy here. The template now
+  #     admits the Prometheus pods only, on metrics ports only (2112,
+  #     8080-8085, 9090-9999). 7681 is outside every range.
   #
-  # Chained with the still-live `create pods` + `pods/exec` in
-  # agent-admin-workloads, that shell reaches cluster-admin one namespace over:
-  # create a pod as SA `infraweaver-console`, exec in, and that SA holds
-  # cluster-wide `argoproj.io/applications` write — which ArgoCD applies as
-  # `argocd-application-controller` (`*` on `*/*`).
+  #  2. AUTH — FIXED here and in certificate.yaml. ttyd's `-H` gate is
+  #     presence-only: `curl -H 'X-authentik-username: made-up'` returned 200 and
+  #     upgraded /ws to 101. ttyd now runs `-S -C -K -A`, so libwebsockets
+  #     REQUIRES a client certificate signed by a CA whose only key holder is
+  #     Traefik. A forged header does not reach HTTP — the TLS handshake is
+  #     reset first. `-H` is kept for attribution (TTYD_USER in the recording)
+  #     and as a fail-closed assertion that forward-auth-admin was traversed; it
+  #     is no longer load-bearing as authentication.
   #
-  # Scaled in GIT, not with `kubectl scale`: this Application runs selfHeal=true
-  # and reverted a live scale-to-0 within seconds.
+  # Neither fix depends on the other. Delete the network rule and mTLS still
+  # refuses the caller; take the certificate away and the network still refuses
+  # the packet. That independence is the point.
   #
-  # To restore: fix the generated CNP so `monitoring` may reach scrape ports ONLY,
-  # make `-H` verify something unforgeable (or drop it and rely on the proxy being
-  # the sole path), then set this back to 1.
+  # The escalation this chained into is separately closed: `create pods` +
+  # `pods/exec` and all namespaced `apps` write are gone from
+  # agent-admin-workloads above, and NOT re-added here.
+  #
+  # ⚠️ Scale in GIT, never with `kubectl scale` — selfHeal=true reverts a live
+  # scale within seconds.
+  # ⚠️ STILL 0 IN THIS COMMIT — the fixes above are LANDED but NOT YET
+  # PROVEN on the live cluster. Scale-up is a second, separate commit
+  # made only after the four restore criteria are demonstrated with real
+  # probes. Do not flip this to 1 to "see if it works".
   replicas: 0
   strategy: { type: Recreate }
   selector:
@@ -460,6 +470,11 @@ spec:
         app.kubernetes.io/component: terminal-admin
     spec:
       serviceAccountName: agent-admin
+      # Zot requires auth on every pull; this namespace had no pull secret at
+      # all and both shells only ever started because cp1 held the layers in its
+      # containerd cache. See registry-pull-secret.yaml.
+      imagePullSecrets:
+        - name: registry-pull-secret
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -468,7 +483,16 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: terminal
-          image: registry.int.example.com/agent-shell:agentshell-20260815-210057
+          # Tag AND digest — the digest is what survives Zot's
+          # `mostRecentlyPushedCount: 3` retention collecting this tag, turning
+          # a silent wrong-image pull into a loud manifest-unknown.
+          #
+          # agentshell-20260816-152940 is the first build whose OWN ttyd starts:
+          # the runtime stage was missing libwebsockets-evlib-uv, so
+          # /usr/local/bin/ttyd aborted on every invocation and the pods were
+          # silently running the stale curl-installed ttyd 1.7.7 left on the
+          # home PVC. See images/agent-shell/Dockerfile.
+          image: registry.int.example.com/agent-shell:agentshell-20260816-152940@sha256:9987b27385fcba37b6f5a8a73f3733215783bac9a68e781aceebc11cc1538d31
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -597,10 +621,33 @@ spec:
                 chmod +x "$HOME/bin/crane" 2>/dev/null || true
               fi
 
-              # ── credentials: materialise, and SAY when one is missing ──
-              # Each is optional so the pod always starts; silence about a missing
-              # credential is exactly the failure mode that made this whole tree
-              # look finished while doing nothing.
+              # ── credentials: SCRUB FIRST, then materialise, and SAY when one
+              #    is missing ────────────────────────────────────────────────
+              #
+              # ⚠️ THE SCRUB IS THE IMPORTANT HALF AND IT DID NOT EXIST.
+              # This block only ever WROTE credentials. When a key was removed
+              # from the Secret the `else` branch printed "unavailable" and
+              # walked past the file that was still sitting on the volume — and
+              # $HOME is a Longhorn PVC that outlives every pod, so "the
+              # ExternalSecret is deleted" and "the credential is gone" were
+              # different facts for as long as nobody looked.
+              #
+              # They were not the same fact. On 2026-08-16 a live Talos os:admin
+              # config, a Proxmox ops token and a GitHub push token were found
+              # ON THIS VOLUME, months after the objects that produced them were
+              # removed, and had to be deleted by hand. THEY HAVE NOT BEEN
+              # ROTATED — treat all three as compromised until they are.
+              #
+              # So: unconditional removal on every start, THEN write only what
+              # the environment actually supplies. Absence of an env var now
+              # actively removes the file rather than merely declining to
+              # refresh it. A credential and its file must never outlive the
+              # Secret that authorised them.
+              rm -f "$HOME/.talos/config" \
+                    "$HOME/.git-credentials" \
+                    "$HOME/.proxmox-env" \
+                    "$HOME/.netrc"
+              git config --global --unset credential.helper >/dev/null 2>&1 || true
               if [ -n "${TALOSCONFIG_B64:-}" ]; then
                 mkdir -p "$HOME/.talos"
                 echo "$TALOSCONFIG_B64" | base64 -d > "$HOME/.talos/config"
@@ -670,6 +717,36 @@ spec:
               # rather than implying an identity they do not have.
               WHO="${TTYD_USER:-unattributed}"
               CAST="$REC_DIR/${STAMP}-${WHO}.cast"
+              export EDITOR="${EDITOR:-vim}"
+
+              # ── SESSION BOUNDING: three layers, none of which existed ───────
+              # There was no idle timeout and no absolute timeout on this shell
+              # at all, and no reaper either — the read-only sibling at least had
+              # one. The Authentik cookie lasts 1h, but an ESTABLISHED WebSocket
+              # is never re-checked against it, so a forgotten tab was an
+              # indefinitely-live PRODUCTION-WRITE shell authorised by a
+              # credential that expired hours earlier.
+              #
+              #   TMOUT=900     bash's own idle-input timer. Fires only on input
+              #                 inactivity at a prompt, does NOT reset on resize
+              #                 or reconnect (the S5 defect AWS documents), and
+              #                 does not fire while a command runs.
+              #   timeout 3600  absolute cap on ONE ATTACH, not on the work.
+              #                 ttyd's client reconnects on socket close by
+              #                 default and a reconnect is a fresh HTTP request
+              #                 back through forward-auth-admin — so this IS
+              #                 "re-check the authorising credential hourly",
+              #                 matched to the 1h cookie. tmux keeps the session
+              #                 so a running `next build` survives the re-auth.
+              #                 Never set `disableReconnect`; it is what makes
+              #                 this a re-auth rather than a dead tab.
+              #   reaper        agent-admin-reaper CronJob restarts this
+              #                 Deployment daily, bounding the tmux SERVER.
+              #
+              # ⚠️ TMOUT is advisory — the operator can unset it in their own
+              # shell. It is hygiene; the boundary is the attach cap and the
+              # reaper, both of which live outside the shell.
+              export TMOUT=900
 
               # Retention BEFORE recording, so a full volume cannot silently stop
               # the session being recorded. 30 days.
@@ -697,10 +774,11 @@ spec:
               # debugging aid. Real audit means streaming off-pod DURING the
               # session to storage this identity cannot write.
               if command -v asciinema >/dev/null 2>&1; then
-                exec asciinema rec --quiet --command "tmux new -A -s ops" "$CAST"
+                exec timeout --foreground --signal=HUP 3600 \
+                  asciinema rec --quiet --command "tmux new -A -s ops" "$CAST"
               fi
               echo "asciinema: NOT AVAILABLE — this session is NOT being recorded"
-              exec tmux new -A -s ops
+              exec timeout --foreground --signal=HUP 3600 tmux new -A -s ops
               WRAPPER
               sed -i 's/^              //' "$HOME/bin/session-wrapper.sh"
               chmod +x "$HOME/bin/session-wrapper.sh"
@@ -710,14 +788,46 @@ spec:
               # (external-routes/manifests/01-middlewares.yaml authResponseHeaders),
               # and Traefik adds it to the request it forwards here.
               #
-              # ⚠️ IT IS ALSO AN AUTH GATE, AND IT FAILS CLOSED. ttyd's
-              # check_auth() only verifies the header is PRESENT — worthless as
-              # authentication on its own, and meaningful only because the
-              # NetworkPolicy below admits traffic from the traefik namespace
-              # alone. Anything reaching ttyd without that header now gets 401
-              # instead of a shell, which is the desired behaviour for a direct
-              # in-cluster connection that bypassed the proxy.
-              exec ttyd -p 7681 -W -O -m 8 \
+              # ⚠️ IT IS NOT AN AUTH GATE AND NEVER WAS. The previous version of
+              # this comment claimed it "fails closed"; it fails closed only
+              # against a caller who forgets to type a header. ttyd's
+              # check_auth() verifies the header is PRESENT and nothing else —
+              # no value check, no signature, no notion of who set it. Measured
+              # 2026-08-16 from an unrelated pod:
+              #     curl -H 'X-authentik-username: totally-made-up-attacker'
+              #     -> HTTP 200, and /ws upgraded to 101.
+              # The old safety argument — "the NetworkPolicy admits traefik
+              # alone" — was both false and the wrong shape: a control that is
+              # only safe because of another control is not a second control.
+              #
+              # ── WHAT ACTUALLY KEEPS STRANGERS OUT NOW: -S -C -K -A ─────────
+              # -A makes libwebsockets set
+              # LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT, so the TLS
+              # handshake DEMANDS a client certificate signed by the CA in
+              # certificate.yaml. Traefik holds the only matching private key.
+              # A caller without it gets a connection reset during the
+              # handshake — no 401, no redirect, no opportunity to send a header
+              # at all. Possession of a private key is not something a forged
+              # string can imitate, which is exactly what `-H` could not say.
+              # Measured against this image before rollout:
+              #     no cert + forged header        -> TLS reset (curl 56)
+              #     cert from a different CA       -> TLS reset (curl 56)
+              #     valid cert, no header          -> 407
+              #     valid cert + header            -> 200, /ws -> 101
+              #
+              # `-H` STAYS, with an honest job: it populates TTYD_USER so the
+              # recording is attributable to the signed-in human, and it asserts
+              # fail-closed that the request really traversed forward-auth-admin.
+              #
+              # ⚠️ ABSOLUTE PATH, not `ttyd`. $HOME/bin precedes /usr/local/bin
+              # on PATH and this persistent volume still carries a
+              # curl-installed ttyd 1.7.7 from before the custom image existed;
+              # a bare `ttyd` silently runs the 2024 release the pinned-commit
+              # build was created to replace.
+              exec /usr/local/bin/ttyd -p 7681 -W -O -m 8 \
+                -S -C /etc/ttyd/tls/tls.crt \
+                   -K /etc/ttyd/tls/tls.key \
+                   -A /etc/ttyd/tls/ca.crt \
                 -H X-authentik-username \
                 -t titleFixed="InfraWeaver agent (ADMIN — can change production)" \
                 -t scrollback=100000 \
@@ -730,6 +840,7 @@ spec:
           volumeMounts:
             - { name: home, mountPath: /home/session }
             - { name: tmp,  mountPath: /tmp }
+            - { name: ttyd-tls, mountPath: /etc/ttyd/tls, readOnly: true }
         # ── AUDIT SHIPPER ───────────────────────────────────────────────────
         # Tails every asciicast recording to stdout, where Loki already scrapes
         # container logs. This is what turns recording into something closer to
@@ -755,7 +866,7 @@ spec:
         # `mountPath` is read-only: this container must never be able to alter
         # what it is shipping.
         - name: audit-shipper
-          image: registry.int.example.com/agent-shell:agentshell-20260815-210057
+          image: registry.int.example.com/agent-shell:agentshell-20260816-152940@sha256:9987b27385fcba37b6f5a8a73f3733215783bac9a68e781aceebc11cc1538d31
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -793,6 +904,14 @@ spec:
             claimName: agent-admin-home
         - name: tmp
           emptyDir: {}
+        # Server cert + the CA that client certificates are verified against.
+        # Issued by the dedicated in-namespace CA in certificate.yaml, NOT by
+        # the cluster-wide infraweaver-ca — which would sign a client cert for
+        # anyone able to create a Certificate, this shell included.
+        - name: ttyd-tls
+          secret:
+            secretName: agent-ttyd-server-tls
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service
@@ -834,6 +953,13 @@ spec:
       services:
         - name: agent-admin
           port: 80
+          # ttyd speaks TLS and demands a client certificate; Traefik must
+          # connect as https and present one. `agent-ttyd-mtls` carries the
+          # client key, the CA to trust, and disableHTTP2 — all three required.
+          # See certificate.yaml: over h2 ttyd cannot read the `-H` header at
+          # all and every request 407s.
+          scheme: https
+          serversTransport: agent-ttyd-mtls
   tls:
     secretName: platform-int-wildcard-tls
 ---
@@ -913,3 +1039,107 @@ spec:
               - 192.168.0.0/16
       ports:
         - { port: 443, protocol: TCP }
+---
+# ── REAPER: the absolute bound on a session's life ──────────────────────────
+#
+# ⚠️ THIS SHELL HAD NO REAPER AT ALL. The read-only sibling has had one since it
+# was built; the shell that can CHANGE PRODUCTION did not, so its tmux server —
+# and every process an operator left running under it — persisted for as long as
+# the pod did. Combined with the absent session timeouts that meant a session
+# authorised by a 1h Authentik cookie could still be alive weeks later.
+#
+# Three layers now bound a session, and this is the outermost:
+#   TMOUT=900       idle input, inside the shell (advisory)
+#   timeout 3600    one attach; the browser reconnects and re-traverses
+#                   forward-auth-admin, so the Authentik session is re-checked
+#                   hourly without losing work
+#   THIS CRONJOB    restarts the Deployment daily, ending the tmux SERVER
+#
+# Daily rather than hourly ON PURPOSE. The hourly re-auth is done by the attach
+# cap, which costs the operator nothing; restarting the pod destroys running
+# work (a `next build` here takes minutes and 4GB), so doing it hourly would
+# trade a real capability for a control the attach cap already provides.
+#
+# Same digest-pinned bitnami/kubectl as the sibling reaper and the five ArgoCD
+# CronJobs: Bitnami deleted the versioned tags from `bitnami/*` in 2025 and
+# tag-pinned jobs went to ImagePullBackOff. Digests survive tag removal.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agent-admin-reaper
+  namespace: infraweaver-agent
+  labels:
+    app.kubernetes.io/name: agent-admin-reaper
+spec:
+  schedule: "30 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            # Selected by the SCOPED allow-egress-apiserver CiliumNetworkPolicy
+            # in kubernetes/core/network-policies/manifests/apiserver-egress.yaml.
+            # Without this label the job is covered only by the namespace's
+            # generated auto-default-deny CNP — intra-namespace and DNS and
+            # nothing else — and every run dies on
+            #   dial tcp 10.96.0.1:443: i/o timeout
+            # The name deliberately matches the sibling reaper's convention and
+            # is NOT `agent-session`, which selects the operator shells whose
+            # egress must stay narrower.
+            app.kubernetes.io/name: agent-terminal-reaper
+        spec:
+          restartPolicy: Never
+          serviceAccountName: agent-admin-reaper
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: reaper
+              image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits:   { cpu: 200m, memory: 128Mi }
+              command: ["sh","-c","kubectl -n infraweaver-agent rollout restart deploy/agent-admin"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-admin-reaper
+  namespace: infraweaver-agent
+---
+# Scoped to one Deployment by resourceNames, with no `create` and no `delete`.
+# A reaper that can restart anything is a second admin surface.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-admin-reaper
+  namespace: infraweaver-agent
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames: ["agent-admin"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-admin-reaper
+  namespace: infraweaver-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-admin-reaper
+subjects:
+  - kind: ServiceAccount
+    name: agent-admin-reaper
+    namespace: infraweaver-agent

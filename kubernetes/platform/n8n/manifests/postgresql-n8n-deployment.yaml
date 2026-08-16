@@ -104,15 +104,21 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 30
+      # ── Zone class: latency-bound (docs/SCHEDULING-ZONES.md) ─────────────────
+      # Same change, same reason as n8n-deployment.yaml: this was a weight-100
+      # preference naming talos-prod-cp2, a node deleted on 2026-08-15. A database
+      # one WAN hop away from the application it serves is the shape of the
+      # 2026-08-15 slowdown; keeping both ends in the local site is REQUIRED, not
+      # preferred, and is expressed on the zone label so a replacement node
+      # inherits it instead of silently escaping it.
       affinity:
         nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            preference:
-              matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: In
-                values: [talos-prod-cp1, talos-prod-cp2]
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: NotIn
+                values: [hypatia]
       volumes:
       - name: postgresql-data
         persistentVolumeClaim:

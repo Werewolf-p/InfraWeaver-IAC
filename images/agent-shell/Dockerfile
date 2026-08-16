@@ -56,21 +56,67 @@ FROM node:22-bookworm
 # util-linux — keeps `script` available as the fallback path.
 # The rest is what an operator shell needs and the old startup script installed
 # at runtime or simply lacked.
+#
+# ⚠️ libwebsockets-evlib-uv IS LOAD-BEARING AND WAS MISSING. WITHOUT IT THE
+# ttyd IN THIS IMAGE CANNOT START AT ALL. Debian ships libwebsockets built with
+# LWS_WITH_EVLIB_PLUGINS=ON, so the libuv event loop lives in a SEPARATE package
+# that `libwebsockets17` does not depend on. ttyd links libuv and asks lws for
+# that loop, so lws dlopen()s the plugin and, not finding it, aborts before
+# binding a port:
+#
+#     E: lws_create_context: unable to load evlib plugin evlib_uv
+#     E: libwebsockets context creation failed
+#
+# The build stage never caught this because `libwebsockets-dev` pulls the plugin
+# in transitively, and the old smoke test below only ran `ttyd --version`, which
+# returns before any context is created. Measured 2026-08-16: the published
+# image `agentshell-20260815-210057` fails this way on every invocation. The
+# pods only appeared healthy because `$HOME/bin` precedes /usr/local/bin on PATH
+# and the persistent home volume still carried the curl-installed ttyd 1.7.7
+# release binary from before this image existed — i.e. the ~2.5-year-old release
+# this whole image was built to stop running. Both Deployments now invoke
+# /usr/local/bin/ttyd by ABSOLUTE PATH so the PVC can never shadow it again.
+#
+# vim + nano: an operator with no editor falls back to SSH for any real work,
+# which defeats the point of an in-cluster shell. vim-tiny (what was here) does
+# not provide `vim` and has no syntax highlighting, no multi-level undo and no
+# visual mode. Two editors rather than one because "which editor" is a genuine
+# preference and neither is large.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tmux asciinema util-linux \
-      git curl ca-certificates jq less vim-tiny procps iputils-ping dnsutils \
-      libjson-c5 libwebsockets17 zlib1g \
+      git curl ca-certificates jq less procps iputils-ping dnsutils \
+      vim nano \
+      libjson-c5 libwebsockets17 libwebsockets-evlib-uv zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ttyd-build /src/build/ttyd /usr/local/bin/ttyd
 COPY --from=ttyd-build /ttyd.commit /usr/local/share/ttyd.commit
 
 # Fail the BUILD, not a 3am session, if the binary is not runnable.
-RUN /usr/local/bin/ttyd --version && tmux -V && asciinema --version
+#
+# ⚠️ `--version` IS NOT A SMOKE TEST AND NEVER WAS. It parses argv and exits
+# before lws_create_context(), so it passed for the entire life of the image
+# that could not start. The check below BINDS A PORT and makes a real request,
+# which is the smallest test that would have caught the missing evlib plugin.
+RUN /usr/local/bin/ttyd --version && tmux -V && asciinema --version \
+ && ( /usr/local/bin/ttyd -p 7699 -i 127.0.0.1 true & echo $! > /tmp/ttyd.pid ) \
+ && for i in $(seq 1 20); do curl -fsS -o /dev/null http://127.0.0.1:7699/ && break || sleep 0.5; done \
+ && curl -fsS -o /dev/null http://127.0.0.1:7699/ \
+ && kill "$(cat /tmp/ttyd.pid)" \
+ && echo "ttyd smoke test: served a request on 127.0.0.1:7699"
+RUN command -v vim && command -v nano
 
 # uid 1000 (`node`) already exists in the base image and is what the Deployments
 # run as. $HOME is a PVC mount at runtime, so nothing here may depend on state
 # under it existing at build time.
+#
+# The mkdir+chown is NOT redundant with the PVC mount. A bare `WORKDIR
+# /home/session` creates the directory root-owned, so the image is unusable
+# without a volume: asciinema's first run wants $HOME/.config and dies with
+# `PermissionError: '/home/session/.config'`. In the pod fsGroup hides that, but
+# it also meant `docker run <image> asciinema --version` — the verify step in
+# build.sh — could never pass, so the verify was being skipped by hand.
+RUN mkdir -p /home/session && chown 1000:1000 /home/session
 USER 1000:1000
 ENV HOME=/home/session
 WORKDIR /home/session

@@ -1,0 +1,101 @@
+---
+# ArgoCD Application — MinIO, the object store behind Velero's backups.
+#
+# WHY THIS FILE EXISTS. MinIO has been RUNNING in the velero namespace since
+# 2026-06-13 and, until 2026-08-16, was owned by NOBODY. Its only Application
+# file was `app-minio-velero.yaml.disabled`, and that file pointed at
+# `http://onedev.onedev.svc.cluster.local/InfraWeaver-platform` — a git server
+# that no longer exists. So the Deployment was applied once by hand, and from
+# then on:
+#
+#   * no selfHeal — a manual `kubectl edit`, an eviction, or a bad rollout would
+#     never have been corrected;
+#   * no drift detection — git and the cluster could disagree indefinitely and
+#     nothing would say so;
+#   * nothing recreates it — delete the Deployment and it stays deleted.
+#
+# That last one is the sharp edge: Velero's ONLY BackupStorageLocation
+# (`default`, Available) targets this MinIO. An unmanaged Deployment underneath
+# the entire restore path is a backup system that can quietly stop existing.
+#
+# The same class as core-rbac and core/etcd-maintenance, arriving from the other
+# direction: not "in git and never applied", but "applied and never in git's
+# control". scripts/validate-gitops-coverage.py now fails CI on both.
+#
+# ADOPTION IS A NO-OP BY CONSTRUCTION — verified against the live objects on
+# 2026-08-16 before wiring this, and two mismatches were fixed in minio.yaml
+# rather than left for the first sync to discover:
+#   * the PVC said 20Gi, live is 50Gi. PVC requests cannot shrink, so the sync
+#     would have been rejected by the apiserver, permanently.
+#   * the file shipped its own `kind: Namespace` for velero with no PSA labels,
+#     which would have fought core-psa-manifests for ownership and could have
+#     stripped `pod-security.kubernetes.io/enforce: privileged` — the label
+#     Velero's node-agent DaemonSet needs to admit at all.
+# The Deployment itself is byte-identical to git (checked against its
+# last-applied-configuration), so it is adopted with zero diff.
+#
+# THE PLUGIN IS REQUIRED HERE. minio.yaml contains an IngressRoute matching
+# Host(`minio-velero.int.${BASE_DOMAIN}`). Without the envsubst CMP that token
+# ships verbatim and Traefik gets a router matching a literal placeholder host.
+# (This is the exact case app-velero-manifests.yaml warns about in its header.)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-minio-velero
+  namespace: argocd
+  annotations:
+    # Ahead of platform-velero-manifests (wave 1) and the Velero chart: the
+    # object store should be answering before Velero validates its
+    # BackupStorageLocation against it.
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/name: minio-velero
+    infraweaver.io/type: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ${DEPLOY_REPO_URL}
+    targetRevision: main
+    path: kubernetes/platform/minio-velero/manifests
+    plugin:
+      name: envsubst-v1.0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+  syncPolicy:
+    automated:
+      # prune: false. This Application owns the PVC that holds every Velero
+      # backup. `longhorn-retain` protects the PV, but there is no reason to let
+      # a bad render delete the PVC in the first place — the resources here are
+      # long-lived and few enough that removals are worth doing by hand.
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      # Namespace/velero already exists and its PSA labels belong to
+      # core-psa-manifests. This Application ships no Namespace object (see the
+      # note at the top of minio.yaml), so CreateNamespace only matters on a
+      # from-scratch rebuild and cannot contest the labels.
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    # ESO defaults these remoteRef strategy fields server-side after admission,
+    # so the live object never matches git without this. Same block every other
+    # ExternalSecret-carrying Application in this repo uses.
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jsonPointers:
+        - /status
+        - /metadata/finalizers
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'

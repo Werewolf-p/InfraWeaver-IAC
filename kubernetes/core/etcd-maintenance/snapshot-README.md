@@ -61,11 +61,26 @@ part of decommissioning the VM. Until then both hosts snapshot daily, which
 halves the effective remote retention window (`REMOTE_RETAIN=30` copies ≈ 15
 days at 2/day).
 
-> **This directory intentionally contains no manifests.** It holds the design
-> record only. `kubernetes/bootstrap/appset-core.yaml` generates an ArgoCD
-> Application for every `kubernetes/core/*/application.yaml`; there is no
-> `application.yaml` here, so nothing is deployed from this path. That is the
-> point — see below.
+> **The etcd SNAPSHOT schedule is deliberately not in this cluster** — it runs
+> on the Proxmox host, for the reasons below. That decision is unchanged.
+>
+> This paragraph used to read "this directory intentionally contains no
+> manifests", and it stopped being true on 2026-08-15 when `defrag-job.yaml`
+> (the `etcd-metrics-logger` CronJob) landed here. Worse, the sentence explained
+> away exactly the symptom that meant the CronJob had never been applied:
+> `kubernetes/bootstrap/appset-core.yaml` only templates Helm apps from
+> `kubernetes/core/*/application.yaml`, and the umbrella `core` Application has
+> no `directory.recurse`, so nothing rendered this path at all. For eight days
+> `kubectl get clusterrole etcd-metrics-logger` returned NotFound while the file
+> sat in git looking shipped.
+>
+> `defrag-job.yaml` is now deployed by
+> `kubernetes/bootstrap/core-etcd-maintenance.yaml`. It is read-only (`get` on
+> the non-resource URL `/metrics`, nothing else) and unrelated to snapshots — it
+> exists so an operator opening a defrag window has metric history rather than a
+> single point reading. `scripts/validate-gitops-coverage.py` now fails CI on any
+> directory of manifests that no Application renders, so this cannot recur
+> silently.
 
 ---
 

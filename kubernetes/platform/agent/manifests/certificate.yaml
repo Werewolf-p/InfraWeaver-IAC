@@ -24,3 +24,203 @@ spec:
   issuerRef:
     kind: ClusterIssuer
     name: letsencrypt-dns
+---
+# ═══════════════════════════════════════════════════════════════════════════
+#  BACKEND mTLS — the thing that makes ttyd's identity header mean anything
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS. ttyd's `-H <header>` gate is PRESENCE-ONLY: `check_auth()`
+# copies the named header and returns true if it is non-empty. It never checks
+# the value, never checks a signature, and has no notion of who set it. An audit
+# on 2026-08-16 sent
+#
+#     curl -H 'X-authentik-username: totally-made-up-attacker' http://<pod>:7681/
+#
+# from an unrelated pod and got HTTP 200, then upgraded /ws to 101 — a writable
+# shell with a header it invented. The read-only sibling was worse: it carried no
+# `-H` at all and answered 200 with no header whatsoever.
+#
+# The design doc's safety argument for `-H` was "the NetworkPolicy admits traefik
+# alone". It did not (see the Kyverno CNP fix in
+# kubernetes/core/kyverno/manifests/resource-governance-policies.yaml), and more
+# importantly THAT ARGUMENT SHOULD NOT HAVE EXISTED. Two controls that are each
+# only safe because of the other are one control with extra words. This file is
+# the second, INDEPENDENT one.
+#
+# WHAT IS NOW UNFORGEABLE. ttyd runs with `-S -C … -K … -A ca.crt`. The `-A`
+# flag makes libwebsockets set LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT,
+# so the TLS handshake itself demands a client certificate signed by the CA
+# below. Traefik is the only holder of the matching private key. A caller
+# without it does not get 401, does not get a redirect, and does not get to send
+# a header at all — the connection is reset during the handshake, before any
+# HTTP exists. Possession of a private key cannot be spoofed by typing a
+# different string into curl, which is precisely what the old gate could not
+# say. Measured against this exact image before rollout:
+#
+#     no client cert,   forged header      -> TLS reset (curl 56), no HTTP
+#     client cert from another CA          -> TLS reset (curl 56), no HTTP
+#     valid client cert, no header         -> HTTP 407
+#     valid client cert + header           -> HTTP 200, /ws upgrades to 101
+#
+# `-H` is KEPT, and its job is now honest: it is ATTRIBUTION (it populates
+# TTYD_USER for the session recording) plus a fail-closed assertion that the
+# request really did traverse forward-auth-admin. It is no longer load-bearing
+# as authentication, because the transport is.
+#
+# ⚠️ A DEDICATED CA, NOT `infraweaver-ca`. The cluster-wide `infraweaver-ca`
+# ClusterIssuer will sign a certificate for anyone who can create a Certificate
+# in any namespace, and `agent-admin` holds cert-manager.io write in four of
+# them. Trusting it here would mean the shell could mint its own client cert.
+# This CA signs exactly two certificates and nothing else may use it.
+#
+# ⚠️ HONEST RESIDUAL: `agent-admin` can still read this namespace's Secrets
+# (agent-admin-namespaced is RoleBound to infraweaver-agent), so a compromise
+# OF THE SHELL ITSELF can extract the client key. mTLS defends the shell from
+# the rest of the cluster; it does not defend the shell from itself. Closing
+# that means dropping secrets/cert-manager.io write in `infraweaver-agent` from
+# terminal-admin.yaml, which is a separate, argued RBAC change.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: agent-mtls-selfsigned
+  namespace: infraweaver-agent
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agent-mtls-ca
+  namespace: infraweaver-agent
+spec:
+  isCA: true
+  commonName: agent-mtls-ca
+  secretName: agent-mtls-ca
+  # 10 years. This CA never leaves the namespace and signs two leaves; rotating
+  # it is a coordinated restart of ttyd AND a Traefik reload, so it is not a
+  # thing to schedule casually. The LEAVES rotate on 90 days, which is where
+  # rotation hygiene actually belongs.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    kind: Issuer
+    name: agent-mtls-selfsigned
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: agent-mtls-ca
+  namespace: infraweaver-agent
+spec:
+  ca:
+    secretName: agent-mtls-ca
+---
+# Server certificate presented BY ttyd, in both Deployments.
+#
+# One certificate with several SANs rather than one per shell: Traefik pins the
+# name it verifies through `serverName` on the ServersTransport, and both shells
+# are the same binary behind the same gate. `agent-shell.infraweaver-agent.svc`
+# is the name Traefik verifies; the two real Service names are here so the cert
+# is still correct if anything connects by Service DNS.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agent-ttyd-server
+  namespace: infraweaver-agent
+spec:
+  secretName: agent-ttyd-server-tls
+  commonName: agent-shell.infraweaver-agent.svc
+  dnsNames:
+    - agent-shell.infraweaver-agent.svc
+    - agent-terminal.infraweaver-agent.svc
+    - agent-terminal.infraweaver-agent.svc.cluster.local
+    - agent-admin.infraweaver-agent.svc
+    - agent-admin.infraweaver-agent.svc.cluster.local
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    kind: Issuer
+    name: agent-mtls-ca
+    group: cert-manager.io
+---
+# Client certificate presented BY TRAEFIK. This key is the whole control: it is
+# what "only the proxy may talk to the shell" means in a form that cannot be
+# forged by setting a header.
+#
+# It lives in infraweaver-agent, not traefik, because a Traefik ServersTransport
+# resolves `certificatesSecrets` in ITS OWN namespace and a ServersTransport must
+# live in the namespace of the Service that references it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agent-traefik-client
+  namespace: infraweaver-agent
+spec:
+  secretName: agent-traefik-client-tls
+  commonName: traefik.agent-mtls.infraweaver-agent
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    kind: Issuer
+    name: agent-mtls-ca
+    group: cert-manager.io
+---
+# ── HOW TRAEFIK IS TOLD TO USE ALL OF THE ABOVE ────────────────────────────
+#
+# ⚠️ `disableHTTP2: true` IS LOAD-BEARING, NOT A PERFORMANCE TWEAK. Two
+# independent reasons, both measured:
+#
+#   1. ttyd's `-H` lookup uses lws_hdr_custom_copy(), which only works on
+#      HTTP/1.1. Over HTTP/2 the header is invisible to ttyd and every request
+#      returns 407. Reproduced directly against this image:
+#          curl --http2 … --cert … -H 'X-authentik-username: x'  -> 407
+#          curl --http1.1 … --cert … -H 'X-authentik-username: x' -> 200
+#      Go's TLS client negotiates h2 by default against an HTTPS backend, so
+#      without this line the terminal is 407 for everyone. This is the same
+#      root cause as upstream ttyd #1566, which the ttyd flag comments already
+#      describe for the browser side.
+#   2. A WebSocket upgrade is an HTTP/1.1 mechanism. Traefik will not carry one
+#      over an h2 backend connection.
+#
+# `serverName` must match a SAN on agent-ttyd-server above. It is NOT the
+# browser-facing hostname — that stays terminal.int / agent.int and is what the
+# `-O` origin check compares against, which is why Traefik must keep passing the
+# original Host header (it does, by default).
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: agent-ttyd-mtls
+  namespace: infraweaver-agent
+spec:
+  serverName: agent-shell.infraweaver-agent.svc
+  rootCAsSecrets:
+    - agent-mtls-ca
+  certificatesSecrets:
+    - agent-traefik-client-tls
+  disableHTTP2: true
+  forwardingTimeouts:
+    dialTimeout: 10s
+    # No read/idle cap here: an attached terminal is a long-lived idle
+    # connection by nature. Session bounding is done in the shells themselves
+    # (TMOUT + the absolute attach cap), where it can be argued about.
+    idleConnTimeout: 90s

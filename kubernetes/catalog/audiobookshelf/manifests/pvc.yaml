@@ -1,3 +1,13 @@
+# gitops-coverage: dormant - catalog template with no catalog.yaml, so it is not
+# installable and no Application can be generated for it.
+#
+# Every other catalog app carries a catalog.yaml; scripts/sync-catalog.sh writes
+# the bootstrap Application for the ones platform.yaml lists under `catalog.enabled`.
+# audiobookshelf has manifests but no catalog.yaml, so it is invisible to that
+# machinery and to the console catalog — half-finished, not parked on purpose.
+# To turn it on: add catalog.yaml (copy kubernetes/catalog/_template/catalog.yaml),
+# then add `audiobookshelf` to catalog.enabled in platform.yaml.
+#
 ---
 # PVC for "Config" → /config
 # Default path on Unraid: /mnt/user/appdata/audiobookshelf/config/

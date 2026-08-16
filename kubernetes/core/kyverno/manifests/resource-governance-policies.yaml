@@ -178,7 +178,7 @@ spec:
 # a noisy neighbour.
 #
 # So: same mechanism, same `synchronize: true` self-healing. The generated
-# policy is a byte-for-byte copy of the shape that is already live and
+# policy started as a byte-for-byte copy of the shape that is already live and
 # Hubble-verified in airgap-baseline.yaml — intra-namespace, cluster DNS,
 # Traefik ingress, monitoring scrape, nothing else — with ONE deliberate
 # subtraction: no `toEntities: [kube-apiserver]`. A freshly installed catalog
@@ -191,6 +191,14 @@ spec:
 # means "any endpoint in this policy's own namespace" — the same idiom
 # apiserver-egress.yaml uses for the argocd->redis allow. It avoids templating
 # the namespace name into the selector.
+#
+# ⚠️ IT IS NO LONGER A COPY OF airgap-baseline.yaml, AND THAT IS THE POINT.
+# The `monitoring` ingress entry here is narrower than the hand-written blocks:
+# Prometheus pods only, on metrics ports only, because the copied version was an
+# any-pod/any-port allow that an audit rode into a shell on 2026-08-16. The full
+# reasoning is on the rule itself below. The hand-written blocks in
+# airgap-baseline.yaml still carry the OLD wide shape and are a known follow-up;
+# they are not this file's to change.
 #
 # ⚠️ EXPECTED AND INTENDED CONSEQUENCE, READ BEFORE SYNCING: every namespace not
 # excluded below LOSES OUTBOUND INTERNET on first sync. That is the control
@@ -281,10 +289,10 @@ metadata:
     policies.kyverno.io/severity: high
     policies.kyverno.io/description: >-
       Every namespace gets a default-deny CiliumNetworkPolicy allowing only
-      intra-namespace traffic, cluster DNS, Traefik ingress and monitoring
-      scrape, so no namespace can ever be created into a default-allow posture
-      simply because nobody remembered to hand-write an airgap block for it.
-      Self-healing via synchronize.
+      intra-namespace traffic, cluster DNS, Traefik ingress and Prometheus
+      scrape ON METRICS PORTS ONLY, so no namespace can ever be created into a
+      default-allow posture simply because nobody remembered to hand-write an
+      airgap block for it. Self-healing via synchronize.
 spec:
   # Pinned explicitly rather than ignored: kyverno 1.18 defaults this in, and
   # `.spec.validationFailureAction` is the Enforce/Audit switch -- ignoring it
@@ -411,7 +419,70 @@ spec:
               # Same namespace.
               - fromEndpoints: [{}]
               - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
-              - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+              # ── monitoring: SCRAPE ONLY. READ THIS BEFORE WIDENING IT. ──────
+              #
+              # ⚠️ THIS ENTRY WAS A CLUSTER BREACH ON 2026-08-16, and the shape
+              # of the mistake matters more than the incident. It used to read:
+              #
+              #     - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
+              #
+              # — every pod in `monitoring`, on EVERY PORT. `monitoring` runs
+              # node-exporter on every node plus promtail, loki, alertmanager
+              # and kube-state-metrics, so that line handed all of them a route
+              # to any port of any pod in every namespace this rule generates
+              # into. An audit used it to reach ttyd on 7681 in
+              # `infraweaver-agent` and got a writable admin shell.
+              #
+              # ⚠️ CILIUM UNIONS ALLOW-RULES. The hand-written
+              # networking.k8s.io NetworkPolicy in that namespace admitted only
+              # `traefik` on 7681 and was therefore DECORATIVE — a restrictive
+              # policy cannot subtract from a permissive one, so the widest rule
+              # in the union wins. You cannot fix a too-permissive allow by
+              # adding another allow; the over-allowing rule itself has to
+              # change, which is why the fix is here and not in a new policy.
+              #
+              # TWO NARROWINGS, EACH SUFFICIENT ON ITS OWN:
+              #
+              #  1. SOURCE. Only the Prometheus server pods, not the namespace.
+              #     Nothing else in `monitoring` initiates connections into
+              #     other namespaces: node-exporter and promtail read from the
+              #     node, kube-state-metrics reads the API server, alertmanager
+              #     talks outbound. Verified against the live target list on
+              #     2026-08-16 — every active scrape is made by
+              #     `app.kubernetes.io/name: prometheus`.
+              #     ⚠️ That label is kube-prometheus-stack's, so this rule is
+              #     coupled to it. If the scraper is renamed or a second one is
+              #     added, its targets go DOWN — loudly, and alerted on — rather
+              #     than silently unscraped.
+              #
+              #  2. PORTS. Scraping needs SCRAPE ports, not every port. The
+              #     ranges below are the Prometheus default port allocations
+              #     (9100-9999 is the registered exporter range), the 8080-8085
+              #     block every operator/controller in this cluster serves
+              #     metrics on, and 2112 (controller-runtime's default). They
+              #     were checked against all 26 live scrape targets and cover
+              #     every one that is not in an excluded namespace.
+              #
+              #     7681 (ttyd) is outside every range, deliberately and by
+              #     construction — a shell is not a metrics endpoint. So is 22,
+              #     80, 443, 8200 (OpenBao) and 5432/3306/6379.
+              #
+              # IF A FUTURE APP SCRAPES ON A PORT NOT LISTED HERE it will show
+              # as a DOWN target in Prometheus, which is the intended failure
+              # mode: visible, not silent. Add a scoped CiliumNetworkPolicy for
+              # that one namespace in
+              # kubernetes/core/network-policies/manifests/allowlists.yaml —
+              # the same pattern egress holes already use — rather than
+              # re-widening this template for all of them.
+              - fromEndpoints:
+                  - matchLabels:
+                      k8s:io.kubernetes.pod.namespace: monitoring
+                      k8s:app.kubernetes.io/name: prometheus
+                toPorts:
+                  - ports:
+                      - {port: "2112", protocol: TCP}
+                      - {port: "8080", endPort: 8085, protocol: TCP}
+                      - {port: "9090", endPort: 9999, protocol: TCP}
             egress:
               - toEndpoints: [{}]
               - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]

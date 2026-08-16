@@ -38,19 +38,40 @@ server:
   livenessProbe:
     enabled: false
 
-  # Node affinity: prefer cp1/cp2 over cp3 which has known Longhorn mmap instability.
-  # SIGBUS crashes occur when cp3 briefly loses volume connectivity, causing mmap
-  # page faults in OpenBao's Raft/BBolt storage. Preferring stable nodes prevents this.
+  # ── Zone class: latency-bound (docs/SCHEDULING-ZONES.md) ────────────────────
+  # THIS RULE USED TO NAME NODES, AND THAT NEARLY COST THE VAULT.
+  # Until 2026-08-16 it was `kubernetes.io/hostname In [talos-prod-cp2,
+  # talos-prod-cp3]` — REQUIRED. cp2 was deleted on 2026-08-15, so what survived
+  # was a hard pin to cp3 alone: one replica, on the tightest node in the fleet,
+  # with no second placement anywhere. If cp3 had failed, OpenBao would not have
+  # rescheduled, every ClusterSecretStore would have stopped answering, and every
+  # ExternalSecret on the platform would have frozen at its last value. The
+  # comment above it claimed the opposite ("prefer cp1/cp2 over cp3") — the rule
+  # had excluded cp1 the whole time.
+  #
+  # Node names are not a durable way to express placement: they go stale silently
+  # the day a node is replaced, and a stale scheduling rule reports success while
+  # doing nothing (or, as here, something dangerous). Zones are stable — Talos
+  # sets `topology.kubernetes.io/zone` from machine config (scripts/talos-node-add.sh
+  # --zone), so a replacement node inherits the rule instead of escaping it.
+  #
+  # WHY EXCLUDE hypatia RATHER THAN NAME A NODE: OpenBao is on the request path of
+  # every ExternalSecret refresh and every ArgoCD sync that needs a credential,
+  # and its Raft/BoltDB sits on a Longhorn volume whose replicas live in this
+  # site. zone=hypatia is a Hetzner box ~15 ms away across a stretched VLAN
+  # (cp1<->cp3 is 0.19-0.63 ms); putting a consensus log's storage engine across
+  # that link is exactly the failure this policy exists to prevent.
+  #
+  # Leaves cp1 AND cp3 eligible, so unlike the rule it replaces this is not a pin.
   affinity: |
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
         - matchExpressions:
-          - key: kubernetes.io/hostname
-            operator: In
+          - key: topology.kubernetes.io/zone
+            operator: NotIn
             values:
-            - talos-prod-cp2
-            - talos-prod-cp3
+            - hypatia
 
   standalone:
     enabled: true

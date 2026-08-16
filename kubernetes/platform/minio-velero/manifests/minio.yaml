@@ -1,13 +1,17 @@
 ---
 # MinIO — S3-compatible object storage for Velero backups
 # Stores all backup data on Longhorn PVC (persistent, survives pod restarts)
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: velero
-  labels:
-    app.kubernetes.io/name: velero
-    infraweaver.io/type: platform
+#
+# ⚠️ NO `kind: Namespace` HERE, DELIBERATELY.
+# This file shipped one until 2026-08-16, carrying `app.kubernetes.io/name:
+# velero` and no PSA labels. It never mattered while nothing applied this file —
+# but the moment an Application was wired (2026-08-16) it would have fought
+# core-psa-manifests, which owns Namespace/velero and is the single source of
+# truth for pod-security labels (kubernetes/core/psa/namespace-labels.yaml).
+# Losing `pod-security.kubernetes.io/enforce: privileged` off this namespace
+# stops Velero's node-agent DaemonSet from admitting at all — i.e. wiring the
+# backup store would have broken the backups. The Application sets
+# CreateNamespace=true for a from-scratch rebuild instead.
 ---
 # PVC for MinIO backup storage (Longhorn retained — never auto-deleted)
 apiVersion: v1
@@ -26,7 +30,12 @@ spec:
   storageClassName: longhorn-retain
   resources:
     requests:
-      storage: 20Gi
+      # 50Gi, matching the live PVC. This said 20Gi until 2026-08-16, from before
+      # the volume was grown out-of-band. A PVC request can only be INCREASED, so
+      # the first sync of the newly-wired Application would have been rejected by
+      # the apiserver and left it permanently OutOfSync — the classic way an
+      # adoption of a live resource fails. Grow this value first, then the volume.
+      storage: 50Gi
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -220,10 +229,13 @@ spec:
   routes:
     - match: Host(`minio-velero.int.${BASE_DOMAIN}`)
       kind: Rule
+      # forward-auth was listed TWICE here. Traefik chains middlewares in order,
+      # so the second entry issued a second identical forward-auth subrequest to
+      # Authentik on every request to this route — pure duplicated latency, and
+      # a chain nobody could read correctly. The Authentik application binding
+      # for this host exists (platform/authentik/manifests/blueprint-forward-auth.yaml).
       middlewares:
         - name: secure-headers
-          namespace: traefik
-        - name: forward-auth
           namespace: traefik
         - name: forward-auth
           namespace: traefik
@@ -260,33 +272,24 @@ spec:
         key: secret/platform/minio-velero
         property: secret_key
 ---
-# Velero also needs access to MinIO — separate secret in velero format
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: velero-s3-credentials
-  namespace: velero
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: openbao
-    kind: ClusterSecretStore
-  target:
-    name: velero-s3-credentials
-    creationPolicy: Owner
-    deletionPolicy: Retain
-    template:
-      data:
-        cloud: |
-          [default]
-          aws_access_key_id={{ .access_key }}
-          aws_secret_access_key={{ .secret_key }}
-  data:
-    - secretKey: access_key
-      remoteRef:
-        key: secret/platform/minio-velero
-        property: access_key
-    - secretKey: secret_key
-      remoteRef:
-        key: secret/platform/minio-velero
-        property: secret_key
+# ⚠️ THE `velero-s3-credentials` ExternalSecret USED TO BE DUPLICATED HERE.
+#
+# It is owned by platform-velero-manifests
+# (kubernetes/platform/velero/manifests/externalsecret.yaml) — confirmed live:
+#   argocd.argoproj.io/tracking-id:
+#     platform-velero-manifests:external-secrets.io/ExternalSecret:velero/velero-s3-credentials
+#
+# While nothing rendered this file the duplicate was inert. Wiring an Application
+# for it (2026-08-16) would have made two Applications claim the same object —
+# and the two copies had DRIFTED APART: the one here was missing
+# `template.engineVersion: v2` and `template.type: Opaque`. Under ESO v1 that
+# changes how `{{ .access_key }}` is rendered into the `cloud` key, i.e. the two
+# owners would have fought over the exact credential file Velero mounts at
+# /credentials/cloud. Adopting this directory would have taken out the backups it
+# exists to protect.
+#
+# One object, one owner. The canonical definition stays in
+# kubernetes/platform/velero/manifests/externalsecret.yaml — that Application
+# also sync-waves ahead of the Velero chart, which this one has no reason to.
+# `minio-velero-credentials` above (MinIO's OWN root user) belongs here and is
+# not duplicated anywhere.

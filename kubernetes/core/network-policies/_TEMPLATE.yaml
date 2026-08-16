@@ -1,3 +1,10 @@
+# gitops-coverage: dormant - this is the copy-me template, not a policy.
+#
+# It deliberately lives one level ABOVE manifests/ so that core-network-policies
+# (which renders kubernetes/core/network-policies/manifests) cannot pick it up.
+# Applying it would create a NetworkPolicy named after a placeholder app in a
+# placeholder namespace. Copy it into manifests/ and fill it in; never move it.
+#
 # Onboarding template — copy into manifests/, replace __NAMESPACE__, done.
 # This makes __NAMESPACE__ an airgapped void: deny everything except DNS,
 # intra-namespace, the Kubernetes API, Traefik ingress, and monitoring scrape.

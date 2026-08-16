@@ -124,15 +124,30 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 30
+      # ── Zone class: latency-bound (docs/SCHEDULING-ZONES.md) ─────────────────
+      # Was a weight-100 PREFERENCE naming [talos-prod-cp1, talos-prod-cp2].
+      # cp2 was deleted 2026-08-15, so half of it addressed a node that no longer
+      # exists — and a preference is discarded the moment the scheduler's resource
+      # scoring disagrees, which is precisely how latency-critical singletons
+      # landed on cp4 that day (authentik Traefik p95 0.270 s -> 3.765 s).
+      #
+      # n8n and postgresql-n8n talk to each other on every workflow step. Split
+      # across the stretched VLAN (zone=hypatia, ~15 ms; cp1<->cp3 is 0.19-0.63 ms)
+      # each step pays that twice. REQUIRED, on the zone label, so it survives a
+      # node being replaced and cannot be outvoted by node scoring.
+      #
+      # Not a pin: cp1 and cp3 both satisfy it. Today both n8n PVCs are
+      # local-path bound to talos-prod-cp1, which pins the pod harder than any
+      # affinity does — this rule is what keeps the intent true after the volumes
+      # move to a class that can follow the pod.
       affinity:
         nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            preference:
-              matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: In
-                values: [talos-prod-cp1, talos-prod-cp2]
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: NotIn
+                values: [hypatia]
       volumes:
       - name: n8n-data
         persistentVolumeClaim:

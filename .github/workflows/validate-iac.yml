@@ -10,6 +10,9 @@ on:
       - "kubernetes/**"
       - "scripts/validate-iac.sh"
       - "scripts/validate-netpol-ports.sh"
+      - "scripts/validate-gitops-coverage.py"
+      - "scripts/validate-scheduling.py"
+      - "scripts/fleet-topology.yaml"
       - "scripts/validate-openbao-policy-drift.sh"
       - "scripts/deploy/bootstrap-openbao.sh"
       - ".github/workflows/validate-iac.yml"
@@ -69,6 +72,24 @@ jobs:
       # --live from an operator host / cron) from silently comparing nothing.
       - name: Validate OpenBao policy definitions (static drift gate)
         run: bash scripts/validate-openbao-policy-drift.sh
+
+      # The "committed but never deployed" gate. This platform's signature
+      # failure is a directory of valid manifests that NO Application renders:
+      # it passes kubeconform, it passes review, `git log` says it shipped, and
+      # the cluster has never seen it. core/rbac sat inert while the
+      # cluster-admin binding it replaces stayed live; core/etcd-maintenance sat
+      # inert for eight days; minio-velero ran with no owner underneath Velero's
+      # only BackupStorageLocation. Nothing checked, so nothing was found.
+      - name: Validate GitOps coverage (every manifest directory has an Application)
+        run: python3 scripts/validate-gitops-coverage.py
+
+      # Scheduling rules must still bind to a node/zone that exists. Deleting
+      # talos-prod-cp2 on 2026-08-15 turned three rules into no-ops without an
+      # error anywhere, and authentik's Traefik p95 went 0.270 s -> 3.765 s with
+      # no change to any file. Also rejects zone rules written as preferences —
+      # a WAN boundary is not a hint. Policy: docs/SCHEDULING-ZONES.md
+      - name: Validate scheduling rules (stale node/zone references, soft zone rules)
+        run: python3 scripts/validate-scheduling.py
 
       - name: Validate ESO references
         run: bash scripts/validate-eso-refs.sh || true   # informational until hardened

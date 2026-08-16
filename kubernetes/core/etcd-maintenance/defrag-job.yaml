@@ -54,6 +54,16 @@ spec:
               # maintenance window — the worst possible time to discover it.
               image: "bitnami/kubectl:1.35.4@sha256:e2b97dde9666986c61c56d49aae85a714b89b69392baa531438e74ec34096fb4"
               imagePullPolicy: IfNotPresent
+              # Declared even though kube-system is excluded from Kyverno's
+              # require-memory-request-and-limit: a container with no request is
+              # scheduled as if it were free. This one shells out to kubectl once
+              # a week, so the budget is nominal and deliberate rather than absent.
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
               command:
                 - /bin/sh
                 - -ceu

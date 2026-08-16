@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# fleet-topology.yaml — the fleet, as the repo believes it to be.
+#
+# Read by scripts/validate-scheduling.py. Its only job is to make a stale
+# scheduling rule LOUD: on 2026-08-15 `talos-prod-cp2` was deleted, and three
+# scheduling rules across kubernetes/ went on naming it. Nothing broke visibly,
+# because a nodeAffinity term that matches no node simply stops contributing —
+# a REQUIRED rule silently narrows to whatever is left (OpenBao ended up hard
+# pinned to a single node), and a PREFERRED one silently becomes nothing at all.
+# The scheduler then placed latency-critical singletons on the far side of a
+# 15 ms WAN link and the whole platform got slower with no change to any file.
+#
+# KEEP THIS FILE IN STEP WITH THE CLUSTER. It is a two-line edit in the same PR
+# that adds or retires a node:
+#   scripts/talos-node-add.sh    --name <n> --zone <z>   → add the entry here
+#   scripts/talos-node-retire.sh --name <n>              → delete the entry here
+# CI then fails on every rule still naming the departed node, which is the whole
+# point: you find them in a PR instead of in a latency graph three weeks later.
+#
+# Verify against reality any time with:
+#   kubectl get nodes -L topology.kubernetes.io/zone
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Zones ────────────────────────────────────────────────────────────────────
+# `topology.kubernetes.io/zone` is set by Talos machine config (machine.nodeLabels,
+# written by scripts/talos-node-add.sh --zone) and is therefore reasserted on
+# every boot. It is the ONLY placement axis in this repo that survives a node
+# being rebuilt or renamed, which is why the scheduling policy is written on it.
+zones:
+  proxmox:
+    site: local
+    description: "Proxmox host on the LAN. Sub-millisecond to microserver."
+  microserver:
+    site: local
+    description: "HP MicroServer on the LAN. Sub-millisecond to proxmox."
+  hypatia:
+    site: remote
+    description: >-
+      Hetzner bare-metal, reached over a stretched VLAN. Measured 2026-08-16:
+      14.9-16.3 ms to either local zone, against 0.19-0.63 ms local-to-local.
+
+# Zones a latency-bound workload must never be scheduled into. This is the list
+# that `zone NotIn [...]` rules are checked against — a latency-bound workload
+# that excludes a different set than this one is a bug, not a preference.
+remote_zones:
+  - hypatia
+
+# ── Nodes ────────────────────────────────────────────────────────────────────
+# Every value that a scheduling rule may name under `kubernetes.io/hostname`.
+# A rule naming anything not listed here fails CI.
+nodes:
+  talos-prod-cp1:
+    zone: proxmox
+    role: control-plane
+  talos-prod-cp3:
+    zone: microserver
+    role: control-plane
+  talos-prod-cp4:
+    zone: hypatia
+    role: control-plane
+
+# ── Retired ──────────────────────────────────────────────────────────────────
+# Nodes that are gone. Listed only so the CI failure message can say "retired on
+# <date>" instead of "unknown node", which is the difference between someone
+# fixing the rule and someone re-adding the node name.
+retired:
+  talos-prod-cp2:
+    retired: "2026-08-15"
+    note: >-
+      Merged into cp1 and deleted. Its removal is what exposed the whole class:
+      the intent to keep latency-critical singletons off the WAN was written down
+      in eight places and bound in none of them.

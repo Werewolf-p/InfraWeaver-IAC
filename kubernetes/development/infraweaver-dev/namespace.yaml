@@ -1,3 +1,15 @@
+# gitops-coverage: dormant - scaffold for a development namespace that has never
+# been deployed. Verified 2026-08-16: `kubectl get ns infraweaver-dev` -> NotFound.
+#
+# The umbrella `development` Application points at kubernetes/development with no
+# directory.recurse, so this subdirectory has never rendered. Left dormant rather
+# than wired, for two reasons: nothing uses the namespace, and namespace.yaml here
+# declares its own pod-security labels, which would contest ownership with
+# core-psa-manifests (kubernetes/core/psa/namespace-labels.yaml is the single
+# source of truth for PSA labels).
+# To turn it on: move the PSA labels into namespace-labels.yaml, drop them from
+# here, and add a bootstrap Application (copy kubernetes/bootstrap/core-rbac-manifests.yaml).
+#
 apiVersion: v1
 kind: Namespace
 metadata:

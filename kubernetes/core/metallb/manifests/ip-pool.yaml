@@ -30,7 +30,26 @@ spec:
     - ${METALLB_COREDNS_VIP}/32
   autoAssign: false
 ---
-# General L2Advertisement: all control-plane nodes
+# General L2Advertisement: control-plane nodes IN THE LOCAL SITE ONLY.
+#
+# ── Zone class: latency-bound (docs/SCHEDULING-ZONES.md) ─────────────────────
+# This used to select every control-plane node, which after cp4 joined on
+# 2026-08-14 included zone=hypatia — a Hetzner box ~15 ms away across a
+# stretched VLAN. These are LAN addresses (${NODE_SUBNET_CIDR}) announced by
+# ARP. MetalLB picks ONE announcing node per service, and for the Traefik VIP
+# (externalTrafficPolicy: Local) any node with a ready Traefik endpoint is a
+# candidate — cp4 runs one. Had MetalLB chosen it, EVERY ingress request on the
+# platform would have hairpinned over the WAN, from a node whose ARP for a
+# 10.10.0.x address only reaches the LAN through the stretch in the first place.
+#
+# Nothing had to change for that to happen: it is a pure failover decision made
+# by MetalLB, invisible until latency graphs move. Same class of fault as the
+# 2026-08-15 slowdown, one layer down.
+#
+# Expressed as `zone NotIn [hypatia]` rather than by node name so a replacement
+# node inherits the rule (see the dns-l2 note below for what naming nodes costs).
+# Not an availability regression: if cp1 and cp3 are both gone there is nothing
+# left in the local site for Traefik to route to anyway.
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -42,8 +61,25 @@ spec:
   nodeSelectors:
     - matchLabels:
         node-role.kubernetes.io/control-plane: ""
+      matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: NotIn
+          values:
+            - hypatia
 ---
-# DNS L2Advertisement: only stable nodes (exclude cp2 due to frequent reboots)
+# DNS L2Advertisement: local-site control-plane nodes only.
+#
+# Was `kubernetes.io/hostname In [talos-prod-cp1, talos-prod-cp3]`, with a
+# comment about excluding cp2 for frequent reboots. cp2 has not existed since
+# 2026-08-15, so the comment described a node that was gone and the rule
+# described the fleet by accident: the day cp4 joined it kept working only
+# because nobody had added the new node to the list. The next node added by name
+# would have been excluded silently; the next node RENAMED would have emptied
+# the selector entirely and left the CoreDNS VIP unannounced.
+#
+# Same zone predicate as prod-l2, for the same reason and with the same result
+# today (cp1 + cp3) — but it now describes the intent ("announce DNS from the
+# local site") instead of enumerating a fleet that changes underneath it.
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -53,9 +89,10 @@ spec:
   ipAddressPools:
     - dns-pool
   nodeSelectors:
-    - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
+    - matchLabels:
+        node-role.kubernetes.io/control-plane: ""
+      matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: NotIn
           values:
-            - talos-prod-cp1
-            - talos-prod-cp3
+            - hypatia
