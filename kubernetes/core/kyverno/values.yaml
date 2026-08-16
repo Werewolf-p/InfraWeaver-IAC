@@ -2,19 +2,36 @@
 # Deployed in audit mode. Policies enforce in apps/ and catalog/ namespaces.
 # Single-node-friendly: all controllers set to 1 replica.
 
-# ── Avoid CP2 (was chronically OOM-killing) ──────────────────────────────────
-# All Kyverno controllers prefer CP1/CP3 to prevent co-location with CP2 crashes.
+# ── Keep the controllers out of zone `hypatia` ───────────────────────────────
+# Was "avoid CP2 (chronically OOM-killing)" as a preference naming
+# talos-prod-cp2. That node no longer exists, so the rule had become a no-op --
+# and on 2026-08-16 the ADMISSION controller was found running on cp4, the
+# Hetzner box ~15 ms across the stretched VLAN (cp1<->cp3 is 0.19-0.63 ms).
+#
+# ⚠️ That is not an ordinary workload placement. The admission webhook is in the
+# synchronous path of every CREATE/UPDATE of pods, deployments, jobs, namespaces,
+# externalsecrets and ciliumnetworkpolicies cluster-wide, so a controller on the
+# far side of the link adds that round trip to every matching API write -- which
+# the console pays repeatedly on every page that touches the cluster.
+#
+# REQUIRED, not preferred: a preference is what silently failed here. cp1 and
+# cp3 both remain eligible, so no availability is given up.
 admissionController:
   replicas: 1
-  affinity:
-    nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        preference:
-          matchExpressions:
-          - key: kubernetes.io/hostname
-            operator: NotIn
-            values: [talos-prod-cp2]
+  # ⚠️ KEY PATH: the kyverno chart reads `<controller>.nodeAffinity`, NOT
+  # `<controller>.affinity.nodeAffinity`. This was nested one level too deep
+  # from the day it was written, so Helm silently discarded it and the rule
+  # never existed -- verified 2026-08-16: the live admission-controller
+  # Deployment carried only the chart's default podAntiAffinity. That is how
+  # the controller ended up on cp4. A values key that does nothing looks
+  # exactly like a values key that works.
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: NotIn
+          values: [hypatia]
   serviceMonitor:
     enabled: false  # enable once Prometheus is confirmed running
   resources:
@@ -24,15 +41,13 @@ admissionController:
 
 backgroundController:
   replicas: 1
-  affinity:
-    nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        preference:
-          matchExpressions:
-          - key: kubernetes.io/hostname
-            operator: NotIn
-            values: [talos-prod-cp2]
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: NotIn
+          values: [hypatia]
   resources:
     limits:
       cpu: 200m
@@ -43,15 +58,13 @@ backgroundController:
 
 cleanupController:
   replicas: 1
-  affinity:
-    nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        preference:
-          matchExpressions:
-          - key: kubernetes.io/hostname
-            operator: NotIn
-            values: [talos-prod-cp2]
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: NotIn
+          values: [hypatia]
   resources:
     limits:
       cpu: 200m
@@ -70,15 +83,13 @@ reportsController:
   # post-crash reconciliation bursts (269+ restarts observed in 3 days).
   clientRateLimitQPS: 30
   clientRateLimitBurst: 60
-  affinity:
-    nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        preference:
-          matchExpressions:
-          - key: kubernetes.io/hostname
-            operator: NotIn
-            values: [talos-prod-cp2]
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: NotIn
+          values: [hypatia]
   resources:
     limits:
       cpu: 200m
