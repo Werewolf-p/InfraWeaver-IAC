@@ -537,6 +537,11 @@ spec:
               containerPort: 7681
           env:
             - { name: HOME, value: /home/session }
+            # Container-level, not just inside the session wrapper: `kubectl
+            # exec` and anything the agent spawns should also find an editor.
+            # The image now ships vim and nano; before this an operator had no
+            # editor at all and fell back to SSH for any real work.
+            - { name: EDITOR, value: vim }
             - { name: BUILDKIT_HOST, value: "tcp://buildkitd.build.svc.cluster.local:1234" }
             - name: ANTHROPIC_API_KEY
               valueFrom:
@@ -574,8 +579,17 @@ spec:
               # on every start, pinning us to a 2024-03-30 release whose
               # successors carry unreleased shell-injection and sprintf
               # hardening, and making every restart depend on GitHub.
-              command -v ttyd >/dev/null || { echo "ttyd missing from image"; exit 1; }
-              ttyd --version
+              #
+              # ⚠️ AND THE OLD ONE IS STILL ON THE VOLUME. Deleting the curl step
+              # stopped WRITING $HOME/bin/ttyd but never deleted what earlier
+              # pods wrote, and $HOME/bin precedes /usr/local/bin on PATH — so a
+              # bare `ttyd` kept running the 2024-03-30 release for as long as
+              # the PVC lived. Measured 2026-08-16: /home/session/bin/ttyd,
+              # 1362040 bytes, dated 2026-08-15. Same shape as the credential
+              # files below: "we stopped writing it" is not "it is gone".
+              rm -f "$HOME/bin/ttyd"
+              command -v /usr/local/bin/ttyd >/dev/null || { echo "ttyd missing from image"; exit 1; }
+              /usr/local/bin/ttyd --version
               # Fail loudly, never `|| true` — a silent install failure produced a
               # Healthy pod that dropped visitors into a bare shell with no agent
               # and no explanation. See terminal.yaml.

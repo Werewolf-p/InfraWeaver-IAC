@@ -133,6 +133,11 @@ spec:
               containerPort: 7681
           env:
             - { name: HOME, value: /home/session }
+            # Container-level, not just inside the session wrapper: `kubectl
+            # exec` and anything the agent spawns should also find an editor.
+            # The image now ships vim and nano; before this an operator had no
+            # editor at all and fell back to SSH for any real work.
+            - { name: EDITOR, value: vim }
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -167,8 +172,20 @@ spec:
               # being reachable and pinned us to a release from 2024-03-30 whose
               # successors carry unreleased shell-injection and sprintf
               # hardening. The image builds ttyd from a pinned main commit.
-              command -v ttyd >/dev/null || { echo "ttyd missing from image"; exit 1; }
-              ttyd --version
+              #
+              # ⚠️ AND THE OLD ONE IS STILL ON THE VOLUME, so removing it is part
+              # of the job. Deleting the curl step stopped writing $HOME/bin/ttyd
+              # but never deleted what earlier pods had already written, and
+              # $HOME/bin precedes /usr/local/bin on PATH — so a bare `ttyd`
+              # went on running the 2024-03-30 release for as long as the PVC
+              # lived. Measured 2026-08-16: /home/session/bin/ttyd, 1362040
+              # bytes, dated 2026-08-15. Same shape as the credential files in
+              # terminal-admin.yaml: "we stopped writing it" is not "it is gone".
+              # The exec below also uses an absolute path, so this is belt AND
+              # braces.
+              rm -f "$HOME/bin/ttyd"
+              command -v /usr/local/bin/ttyd >/dev/null || { echo "ttyd missing from image"; exit 1; }
+              /usr/local/bin/ttyd --version
               # Install Claude Code only if the persistent volume does not already
               # carry it, and FAIL LOUDLY when that install does not work.
               #
