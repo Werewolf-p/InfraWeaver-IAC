@@ -1,0 +1,200 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Nightly logical backup of the Nextcloud Postgres database
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS
+# ---------------
+# `nextcloud/postgresql-nextcloud-data-lp` is a `local-path` PVC pinned to ONE
+# node's disk (talos-prod-cp1) and it had NO BACKUP OF ANY KIND. A 2026-08-16
+# stability audit put Nextcloud at the top of the "RPO = infinity" column: lose
+# cp1 permanently and 110 GiB goes with it, with nothing to restore from.
+#
+# ⚠️ Velero cannot close this gap, and that is arithmetic rather than
+# configuration. `velero-weekly-localpath` names this namespace, but the object
+# store is a 50 GiB PVC against 254 GiB of local-path data — and on 2026-08-16
+# that store hit 100% full and took EVERY backup in the cluster down with it.
+# 98% of what filled it was a CANCELLED copy of this namespace's own NAS media
+# mount, swept in by `defaultVolumesToFsBackup: true`. A logical dump is small
+# enough to fit where a volume image never will.
+#
+# ⚠️ THIS IS THE DATABASE, NOT THE FILES. Read the section at the bottom before
+# assuming Nextcloud is covered.
+#
+# HOW THE DUMP REACHES OFF-BOX STORAGE — the whole point of the design
+# --------------------------------------------------------------------
+#   00:00  local-snapshot-daily     (Longhorn, retain 3)
+#   00:15  authentik-pg-dump
+#   00:20  THIS JOB  → pg_dump -Fc onto the LONGHORN PVC below
+#   00:25  n8n-pg-dump
+#   01:00  truenas-backup-daily     (Longhorn → nfs://10.1.0.135/mnt/pool/k8s-longhorn-backups)
+#
+# The trick is the destination, not the dump: writing to a `longhorn-retain`
+# PVC moves this data off a node-pinned local disk that nothing can back up and
+# onto a volume the existing recurring jobs already ship to the NAS. The
+# 40-minute gap before 01:00 is deliberate, matching the authentik job.
+#
+# RPO ~24h. Restore shape = fresh postgres + `pg_restore --create`, which is
+# also the only restore that works into a REBUILT cluster.
+#
+# VERIFY ENROLMENT AFTER THE FIRST SYNC — do not assume it:
+#   V=$(kubectl -n nextcloud get pvc nextcloud-pg-dumps -o jsonpath='{.spec.volumeName}')
+#   kubectl -n longhorn-system get volumes.longhorn.io "$V" --show-labels
+#   # WANT: recurring-job-group.longhorn.io/default=enabled
+#
+# ⚠️ WHAT IS *NOT* CLOSED BY THIS FILE — READ THIS
+# ------------------------------------------------
+# `nextcloud/nextcloud-data-lp` — 100 GiB of USER FILES, local-path, cp1 — still
+# has NO backup. This file protects the database: accounts, shares, permissions
+# and the file INDEX. That is the part that cannot be reconstructed from
+# anything else, and without it the file blobs are close to meaningless. But a
+# database dump is not a file backup and must never be reported as one.
+#
+# Closing the rest needs a real decision, not another CronJob: 100 GiB does not
+# fit the 50 GiB object store, and cp3 — the only node Longhorn could rebuild
+# onto — has 21.6 GiB free. The honest options are (a) migrate the data PVC to
+# Longhorn and grow the pool, (b) sync files to the NAS directly, or (c) accept
+# the risk in writing. Each is an operator decision with a cost.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-pg-dumps
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud-pg-dump
+    infraweaver.io/automation: backup
+spec:
+  accessModes: [ReadWriteOnce]
+  # longhorn-retain: reclaimPolicy Retain, so `git revert`-ing this file releases
+  # the PV instead of destroying accumulated dumps.
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      # 14 retained dumps. Nextcloud's DB is metadata only — the file blobs live
+      # on the data volume — so this is headroom, not a forecast.
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nextcloud-pg-dump
+  namespace: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud-pg-dump
+    infraweaver.io/automation: backup
+spec:
+  schedule: "20 0 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: nextcloud-pg-dump
+            infraweaver.io/automation: backup
+        spec:
+          restartPolicy: OnFailure
+          priorityClassName: platform-standard
+          # Set on the POD, not the ServiceAccount: Kubernetes never copies
+          # automountServiceAccountToken down from the SA to the pod.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            # The Longhorn volume is formatted root:root on first attach; fsGroup
+            # is what makes /dumps writable for UID 1001. Without it the very
+            # first run fails on "Permission denied" with nobody watching.
+            fsGroup: 1001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              # EXACT server image (measured live 2026-08-16:
+              # deploy/postgresql-nextcloud .spec.template.spec.containers[0].image).
+              # pg_dump refuses to dump a server NEWER than itself, so this must
+              # be bumped in lockstep with the server — a skew fails loudly,
+              # which is the point.
+              image: docker.io/library/postgres:15-alpine
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits:   {cpu: 500m, memory: 512Mi}
+              env:
+                - name: PGHOST
+                  value: postgresql-nextcloud
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: {name: nextcloud-app-credentials, key: db-user}
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: {name: nextcloud-app-credentials, key: db-name}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: nextcloud-app-credentials, key: db-password}
+                # UID 1001 has no passwd entry in this image; give libpq and sh a
+                # writable HOME so neither falls back to an unwritable path.
+                - name: HOME
+                  value: /tmp
+                - name: PGCONNECT_TIMEOUT
+                  value: "30"
+              command:
+                - sh
+                - -ec
+                - |
+                  set -o pipefail
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  OUT="/dumps/nextcloud-${STAMP}.dump"
+                  GLB="/dumps/nextcloud-${STAMP}.globals.sql"
+
+                  # --create so the restore re-creates the database with its own
+                  # settings, rather than depending on someone having made an
+                  # identical one by hand first.
+                  pg_dump -p 5432 -Fc --create --no-password -f "${OUT}"
+
+                  # A dump that cannot be listed is not a backup. pg_restore
+                  # --list parses the whole custom-format archive, so a truncated
+                  # or half-written file fails HERE rather than during an
+                  # incident. This is the check that makes the authentik dump the
+                  # only backup in this estate with proven integrity.
+                  pg_restore --list "${OUT}" > /dev/null
+
+                  # Roles and their passwords live at CLUSTER scope and are in no
+                  # per-database dump. Restoring onto an empty cluster needs the
+                  # role to exist first, or every object restores ownerless.
+                  pg_dumpall -p 5432 --globals-only --no-password > "${GLB}"
+
+                  sha256sum "${OUT}" > "${OUT}.sha256"
+                  sha256sum "${GLB}" > "${GLB}.sha256"
+
+                  # Retention: newest 14 dumps, each with its globals sidecar.
+                  # Longhorn keeps 7 daily + 4 weekly images of the whole PVC on
+                  # top of this, on the NAS.
+                  ls -1t /dumps/nextcloud-*.dump 2>/dev/null | tail -n +15 \
+                    | while read -r f; do
+                        b="${f%.dump}"
+                        rm -f "$f" "$f.sha256" "$b.globals.sql" "$b.globals.sql.sha256"
+                      done
+
+                  echo "OK ${OUT} $(stat -c%s "${OUT}") bytes + globals $(stat -c%s "${GLB}") bytes; $(ls -1 /dumps/nextcloud-*.dump | wc -l) dumps retained"
+              volumeMounts:
+                - {name: dumps, mountPath: /dumps}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: dumps
+              persistentVolumeClaim:
+                claimName: nextcloud-pg-dumps
+            - name: tmp
+              emptyDir: {}

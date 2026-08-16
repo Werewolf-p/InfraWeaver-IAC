@@ -1,0 +1,190 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Nightly logical backup of the n8n Postgres database
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS
+# ---------------
+# `n8n-prod/postgresql-n8n-data` is a `local-path` PVC pinned to ONE node's disk
+# (talos-prod-cp1) and it had NO BACKUP OF ANY KIND. A 2026-08-16 stability
+# audit put it in the "RPO = infinity" column alongside nextcloud, the WordPress
+# file volumes and the GT New Horizons world: if cp1 dies and does not come
+# back, every automation n8n holds is gone.
+#
+# ⚠️ Velero cannot close this gap, and that is arithmetic rather than
+# configuration. `velero-weekly-localpath` names this namespace, but the whole
+# object store is a 50 GiB PVC against 254 GiB of local-path data — and on
+# 2026-08-16 that store hit 100% full and took EVERY backup in the cluster down
+# with it. A logical dump is single-digit MB (the live DB measured 64.7 MB), so
+# it fits where a volume image never will.
+#
+# HOW THE DUMP REACHES OFF-BOX STORAGE — the whole point of the design
+# --------------------------------------------------------------------
+#   00:00  local-snapshot-daily     (Longhorn, retain 3)
+#   00:15  authentik-pg-dump
+#   00:25  THIS JOB  → pg_dump -Fc onto the LONGHORN PVC below
+#   01:00  truenas-backup-daily     (Longhorn → nfs://10.1.0.135/mnt/pool/k8s-longhorn-backups)
+#
+# The trick is the destination, not the dump: writing to a `longhorn-retain`
+# PVC moves this data from a node-pinned local disk that nothing can back up
+# onto a volume that the existing recurring jobs already ship to the NAS. The
+# 35-minute gap before 01:00 is deliberate, matching the authentik job.
+#
+# RPO ~24h. Restore shape = fresh postgres + `pg_restore --create`, which is
+# also the only restore that works into a REBUILT cluster — strictly more useful
+# than a block image of a directory pinned to a node that no longer exists.
+#
+# VERIFY ENROLMENT AFTER THE FIRST SYNC — do not assume it:
+#   V=$(kubectl -n n8n-prod get pvc n8n-pg-dumps -o jsonpath='{.spec.volumeName}')
+#   kubectl -n longhorn-system get volumes.longhorn.io "$V" --show-labels
+#   # WANT: recurring-job-group.longhorn.io/default=enabled
+#
+# WHAT IS *NOT* CLOSED BY THIS FILE
+# ---------------------------------
+# The n8n DATA volume (`n8n-data`, also local-path on cp1) still has no backup.
+# This file covers the database — credentials, workflow definitions and
+# execution history — which is the part that cannot be reconstructed. Closing
+# the rest means migrating that PVC to Longhorn, which is an operator-scheduled
+# window, not a side effect of a backup change.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-pg-dumps
+  namespace: n8n-prod
+  labels:
+    app.kubernetes.io/name: n8n-pg-dump
+    infraweaver.io/automation: backup
+spec:
+  accessModes: [ReadWriteOnce]
+  # longhorn-retain: reclaimPolicy Retain, so `git revert`-ing this file releases
+  # the PV instead of destroying accumulated dumps.
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      # 14 retained dumps of a 64.7 MB database. 5Gi is headroom, not a forecast.
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: n8n-pg-dump
+  namespace: n8n-prod
+  labels:
+    app.kubernetes.io/name: n8n-pg-dump
+    infraweaver.io/automation: backup
+spec:
+  schedule: "25 0 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: n8n-pg-dump
+            infraweaver.io/automation: backup
+        spec:
+          restartPolicy: OnFailure
+          priorityClassName: platform-standard
+          # Set on the POD, not the ServiceAccount: Kubernetes never copies
+          # automountServiceAccountToken down from the SA to the pod.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            # The Longhorn volume is formatted root:root on first attach; fsGroup
+            # is what makes /dumps writable for UID 1001. Without it the very
+            # first run fails on "Permission denied" with nobody watching.
+            fsGroup: 1001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              # EXACT server image (measured live 2026-08-16:
+              # deploy/postgresql-n8n .spec.template.spec.containers[0].image).
+              # pg_dump refuses to dump a server NEWER than itself, so this must
+              # be bumped in lockstep with the server — a skew fails loudly,
+              # which is the point.
+              image: docker.io/library/postgres:15-alpine
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits:   {cpu: 500m, memory: 512Mi}
+              env:
+                - name: PGHOST
+                  value: postgresql-n8n
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: {name: postgresql-n8n-credentials, key: username}
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: {name: postgresql-n8n-credentials, key: database}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: postgresql-n8n-credentials, key: password}
+                # UID 1001 has no passwd entry in this image; give libpq and sh a
+                # writable HOME so neither falls back to an unwritable path.
+                - name: HOME
+                  value: /tmp
+                - name: PGCONNECT_TIMEOUT
+                  value: "30"
+              command:
+                - sh
+                - -ec
+                - |
+                  set -o pipefail
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  OUT="/dumps/n8n-${STAMP}.dump"
+                  GLB="/dumps/n8n-${STAMP}.globals.sql"
+
+                  # --create so the restore re-creates the database with its own
+                  # settings, rather than depending on someone having made an
+                  # identical one by hand first.
+                  pg_dump -p 5432 -Fc --create --no-password -f "${OUT}"
+
+                  # A dump that cannot be listed is not a backup. pg_restore
+                  # --list parses the whole custom-format archive, so a truncated
+                  # or half-written file fails HERE rather than during an
+                  # incident. This is the check that makes the authentik dump the
+                  # only backup in this estate with proven integrity.
+                  pg_restore --list "${OUT}" > /dev/null
+
+                  # Roles and their passwords live at CLUSTER scope and are in no
+                  # per-database dump. Restoring onto an empty cluster needs the
+                  # role to exist first, or every object restores ownerless.
+                  pg_dumpall -p 5432 --globals-only --no-password > "${GLB}"
+
+                  sha256sum "${OUT}" > "${OUT}.sha256"
+                  sha256sum "${GLB}" > "${GLB}.sha256"
+
+                  # Retention: newest 14 dumps, each with its globals sidecar.
+                  # Longhorn keeps 7 daily + 4 weekly images of the whole PVC on
+                  # top of this, on the NAS.
+                  ls -1t /dumps/n8n-*.dump 2>/dev/null | tail -n +15 \
+                    | while read -r f; do
+                        b="${f%.dump}"
+                        rm -f "$f" "$f.sha256" "$b.globals.sql" "$b.globals.sql.sha256"
+                      done
+
+                  echo "OK ${OUT} $(stat -c%s "${OUT}") bytes + globals $(stat -c%s "${GLB}") bytes; $(ls -1 /dumps/n8n-*.dump | wc -l) dumps retained"
+              volumeMounts:
+                - {name: dumps, mountPath: /dumps}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: dumps
+              persistentVolumeClaim:
+                claimName: n8n-pg-dumps
+            - name: tmp
+              emptyDir: {}
