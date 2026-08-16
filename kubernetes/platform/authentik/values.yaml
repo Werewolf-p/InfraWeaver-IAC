@@ -353,10 +353,20 @@ postgresql:
       size: 2Gi
     resources:
       requests:
-        cpu: 200m
+        cpu: 400m
         memory: 768Mi
       limits:
-        cpu: 500m
+        # ⚠️ cpu was 500m and that was a real bottleneck, not headroom. Measured
+        # 2026-08-16 straight from the container cgroup while the database sat at
+        # 490m: nr_throttled 528 of 2598 periods (20.3%), 20.24 s of throttled
+        # time. Every one of those stalls lands inside an Authentik request, and
+        # Authentik forward-auth gates 41 of 45 Traefik routes.
+        #
+        # This is a SECOND, independent cause of the 2026-08-15 slowdown. Moving
+        # authentik-server back next to this database cut the round trip from
+        # 16.27 ms to 1.12 ms and the requests were still ~400 ms, which is what
+        # exposed the throttling underneath.
+        cpu: 2000m
         memory: 1280Mi   # was 768Mi → OOMKilled (exit 137) under normal load; give real headroom
     # ⚠️ MUST stay in a low-latency zone with authentik-server. Measured
     # 2026-08-16: cp1<->cp3 is 0.19-0.63 ms, but either to cp4 (zone=hypatia, a
