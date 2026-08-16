@@ -97,6 +97,44 @@ spec:
       X-Robots-Tag: "noindex, nofollow"
       X-Powered-By: ""
 ---
+# Middleware: wp-secure-headers — security headers for PUBLIC WordPress sites.
+#
+# `secure-headers` above is tuned for ADMIN portals: X-Frame-Options DENY and a
+# noindex X-Robots-Tag. Both are actively wrong for a public WordPress site:
+#
+#   - DENY blocks SAME-ORIGIN framing too, which breaks Elementor's editor (it
+#     loads the site's own front end in an iframe and reaches into it for
+#     `elementorFrontend` — a same-origin frame). SAMEORIGIN keeps the
+#     clickjacking protection (third-party framing still refused) while letting
+#     the site frame itself. No CSP frame-ancestors is set anywhere on this
+#     stack; if one is ever added it MUST agree ('self'), because browsers let
+#     frame-ancestors override X-Frame-Options.
+#   - "noindex, nofollow" de-indexes a public site from every search engine.
+#     Traefik customResponseHeaders OVERWRITES whatever WordPress/SEO plugins
+#     send, so this header was silently deleting the sites from search.
+#     Public sites manage indexing themselves (robots.txt / SEO plugin).
+#
+# Everything else is identical to secure-headers.
+#
+# Usage in a WordPress site IngressRoute:
+#   middlewares:
+#     - name: wp-secure-headers
+#       namespace: traefik
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: wp-secure-headers
+  namespace: traefik
+spec:
+  headers:
+    customResponseHeaders:
+      Strict-Transport-Security: "max-age=63072000; includeSubDomains; preload"
+      X-Frame-Options: "SAMEORIGIN"
+      X-Content-Type-Options: "nosniff"
+      Referrer-Policy: "strict-origin-when-cross-origin"
+      Permissions-Policy: "geolocation=(), microphone=(), camera=(), payment=(), usb=(), bluetooth=()"
+      X-Powered-By: ""
+---
 # Middleware: forward-auth — Authentik proxy auth for any logged-in user.
 #
 # Uses Authentik's embedded outpost forward-auth endpoint.
