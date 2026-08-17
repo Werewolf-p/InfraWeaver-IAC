@@ -372,6 +372,27 @@ spec:
               optional: true
         - name: MAILING_ZONE_ALLOWLIST
           value: infraweaver.net,infraweaver.cloud,infraweaver.nl
+        # ── ARMED 2026-08-17, ON THE OPERATOR'S EXPLICIT INSTRUCTION ──────────
+        #
+        # This permits the mailing addon to WRITE DNS. It is in NEVER_DEFAULTED,
+        # so `PLATFORM_ENABLE_ALL` cannot arm it and it does not return on its own
+        # once removed — deleting these two lines is the off switch, it takes
+        # effect on the next roll, and there is nothing else to undo.
+        #
+        # What it does NOT do is make anything write by itself. A write still
+        # needs all five: `mailing:admin` on the operator, a zone inside
+        # MAILING_ZONE_ALLOWLIST (3 of this account's 7 — the three client zones
+        # and example.com are outside it and refuse), a fix sheet the operator
+        # actually opened, the fingerprint of that exact sheet, and a
+        # hold-to-confirm. Nothing here is scheduled, swept, or automatic.
+        #
+        # The blast radius, stated rather than implied: the credential is the
+        # account-wide token, so the allow-list is the boundary and it is enforced
+        # by THIS REPOSITORY rather than by Cloudflare. That is the weaker of the
+        # two forms and it was chosen knowingly; the stronger one is a zone-scoped
+        # token at secret/platform/mailing-dns, and moving to it is one env change.
+        - name: MAILING_DNS_WRITE_ENABLED
+          value: "true"
         - name: GITHUB_REPO
           value: ${GITHUB_REPO}
         # OneDev is decommissioned (removed 2026-07-03) — GitHub drives all
