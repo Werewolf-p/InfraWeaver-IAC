@@ -694,6 +694,20 @@ spec:
         # are an inert fallback; the stored config takes precedence.
         - name: UDM_HOST
           value: https://10.0.0.1
+        # The two the connector was always missing. Without them
+        # `parseUdmConfig` threw and every /api/udm/* call answered 503 — the
+        # host and pinned fingerprint below were never the problem, and the
+        # credentials were in OpenBao at secret/platform/udm the whole time.
+        - name: UDM_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: udm-username
+        - name: UDM_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: udm-password
         - name: UDM_CERT_SHA256
           value: "13:8F:E3:EE:C6:34:B3:EB:DB:97:37:88:C1:88:E2:3F:5A:A4:99:E4:2C:66:32:30:9C:79:D6:A1:D7:F9:7B:F6"
         # SMTP for the console's own mailer (user invitation emails). Host/port are
