@@ -393,6 +393,27 @@ spec:
         # token at secret/platform/mailing-dns, and moving to it is one env change.
         - name: MAILING_DNS_WRITE_ENABLED
           value: "true"
+        # ── WHERE DMARC AGGREGATE REPORTS GO ─────────────────────────────────
+        #
+        # The operator's choice, 2026-08-17: dmarc@infraweaver.nl.
+        #
+        # ⚠️ THIS ADDRESS CANNOT RECEIVE ANYTHING YET. infraweaver.nl publishes no
+        # MX, so reports sent here are delivered nowhere. Setting it clears the
+        # `dmarc-enforced-without-rua` finding on that domain — which is exactly
+        # the "DMARC configured, rendered over silence" state this addon exists
+        # to catch. So a companion finding, `dmarc-rua-undeliverable`, is raised
+        # the moment a same-domain rua points at a domain with no MX: one finding
+        # replaces the other rather than the problem quietly disappearing.
+        #
+        # For every OTHER domain this is an off-domain rua, which RFC 7489 §7.1
+        # requires the destination to authorise — the addon publishes that
+        # `<domain>._report._dmarc.infraweaver.nl` record itself.
+        - name: MAILING_DMARC_COLLECTOR_DOMAIN
+          value: infraweaver.nl
+        - name: MAILING_DMARC_COLLECTOR_ZONE_ID
+          value: 9b29b2352579a75237249eb6b20c42bf
+        - name: MAILING_DMARC_COLLECTOR_MAILBOX
+          value: dmarc
         - name: GITHUB_REPO
           value: ${GITHUB_REPO}
         # OneDev is decommissioned (removed 2026-07-03) — GitHub drives all
