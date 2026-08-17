@@ -41,6 +41,17 @@ env:
 # ${BASE_DOMAIN} Helm-values gotcha. Revisit if the Helm value pipeline learns envsubst.
 domainFilters:
   - "example.com"
+  # The three infraweaver domains, added 2026-08-17 for the project site.
+  # The same Cloudflare token already has Zone:DNS:Edit on all three (verified
+  # against /zones: all active), so no new credential is involved — the filter
+  # was the only thing stopping external-dns from managing them.
+  #
+  # policy=upsert-only still applies: external-dns creates and updates records
+  # it owns and never deletes, so adding a zone here cannot remove anything that
+  # is already in it.
+  - "infraweaver.net"
+  - "infraweaver.nl"
+  - "infraweaver.cloud"
 
 # Default target for services without explicit target annotation.
 # HARDCODED for the same Helm-bypasses-CMP reason as domainFilters above — a literal
