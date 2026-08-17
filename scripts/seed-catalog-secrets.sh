@@ -197,9 +197,23 @@ PYEOF
 }
 
 # ── Helper: generate a random password ───────────────────────────────────────
+#
+# NOTE THE `\n` IN THE `tr` SET. `openssl rand -base64` WRAPS ITS OUTPUT AT 64
+# COLUMNS, so any request long enough to need more than 64 base64 characters
+# gets a NEWLINE in the middle of it. Stripping only `=+/` left that newline in
+# place, and `head -c` then cut a token that contained it.
+#
+# The failure that taught us this: a 64-character cron token was seeded with an
+# embedded newline, which makes an HTTP header value malformed — so Node's own
+# server answered a bare `400 Bad Request` with `Connection: close`, before
+# Next.js routing, with no body and none of the usual headers. The token
+# matched, the pods were healthy, the route existed, and every request still
+# failed. It is intermittent by construction: whether the newline lands inside
+# the first `length` characters depends on how many `=+/` were removed ahead of
+# it, which is why sibling tokens generated the same way were fine.
 generate_password() {
   local length="${1:-24}"
-  openssl rand -base64 "$((length * 3 / 4 + 1))" | tr -d '=+/' | head -c "$length"
+  openssl rand -base64 "$((length * 3 / 4 + 1))" | tr -d '=+/\n' | head -c "$length"
 }
 
 # ── Main: process each enabled app ───────────────────────────────────────────
