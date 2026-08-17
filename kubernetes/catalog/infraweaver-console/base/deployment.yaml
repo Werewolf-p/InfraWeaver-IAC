@@ -330,6 +330,48 @@ spec:
               name: infraweaver-console-secret
               key: github-token
               optional: true
+        # ── THE MAILING ADDON'S DNS CREDENTIAL, AND ITS BOUNDARY ───────────────
+        #
+        # This REUSES the console's existing Cloudflare token rather than a
+        # dedicated one, at the operator's explicit direction (2026-08-17): a
+        # fresh dashboard-minted token per feature is a cost they do not want to
+        # keep paying, and the alternative is a real one.
+        #
+        # What that costs, stated plainly. The token here is byte-identical to
+        # the one ExternalDNS and cert-manager hold (verified: same sha256), and
+        # it was measured holding DNS **Edit** on all seven zones in the account
+        # — infraweaver.cloud/.net/.nl, example.com, and the client zones
+        # waterdance.nl, yonavaarwater.nl and zonnevaarwater.nl. On its own it
+        # draws no enrolment boundary at all.
+        #
+        # MAILING_ZONE_ALLOWLIST is what restores one. The addon intersects it
+        # with the token's zones in exactly one function (`listScopedZones`), and
+        # every read and every write in the addon reads the boundary through
+        # that, so a zone absent below cannot be seen or touched. It is weaker
+        # than a scoped token in one specific way and the surface keeps saying
+        # so: a scoped token is enforced by Cloudflare and survives any bug in
+        # this repo, while this list is enforced by this repo.
+        #
+        # The three client zones are deliberately absent, and so is example.com
+        # — the live production mail domain, whose SSO and alerting mail runs
+        # through it. Add it only as a deliberate act, not as a default.
+        #
+        # To upgrade to the strong form later: mint a token with Zone·DNS·Edit +
+        # Zone·Zone·Read on the enrolled zones only, seed it with
+        #   openbao kv put secret/platform/mailing-dns cf-token=<token>
+        # and repoint this env at that secret. The allow-list can then stay as a
+        # belt-and-braces second boundary or be dropped.
+        #
+        # `optional: true`: absent means every DNS plan renders as a preview with
+        # a no-credential blocker, which is the designed off state, not a crash.
+        - name: MAILING_CLOUDFLARE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: infraweaver-console-secret
+              key: cloudflare-api-token
+              optional: true
+        - name: MAILING_ZONE_ALLOWLIST
+          value: infraweaver.net,infraweaver.cloud,infraweaver.nl
         - name: GITHUB_REPO
           value: ${GITHUB_REPO}
         # OneDev is decommissioned (removed 2026-07-03) — GitHub drives all
