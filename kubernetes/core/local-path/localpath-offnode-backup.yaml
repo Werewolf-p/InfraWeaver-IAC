@@ -111,12 +111,20 @@ spec:
                     b=$(basename "$d")
                     case "$b" in pvc-*) : ;; *) continue ;; esac
                     src_bytes=$(du -sb "$d" 2>/dev/null | cut -f1)
+                    src_files=$(find "$d" -type f 2>/dev/null | wc -l)
                     if tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
                       arc=$(stat -c%s "$out/$b.tar.gz")
                       # A truncated archive is worse than none, because it still
-                      # looks like a backup.
-                      if [ "$arc" -lt 512 ]; then
-                        echo "FAILED ${b}: archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
+                      # looks like a backup. But a volume that genuinely holds no
+                      # files compresses to ~150B, and that is a correct backup of
+                      # nothing — not a truncation. Applying the floor to it turns
+                      # every night red for a volume with nothing to protect, which
+                      # is how a real failure later gets ignored. So the floor only
+                      # applies where there was something to copy.
+                      # (authentik/redis-data-authentik-redis-master-0 on cp3 is
+                      #  exactly this: an empty leftover of a removed StatefulSet.)
+                      if [ "$src_files" -gt 0 ] && [ "$arc" -lt 512 ]; then
+                        echo "FAILED ${b}: ${src_files} source file(s) but archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
                       fi
                       # A size check proves bytes were written, not that they can
                       # be read back. Walk the archive index: this is the only
@@ -259,12 +267,20 @@ spec:
                     b=$(basename "$d")
                     case "$b" in pvc-*) : ;; *) continue ;; esac
                     src_bytes=$(du -sb "$d" 2>/dev/null | cut -f1)
+                    src_files=$(find "$d" -type f 2>/dev/null | wc -l)
                     if tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
                       arc=$(stat -c%s "$out/$b.tar.gz")
                       # A truncated archive is worse than none, because it still
-                      # looks like a backup.
-                      if [ "$arc" -lt 512 ]; then
-                        echo "FAILED ${b}: archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
+                      # looks like a backup. But a volume that genuinely holds no
+                      # files compresses to ~150B, and that is a correct backup of
+                      # nothing — not a truncation. Applying the floor to it turns
+                      # every night red for a volume with nothing to protect, which
+                      # is how a real failure later gets ignored. So the floor only
+                      # applies where there was something to copy.
+                      # (authentik/redis-data-authentik-redis-master-0 on cp3 is
+                      #  exactly this: an empty leftover of a removed StatefulSet.)
+                      if [ "$src_files" -gt 0 ] && [ "$arc" -lt 512 ]; then
+                        echo "FAILED ${b}: ${src_files} source file(s) but archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
                       fi
                       # A size check proves bytes were written, not that they can
                       # be read back. Walk the archive index: this is the only
