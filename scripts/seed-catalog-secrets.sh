@@ -79,8 +79,12 @@ python3 -c "import yaml" 2>/dev/null || { warn "python3 with PyYAML is required"
 # This is the UNION of two sources, because a catalog app can be deployed two ways:
 #   1. platform.yaml catalog.enabled — Helm apps and auto-generated manifest apps.
 #   2. A hand-written bootstrap Application (kubernetes/bootstrap/catalog-*.yaml) —
-#      manifest apps kept OUT of catalog.enabled on purpose so scripts/sync-catalog.sh
-#      does not overwrite their custom source (e.g. nextcloud's envsubst CMP plugin).
+#      manifest apps kept OUT of catalog.enabled, historically so a generator could
+#      not overwrite their custom source (e.g. nextcloud's envsubst CMP plugin).
+#      That generator (scripts/sync-catalog.sh) was DELETED 2026-08-18: its CI
+#      caller no longer existed, and a run would have rewritten four Applications
+#      to a placeholder repoURL and deleted seven live bootstrap files. These
+#      Applications are simply hand-maintained now.
 # Apps in group (2) still declare a `secrets:` section that must be seeded on a
 # fresh install, so we discover them from their bootstrap Application's catalog
 # source path (gated on the app actually having a secrets: section, to avoid

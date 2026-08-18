@@ -39,8 +39,10 @@ A directory is COVERED when any of these hold:
   2. It is reachable through a `kustomization.yaml` resource graph rooted at a
      covered directory (the base/ + overlays/prod layout).
   3. It lives under kubernetes/catalog/<app>/ and <app>/catalog.yaml exists —
-     catalog apps are installed on demand, and scripts/sync-catalog.sh writes
-     the bootstrap Application when platform.yaml enables them.
+     catalog apps are installed on demand, and their bootstrap Application in
+     kubernetes/bootstrap/catalog-*.yaml is hand-maintained. (A generator,
+     scripts/sync-catalog.sh, used to write those files; it was deleted
+     2026-08-18 as dead-but-armed code.)
   4. It carries an explicit dormant marker (see below).
 
 ────────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,126 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Detached kubelet / disarmed admission — the two blind spots of 2026-08-18
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# On 2026-08-18 a control-plane node came back from a repair having bootstrapped
+# a SECOND, EMPTY etcd cluster and served it on its own kube-apiserver. Talos
+# KubePrism pools every control-plane address, so from 18:06 to 18:33 every
+# kubelet in the cluster was answered by that empty cluster. NodeRestriction then
+# denied them — "no relationship found between node 'talos-prod-cp3' and this
+# object" — no pod could mount a ServiceAccount token, and the controllers
+# stopped.
+#
+# For those 27 minutes `kubectl get nodes` reported all three nodes **Ready**.
+# It was not lying so much as reporting a stale fact: the condition is written by
+# the node-lifecycle controller, which is part of kube-controller-manager, which
+# was itself detached. The ONLY honest signal in the whole cluster was that the
+# Lease objects in kube-node-lease had stopped being renewed — frozen at
+# 18:14:3x — and that was found by hand, not by an alert.
+#
+# A kubelet renews its lease every 10s by default. If a lease has not been
+# renewed in minutes, that kubelet is not talking to THIS apiserver, whatever the
+# Ready condition says.
+#
+# ⚠️ Honest limitation, stated rather than hidden: during that incident Prometheus
+# itself held a poisoned ServiceAccount token and was returning 401s, so these
+# rules might not have fired *during* the event either. They are still worth
+# having — they catch the far more common single-node case, and they turn a
+# two-hour hand investigation into a named alert. The belt-and-braces answer is
+# an out-of-cluster check, tracked separately in
+# docs/plans/platform-simplification.md.
+#
+# 🔑 Verified before writing (this repo has shipped alerts keyed on metrics with
+# zero series): kube_lease_renew_time = 26 series, label `lease` = the node name,
+# namespace kube-node-lease, 3 node leases present. kube_node_status_condition =
+# 45 series. kube_deployment_status_replicas_available = 74 series. All measured
+# against the live Prometheus on 2026-08-18.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: detached-kubelet
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: detached-kubelet
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: detached-kubelet
+      rules:
+        - alert: NodeLeaseStale
+          # 300s = 30 missed renewals at the 10s default. Long enough that a
+          # restart, a brief apiserver failover or a slow node cannot trip it;
+          # short enough that a detached kubelet is named within ~6 minutes
+          # instead of being discovered by hand two hours later.
+          expr: |
+            time() - max by (lease) (
+              kube_lease_renew_time{namespace="kube-node-lease"}
+            ) > 300
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "kubelet on {{ $labels.lease }} has not renewed its node lease"
+            description: >-
+              The kubelet on {{ $labels.lease }} has not renewed its Lease in over
+              5 minutes. A kubelet renews every 10s, so it is no longer talking to
+              this apiserver — even if the node still reports Ready, because that
+              condition is written by kube-controller-manager and goes stale with
+              it. Check which apiserver it is actually reaching:
+              talosctl -n <node-ip> logs kubelet | tail
+              A line like 'no relationship found between node X and this object'
+              means it is being answered by a DIFFERENT cluster; compare
+              talosctl -n <ip> etcd status across every control-plane node and
+              look for one with a divergent RAFT INDEX.
+
+        - alert: NodeReadyButLeaseStale
+          # The deceptive state specifically: Ready=true AND the lease frozen.
+          # Separate from the alert above so the page says the quiet part out
+          # loud — "the dashboard is telling you something that is not true".
+          expr: |
+            (
+              time() - max by (lease) (kube_lease_renew_time{namespace="kube-node-lease"}) > 300
+            )
+            and on (lease) label_replace(
+              max by (node) (kube_node_status_condition{condition="Ready",status="true"}) == 1,
+              "lease", "$1", "node", "(.*)"
+            )
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.lease }} reports Ready but its kubelet is not renewing its lease"
+            description: >-
+              {{ $labels.lease }} shows Ready while its kubelet has stopped
+              renewing its Lease. Do NOT trust `kubectl get nodes` here: this is
+              the exact signature of the 2026-08-18 incident, where every node
+              read Ready for two hours while every kubelet was being served by an
+              empty phantom cluster. The Ready condition is stale because the
+              controller that maintains it is detached too.
+
+        - alert: KyvernoAdmissionUnavailable
+          # kyverno's webhooks are failurePolicy: Ignore, so when the admission
+          # controller has no ready replica the API server silently ADMITS
+          # everything the nine Enforce policies exist to block. Nothing else in
+          # the cluster reports that enforcement has stopped.
+          expr: |
+            max by (deployment) (
+              kube_deployment_status_replicas_available{namespace="kyverno",deployment="kyverno-admission-controller"}
+            ) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Kyverno admission controller has no ready replica — Enforce policies are OFF"
+            description: >-
+              kyverno-admission-controller has zero available replicas. Its
+              webhooks use failurePolicy: Ignore, so admission does not fail
+              closed — every Enforce policy (non-root, seccomp, drop-ALL
+              capabilities, no-privilege-escalation, no hostPath, …) is being
+              silently skipped for as long as this lasts. Anything admitted in
+              this window is unmutated and unvalidated; on 2026-08-18 exactly that
+              produced a pod that could no longer be updated or deleted.
+              Check: kubectl -n kyverno get pods -l app.kubernetes.io/component=admission-controller

@@ -488,9 +488,24 @@ PYEOF
 
 # ── Commit if changes were made ───────────────────────────────────────────────
 if [[ -f "$CHANGED_FILE" ]] && ! $DRY_RUN; then
-  rm -f "$CHANGED_FILE"
   cd "$REPO_ROOT"
-  git add -A
+  # Stage ONLY the files this script computed.
+  #
+  # This was `git add -A` until 2026-08-18, and the list of changed files was
+  # deleted one line ABOVE it — so the list was thrown away and the entire
+  # working tree was staged into an auto-commit that nobody reviews. That is not
+  # theoretical: it has previously swept a kubeconfig and users.yaml backups into
+  # the repo, and on 2026-08-18 it was one push away from committing
+  # `minio-velero: enabled: false` — the S3 backend behind every Velero backup —
+  # while that app was live and Healthy.
+  #
+  # `git add -- <path>` also stages deletions, so removed appsets still commit.
+  mapfile -t _sync_changed < "$CHANGED_FILE"
+  rm -f "$CHANGED_FILE"
+  for _f in "${_sync_changed[@]}"; do
+    [[ -n "$_f" ]] || continue
+    git add -- "$_f"
+  done
   if ! git diff --cached --quiet; then
     git commit -m "chore: sync groups from platform.yaml [skip ci]
 
