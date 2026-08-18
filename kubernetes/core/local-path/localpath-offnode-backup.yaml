@@ -112,7 +112,20 @@ spec:
                     case "$b" in pvc-*) : ;; *) continue ;; esac
                     src_bytes=$(du -sb "$d" 2>/dev/null | cut -f1)
                     src_files=$(find "$d" -type f 2>/dev/null | wc -l)
-                    if tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
+                    # Write, then read back. Retried once, because a multi-GB
+                    # archive over NFS from this node intermittently lands at the
+                    # correct size with a bad gzip CRC (measured 2026-08-19: two
+                    # consecutive runs corrupted the 1.5G and 2.7G members while
+                    # every member under 40M passed; the source tarred to a pipe
+                    # was clean, and re-writing the same 1.5G archive on its own
+                    # verified fine). One retry turns that transient into a pass
+                    # while a genuinely broken volume still fails twice and alerts.
+                    ok=0; why=""
+                    for attempt in 1 2; do
+                      rm -f "$out/$b.tar.gz"
+                      if ! tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
+                        why="tar error"; continue
+                      fi
                       arc=$(stat -c%s "$out/$b.tar.gz")
                       # A truncated archive is worse than none, because it still
                       # looks like a backup. But a volume that genuinely holds no
@@ -124,21 +137,25 @@ spec:
                       # (authentik/redis-data-authentik-redis-master-0 on cp3 is
                       #  exactly this: an empty leftover of a removed StatefulSet.)
                       if [ "$src_files" -gt 0 ] && [ "$arc" -lt 512 ]; then
-                        echo "FAILED ${b}: ${src_files} source file(s) but archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
+                        why="${src_files} source file(s) but archive only ${arc}B"; continue
                       fi
                       # A size check proves bytes were written, not that they can
-                      # be read back. Walk the archive index: this is the only
-                      # step that distinguishes a backup from a file. gzip CRCs
-                      # are checked as the stream is decompressed, so a corrupt
-                      # or truncated member fails here rather than on restore day.
+                      # be read back. Walking the index decompresses the stream, so
+                      # gzip CRCs are checked and a corrupt member fails here rather
+                      # than on restore day. This is the only step that
+                      # distinguishes a backup from a file.
                       if ! tar -tzf "$out/$b.tar.gz" > /dev/null 2>&1; then
-                        echo "FAILED ${b}: archive unreadable (tar -tzf)" >> "$out/MANIFEST.txt"; rc=1; continue
+                        why="archive unreadable (tar -tzf)"; continue
                       fi
+                      ok=1; break
+                    done
+                    if [ "$ok" = "1" ]; then
                       ent=$(tar -tzf "$out/$b.tar.gz" 2>/dev/null | wc -l)
-                      echo "$b  src_bytes=$src_bytes  archive_bytes=$arc  entries=$ent  verified=tar-tzf" >> "$out/MANIFEST.txt"
+                      note=""; [ "$attempt" = "2" ] && note="  (passed on retry)"
+                      echo "$b  src_bytes=$src_bytes  archive_bytes=$arc  entries=$ent  verified=tar-tzf${note}" >> "$out/MANIFEST.txt"
                       n=$((n+1))
                     else
-                      echo "FAILED ${b}: tar error" >> "$out/MANIFEST.txt"; rc=1
+                      echo "FAILED ${b}: ${why} (twice)" >> "$out/MANIFEST.txt"; rc=1
                     fi
                   done
                   # Refuse to report success on an empty backup. A run that finds
@@ -268,7 +285,20 @@ spec:
                     case "$b" in pvc-*) : ;; *) continue ;; esac
                     src_bytes=$(du -sb "$d" 2>/dev/null | cut -f1)
                     src_files=$(find "$d" -type f 2>/dev/null | wc -l)
-                    if tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
+                    # Write, then read back. Retried once, because a multi-GB
+                    # archive over NFS from this node intermittently lands at the
+                    # correct size with a bad gzip CRC (measured 2026-08-19: two
+                    # consecutive runs corrupted the 1.5G and 2.7G members while
+                    # every member under 40M passed; the source tarred to a pipe
+                    # was clean, and re-writing the same 1.5G archive on its own
+                    # verified fine). One retry turns that transient into a pass
+                    # while a genuinely broken volume still fails twice and alerts.
+                    ok=0; why=""
+                    for attempt in 1 2; do
+                      rm -f "$out/$b.tar.gz"
+                      if ! tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
+                        why="tar error"; continue
+                      fi
                       arc=$(stat -c%s "$out/$b.tar.gz")
                       # A truncated archive is worse than none, because it still
                       # looks like a backup. But a volume that genuinely holds no
@@ -280,21 +310,25 @@ spec:
                       # (authentik/redis-data-authentik-redis-master-0 on cp3 is
                       #  exactly this: an empty leftover of a removed StatefulSet.)
                       if [ "$src_files" -gt 0 ] && [ "$arc" -lt 512 ]; then
-                        echo "FAILED ${b}: ${src_files} source file(s) but archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
+                        why="${src_files} source file(s) but archive only ${arc}B"; continue
                       fi
                       # A size check proves bytes were written, not that they can
-                      # be read back. Walk the archive index: this is the only
-                      # step that distinguishes a backup from a file. gzip CRCs
-                      # are checked as the stream is decompressed, so a corrupt
-                      # or truncated member fails here rather than on restore day.
+                      # be read back. Walking the index decompresses the stream, so
+                      # gzip CRCs are checked and a corrupt member fails here rather
+                      # than on restore day. This is the only step that
+                      # distinguishes a backup from a file.
                       if ! tar -tzf "$out/$b.tar.gz" > /dev/null 2>&1; then
-                        echo "FAILED ${b}: archive unreadable (tar -tzf)" >> "$out/MANIFEST.txt"; rc=1; continue
+                        why="archive unreadable (tar -tzf)"; continue
                       fi
+                      ok=1; break
+                    done
+                    if [ "$ok" = "1" ]; then
                       ent=$(tar -tzf "$out/$b.tar.gz" 2>/dev/null | wc -l)
-                      echo "$b  src_bytes=$src_bytes  archive_bytes=$arc  entries=$ent  verified=tar-tzf" >> "$out/MANIFEST.txt"
+                      note=""; [ "$attempt" = "2" ] && note="  (passed on retry)"
+                      echo "$b  src_bytes=$src_bytes  archive_bytes=$arc  entries=$ent  verified=tar-tzf${note}" >> "$out/MANIFEST.txt"
                       n=$((n+1))
                     else
-                      echo "FAILED ${b}: tar error" >> "$out/MANIFEST.txt"; rc=1
+                      echo "FAILED ${b}: ${why} (twice)" >> "$out/MANIFEST.txt"; rc=1
                     fi
                   done
                   # Refuse to report success on an empty backup. A run that finds

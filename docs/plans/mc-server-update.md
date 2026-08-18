@@ -880,3 +880,247 @@ Two things to know before touching Task 5:
   identity restore lands there rather than as a refusal, because by then the
   world is already swapped in. The run's verdict assembly must read them, or a
   server whose `ops.json` did not land will be reported as a clean pass.
+
+---
+
+# Part D — The first LIVE run, and the four defects it found
+
+> Written 2026-08-19 after standing up a throwaway server and driving the real
+> capture/restore code against it. Commits (local, not pushed):
+> `457dffcf` probe path, `11984fab` LimitRange floor, `220c11c7` stream
+> transport.
+>
+> Everything here is measured. The unit suite was green for all of it
+> beforehand — none of these defects was findable without a cluster.
+
+## D.1 What was run
+
+A throwaway `tl-roundtrip` was created in `game-hub` through the console's own
+`createServer` (egg `minecraft-java`, itzg image, `TYPE=VANILLA`, 2Gi request,
+5Gi `longhorn` PVC), with two deliberate deviations: `dnsHostname: ""` so no
+external-dns record was published for a server about to be deleted (external-dns
+here is upsert-only), and no UDM connector configured in the driver process, so
+`openGameServerWan` resolved `{configured:false}` and opened no WAN port. Neither
+touches the code under test.
+
+`LEVEL=RoundTrip` was set on purpose: a capitalised, non-default world directory
+is the exact shape of GTNH's `World/`, reproduced on something disposable.
+
+The driver calls the SAME functions the routes call — `runCapture` from
+`timeline/route-support.ts`, `restorePoint` with `resolveRestoreTarget`,
+`gracefulStopServer`, `gamePodCount` — assembled the way
+`app/api/game-hub/servers/[name]/timeline/[point]/restore/route.ts` assembles
+them. Two substitutions, both recorded: the timeline root was a local directory
+(`GAMEHUB_TIMELINE_DIR`, the module's own env var) because this box cannot mount
+the datastore PVC, and `startServer` recorded its call instead of performing it
+so the restored volume could be hashed before a booting server rewrote
+`session.lock` and `level.dat`. The call is asserted, so the "always restart"
+contract is still checked, only deferred.
+
+## D.2 Defect 1 — the flush probe and the proof did not speak the same path
+
+**Every Minecraft Java capture was refused, on every server, whatever its world
+was called.** Not GTNH's problem, not the world-name problem C.2 describes — a
+second, independent cause underneath it.
+
+`worldLayoutForEgg` names anchors as `./world/level.dat` (or
+`./RoundTrip/level.dat`). `flushProbeScript` passes each path through
+`assertSafeWorldPath`, which **strips the leading `./`**, and then printed that
+stripped value as the row label. `decideFlushProof` → `pickAnchor` → `findFile`
+looks the anchor up by exact string against `layout.anchors`. The two never
+matched, so `pickAnchor` returned null and the capture died as:
+
+```
+anchor-missing — "No world data was found on this server (no level.dat under any
+world directory), so there is nothing to capture. Start the server once to
+generate the world."
+```
+
+Measured: the probe's own output in the same run said
+`RoundTrip/level.dat  1  397  1787090104` — the file was there, 397 bytes, and
+had just been rewritten by the flush. The proof could not see it.
+
+Why no test caught it: every flush-proof test builds its `FlushProbe` in
+TypeScript from `layout.anchors[0]`, so both sides of the comparison came from
+one constant. The probe-parsing tests in `world-scripts.test.ts` even assert the
+pod emits `./world/level.dat` — the intended contract was always the layout's
+spelling; only the script disagreed.
+
+**Fix:** the probe answers in the spelling it was ASKED in — the row label is the
+caller's path, the `stat` still runs against the validated one.
+`tests/unit/gamehub/world-probe-roundtrip.test.ts` runs the real script under a
+real `/bin/sh` over a real directory and feeds the real output to the proof, the
+only shape of test that can catch a shell/parser disagreement.
+
+**Consequence for C.4:** its "How to make it work TODAY" is wrong. Deploying
+`9ad28f1b` alone would NOT have made a GTNH capture succeed; it would have
+refused with the same misleading sentence, and the world-name fix would have
+looked like it had not worked.
+
+## D.3 Defect 2 — no pod this addon builds could be admitted to `game-hub`
+
+The restore refused with `no-restore-target`:
+
+```
+pods "tl-roundtrip-files" is forbidden: [minimum cpu usage per Container is 100m,
+but request is 10m, minimum memory usage per Container is 256Mi, but request is
+32Mi]
+```
+
+`game-hub` carries a LimitRange (`game-hub-limits`, min 100m / 256Mi per
+container). Three builders sat under it:
+
+| Pod | Asked | Effect |
+|---|---|---|
+| `game-hub-companion.ts` | 10m / 32Mi, mem limit 128Mi | the ONLY writer a restore has → capture worked, restore could never run; offline Files tab equally dead |
+| `rehearsal/pod.ts` staging container | 50m / 128Mi | every Update Rehearsal refused at admission |
+| `sleep/doorman.ts` | 10m / 32Mi, mem limit 96Mi | a hibernated server could not be woken |
+
+All three were "deliberately tiny" by comment. Under a LimitRange, asking for
+less than `min` is not cheaper — it is rejected, 403, no pod, no retry.
+
+**Fix:** `lib/namespace-floor.ts` states the floor once, all three sit on it, and
+`tests/unit/gamehub/namespace-limit-floor.test.ts` holds the invariant for every
+pod this addon builds. Two existing tests pinned the rejected values
+(`"requests the agreed small budget (10m CPU / 32Mi)"`, `"is small enough that
+hibernating is still a win"`) — a test that pins a spec the API server refuses
+guarantees the bug, so both were rewritten to the floor.
+
+## D.4 Defect 3 (NOT FIXED HERE) — the live console cannot write a timeline point at all
+
+Not fixed here, because it is a manifest change and this plan's worker may not
+edit `InfraWeaver-infra` outside this document. Measured on the running console:
+
+```
+$ kubectl get deploy infraweaver-console -n infraweaver-console -o jsonpath='{...volumeMounts}'
+/infra-routes, /connector-src, /etc/ssl/proxmox, /app/.next/cache, /git-cache, /tmp
+$ kubectl exec deploy/infraweaver-console -- touch /datastore-probe-test
+touch: /datastore-probe-test: Read-only file system      # readOnlyRootFilesystem: true
+```
+
+`timelineRoot()` resolves to `/datastore/game-worlds` **inside the console
+container**, and the console mounts no such volume and has a read-only root, so
+`writeJob` — the first write a capture makes, before the quiesce — fails with
+EROFS. C.4's prerequisite 2 ("the `infraweaver-backup` datastore pod is running
+with its 30Gi PVC — that is where timeline points live") describes the pod, not
+the path the console writes through. The backup pod's `/datastore` holds
+`sites/` and `.chunks` (the WordPress store) and **no `game-worlds` directory at
+all**, which is consistent with what the two defects above imply: no world
+timeline point has ever been written on this platform.
+
+Before the World Timeline can work in production, the console Deployment needs
+the datastore PVC mounted (or `GAMEHUB_TIMELINE_DIR` pointed at a writable
+mount). That is a change in `InfraWeaver-infra` and is left for the operator.
+
+## D.5 Defect 4 — the transport silently dropped the head of the archive
+
+Found because the fixed restore hung: the world stream landed and swapped, then
+the identity stream's `tar -xf -` sat in the companion pod for two minutes having
+read **zero bytes**. Isolated against the live companion with a script that only
+runs `wc -c`:
+
+| source | pod received | verdict |
+|---|---|---|
+| 51,200 B, one chunk | **0** | call hung until its budget expired |
+| 2,621,440 B, three chunks | **1,572,864** | first 1 MiB chunk gone — and the exec exited **0** |
+
+`streamToPod` counted progress with `source.on("data", …)`. A `data` listener
+switches a `Readable` into flowing mode immediately, while `k8s.Exec.exec()`
+attaches its stdin handler only after the WebSocket handshake resolves. Whatever
+the source emitted in that window went nowhere. A small stream lost everything
+and the pod waited forever; a larger one lost its head and the pod unpacked what
+was left.
+
+The second row is the dangerous one and it is the exact failure mode this feature
+exists to prevent: **a truncated archive streamed into a restore, reported as
+success.** The world tar survived on the runs observed only because its
+generator's first disk read happened to be slower than the handshake.
+
+**Fix:** the bytes are counted inside a `Transform` the exec consumes
+(`countedSource`), so a late consumer costs one high-water mark of buffering
+instead of the head of the archive; backpressure still bounds console memory for
+a 30 GB world. Source errors are forwarded to the transform (`pipe` does not) and
+the transform carries a no-op `error` listener so a chunk-store failure before
+the exec attaches cannot become an uncaught exception. Pinned by
+`tests/unit/gamehub/pod-stream-late-consumer.test.ts`, which models the handshake
+as a delayed consumer and asserts the FIRST chunk's identity, not just the total.
+
+After the fix, live: 51,200 B delivered in 315 ms; 2,621,440 B delivered whole.
+
+## D.6 The round trip — what was proven, and how
+
+Order of operations, all on `tl-roundtrip`, world directory `RoundTrip/`:
+
+1. **Seeded** — a world canary (`RoundTrip/IWTL-CANARY.txt`, plus a 1 MiB random
+   blob under `RoundTrip/data/` and a 4 KiB one under `RoundTrip/players/`) and a
+   full identity set: `ops.json` (CanaryOp, level 4), `whitelist.json`,
+   `banned-players.json`, `banned-ips.json`, `usercache.json`,
+   `usernamecache.json`, `server-icon.png`, and one file in each of
+   `serverutilities/`, `visualprospecting/`, `journeymap/`, `blueprints/`.
+   40 files, hashed with `sha256sum` from inside the pod.
+
+2. **Captured** — `runCapture` (the route's own glue), point
+   `2026-08-18T22-00-37Z`:
+
+   ```
+   worldName:   "RoundTrip"
+   consistency: "quiesced"
+   flushProof:  proven, ./RoundTrip/level.dat, 397 bytes,
+                "The world was flushed to disk and level.dat rewritten before any byte was read."
+   streams:     world.tar    3,389,440 B  3 chunks  csum 8437a041…
+                identity.tar    51,200 B  1 chunk   csum 97c84877…
+   ```
+
+   This is the FIRST successful World Timeline capture on this platform.
+
+3. **Verified** — `verifyPoint`: `ok: true`, 4 chunks re-hashed, 3,440,640 bytes
+   checked, no issues. Both streams reassembled locally under their SIGNED
+   checksums; the extracted tars hold exactly the 40 files, and their hashes are
+   identical to the live volume's (only `level.dat`, `level.dat_old` and one
+   `entities/r.0.0.mca` differ from the PRE-flush snapshot — i.e. exactly what
+   the quiesce's `save-all flush` rewrote, which is what `proven` claims).
+
+4. **Destroyed** — Deployment, Service, Secret, ConfigMap and **PVC** deleted,
+   then recreated through `createServer`. The new server generated a different
+   world (different `level.dat`, four new region files, `ops.json` = `[]`, none
+   of the canaries, no modded directories).
+
+5. **Restored** — `restorePoint`: mandatory pre-capture taken
+   (`2026-08-18T22-45-46Z`), server stopped, zero pod objects awaited, writable
+   companion created, both streams staged and swapped:
+
+   ```
+   status: "restored"   bytes: 3,389,440   warnings: none
+   ```
+
+6. **Compared** — the restored volume hashed through the companion:
+
+   ```
+   restored files: 40   point files: 40
+   IDENTICAL — every file in the point came back byte for byte
+   ```
+
+7. **Booted** — the server started on the restored volume: `Preparing level
+   "RoundTrip"`, `Done (1.299s)!`, and Minecraft itself re-read and re-wrote
+   `ops.json` with `CanaryOp` at level 4. The identity stream is not just bytes
+   on disk; it is a working operator entry.
+
+The throwaway and every object it owned were then deleted; `game-hub` is back to
+`requests.memory 12Gi / 4 PVCs`, and nothing named `tl-roundtrip` remains.
+
+## D.7 What a fresh worker should do next
+
+C.6's order still holds for tasks 4/6/5/7-10, with these amendments:
+
+1. **The datastore mount (D.4) is now the top blocker.** Nothing about this
+   feature works in production until the console can write its timeline root.
+   That is an `InfraWeaver-infra` change.
+2. **The live round trip is done and green** — C.6's item 1 is discharged, and
+   the three defects it found are fixed with tests.
+3. When Task 6 (`seed.ts`) lands, re-run the same shape of live proof for the
+   CROSS-server direction: this run restored into the same server name, which is
+   the one thing the update flow does differently.
+4. Do not trust a green unit suite about anything that crosses a process
+   boundary. All three defects here — a shell script vs its parser, a PodSpec vs
+   an admission controller, a stream vs a WebSocket handshake — were invisible to
+   3,108 passing tests and took one live run each to surface.
