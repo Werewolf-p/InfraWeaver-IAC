@@ -404,25 +404,29 @@ postgresql:
               operator: NotIn
               values:
               - hypatia
-            # ⚠️ cp1 CORRUPTS CONTAINER IMAGES. Added 2026-08-18. Both
-            # expressions are in the SAME matchExpressions list, so they AND:
-            # not-hypatia AND not-cp1, which today means cp3.
+            # The cp1 exclusion that lived here (added 2026-08-18, "until it is
+            # understood and proven fixed") was REMOVED later the same day,
+            # because both halves of that condition were met.
             #
-            # cp1 unpacked postgres:17.10-bookworm such that every binary in
-            # the image, /usr/bin/sh included, returned `exec format error`,
-            # while the same image ran correctly on cp3 and cp4. It had already
-            # done the same to the cilium image earlier that day (different
-            # binary hash vs cp3, deterministic SIGSEGV). Both images had just
-            # been pulled; the kernel log showed no I/O or MCE errors and
-            # busybox ran fine, so this is not a simple bad-disk story and is
-            # NOT understood yet.
+            # Understood: cp1 was not corrupting images, it was losing writes.
+            # Its containerd content store was byte-perfect — every blob read
+            # back and hashed — while the UNPACKED overlayfs snapshots held
+            # files with correct name, mode, owner and mtime and ZERO length. A
+            # 0-byte file with the exec bit set makes execve() return ENOEXEC,
+            # which is exactly `exec format error`. XFS journals metadata but
+            # not file data, and the guest was rebooted uncleanly nine minutes
+            # after those layers were unpacked. busybox survived because it was
+            # pulled first and its writeback completed.
             #
-            # Until it is understood and proven fixed, SSO does not run there.
-            # Removing this line without that proof re-opens the outage.
-            - key: kubernetes.io/hostname
-              operator: NotIn
-              values:
-              - talos-prod-cp1
+            # Proven fixed: the damaged images were removed via the CRI and
+            # re-pulled, and each repaired file now hashes IDENTICALLY to the
+            # same file on cp4 (postgres, coredns, promtail, cilium), verified
+            # by exec'ing the binaries rather than by "the pod started".
+            #
+            # Keeping the exclusion had a cost that had become the larger risk:
+            # with hypatia excluded for latency and cp1 excluded for this, cp3
+            # was the ONLY eligible node, and cp3 (12 GiB) hit 99% memory
+            # requests — which left three WordPress sites unschedulable.
 
 # No Redis. The authentik chart dropped the bundled Redis subchart in 2026.x and
 # the application dropped Redis entirely in 2025.10; the standalone StatefulSet
@@ -491,17 +495,15 @@ server:
                 operator: NotIn
                 values:
                   - hypatia
-              # ⚠️ cp1 CORRUPTS CONTAINER IMAGES (2026-08-18) — see the long
-              # note on postgresql.affinity. This is why the line above no
-              # longer says "leaves cp1 and cp3 eligible": only cp3 is. That
-              # genuinely does collapse server and worker onto one node, so the
+              # The cp1 exclusion here was removed 2026-08-18 once the image
+              # damage was understood (lost writes after an unclean shutdown,
+              # not corruption) and the repair proven by hash against cp4 — see
+              # the long note on postgresql.affinity. cp1 and cp3 are both
+              # eligible again, which is what stops server and worker from
+              # collapsing onto one node. Historical note follows:
               # requiredDuringScheduling podAntiAffinity above is currently
               # satisfiable at replicas=1 ONLY. Raising either replica count
               # before cp1 is trusted again will leave the extra pods Pending.
-              - key: kubernetes.io/hostname
-                operator: NotIn
-                values:
-                  - talos-prod-cp1
   resources:
     requests:
       cpu: 200m
@@ -547,10 +549,6 @@ worker:
               # requiredDuringScheduling podAntiAffinity above is currently
               # satisfiable at replicas=1 ONLY. Raising either replica count
               # before cp1 is trusted again will leave the extra pods Pending.
-              - key: kubernetes.io/hostname
-                operator: NotIn
-                values:
-                  - talos-prod-cp1
   # Give enough time for Django migrations on a fresh DB (292+ migrations)
   # NOTE: Authentik chart does NOT support livenessProbe.enabled field — use raw k8s probe fields only
   startupProbe:
