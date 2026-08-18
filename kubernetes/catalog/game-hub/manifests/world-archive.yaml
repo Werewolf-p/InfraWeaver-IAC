@@ -213,19 +213,39 @@ spec:
                     exit 1
                   fi
 
-                  # A snapshot older than 26h means the in-pod backup routine died
-                  # days ago and this job would otherwise keep re-archiving the
-                  # same stale world while reporting OK every night. That is the
-                  # exact failure mode this file exists to stop being repeated.
-                  if [ -n "$(find "$NEWEST" -mtime +1 2>/dev/null)" ]; then
-                    echo "FATAL: newest world snapshot $NEWEST is >26h old"
-                    exit 1
-                  fi
-                  # Softer signal: the routine runs every 30 minutes, so anything
-                  # over 6h is already wrong even though it is still worth saving.
-                  if [ -n "$(find "$NEWEST" -mmin +360 2>/dev/null)" ]; then
-                    echo "WARN: newest world snapshot $NEWEST is >6h old — the"
-                    echo "      in-server backup routine may have stopped."
+                  # Is the newest snapshot stale because the routine DIED, or
+                  # because nobody has played? Those need opposite responses, and
+                  # the age of the file cannot tell them apart.
+                  #
+                  # CORRECTED 2026-08-18. This test used to be
+                  #   find "$NEWEST" -mtime +1   →  FATAL, exit 1
+                  # which was wrong twice over. `-mtime +1` needs 48h to become
+                  # true, not the 26h the comment claimed; and ServerUtilities is
+                  # configured `B:need_online_players=true`, so a server nobody
+                  # logged into for two days correctly has a two-day-old snapshot.
+                  # MEASURED that day: newest zip 2026-08-16-17-59-22.zip, ~48h
+                  # old with nothing wrong — this guard was hours from aborting a
+                  # healthy nightly archive and leaving the world with NO off-node
+                  # copy at all, which is the opposite of this file's purpose.
+                  #
+                  # The real fault is a snapshot that play has moved past: a
+                  # World/playerdata write NEWER than the zip, itself older than
+                  # 90 minutes, so the 30-minute timer has had three chances to
+                  # fire since and did not. Same test as the health probe in
+                  # ./world-health.yaml — deliberately, so the two never disagree
+                  # about whether backups are broken.
+                  #
+                  # And even then: WARN, never FATAL. A stale world zip is still
+                  # the best copy that exists, and refusing to archive it does not
+                  # make it fresher — it just removes the off-node copy too.
+                  if [ -n "$(find "$SRC/World/playerdata" -type f -name '*.dat' -newer "$NEWEST" ! -mmin -90 2>/dev/null | head -1)" ]; then
+                    echo "WARN: players were active after $NEWEST and no snapshot"
+                    echo "      followed within 90 minutes — the in-server backup"
+                    echo "      routine has stopped. Archiving the stale zip anyway;"
+                    echo "      gt-new-horizons-health alerts on this condition."
+                  elif [ -n "$(find "$NEWEST" -mmin +360 2>/dev/null)" ]; then
+                    echo "NOTE: newest world snapshot $NEWEST is >6h old with no"
+                    echo "      play since — expected while the server sits empty."
                   fi
 
                   WORLD="$DST/gtnh-world-$STAMP.zip"

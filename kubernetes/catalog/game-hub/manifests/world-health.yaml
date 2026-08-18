@@ -1,0 +1,274 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# GT New Horizons health probe — "is the world actually loaded?"
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# On 2026-08-18 the server was Running 1/1, its readiness probe was green, the
+# console showed the pod up "4d", and it had been serving nobody for 78 minutes.
+# cp1 rebooted at 16:34Z mid-write, `World/level.dat` was left truncated
+# (116,579 bytes of an expected 213,302; `gzip -t` → "unexpected end of file"),
+# and Forge fell back to `level.dat_old` — which stops and waits for an operator:
+#
+#     Forge Mod Loader detected that the backup level.dat is being used.
+#     Run the command /fml confirm or or /fml cancel to proceed.
+#
+# The JVM is alive, the container is alive, the liveness/readiness probes pass,
+# and port 25565 is never opened. Nothing in the cluster noticed. This job is
+# the thing that notices.
+#
+# That failure is NOT a one-off. The same directory already carried the scars of
+# two earlier truncations before this one, each renamed by hand at the time:
+#     level.dat.truncated-20260730          0 bytes
+#     level.dat.zerobyte-20260812T121638Z   0 bytes
+#     level.dat.truncated-20260818T180609Z  116,579 bytes   (this incident)
+# Three events in three weeks is a recurring failure mode, so it gets a check
+# rather than another manual rename.
+#
+# WHAT IT CHECKS, AND WHY EACH ONE IS HERE
+# ---------------------------------------------------------------------------
+#  1. TCP 25565 accepts a connection. This is the only check that distinguishes
+#     "process running" from "world serving". Both the FML prompt above and a
+#     mid-boot server look identical to a process check; only the listening
+#     socket tells them apart.
+#  2. `World/level.dat` passes `gzip -t`, and so does `level.dat_old`. A world
+#     whose primary AND backup are both bad cannot be recovered from this volume
+#     at all, so the two are reported separately: one bad is a warning that the
+#     fallback is now load-bearing, both bad is data loss.
+#  3. The tail of `logs/latest.log` is scanned for the blocked-query prompt, so
+#     the alert says WHY the port is closed instead of leaving that to a human
+#     at 03:00.
+#  4. The server's own world snapshots are still following player activity. They
+#     are what world-archive.yaml copies off this node every night; if they stop,
+#     that job keeps archiving the same stale zip and keeps reporting success.
+#     ⚠️ Snapshot AGE alone is not a fault signal, and a check that used it would
+#     cry wolf every quiet evening: ServerUtilities-2.2.2 is configured
+#     `B:need_online_players=true` with `S:backup_timer=0.5`, so an empty server
+#     deliberately takes no backups. MEASURED 2026-08-18: newest zip was
+#     2026-08-16-17-59-22.zip, ~48h old, and nothing was wrong — nobody had
+#     played. The real fault is a snapshot that PLAYER ACTIVITY has moved past,
+#     which is what the check below tests.
+#  5. Free space on the volume, because a full disk is how truncated level.dat
+#     files get written in the first place.
+#
+# HOW "still booting" IS TOLD APART FROM "wedged" — without API access
+# ---------------------------------------------------------------------------
+# GT New Horizons takes minutes to load 287 mods, during which port 25565 is
+# legitimately closed. The distinguishing signal is not elapsed time, it is
+# WRITING: a loading server appends to logs/latest.log continuously, and a server
+# parked on an operator prompt does not touch it again. So a closed port with a
+# log modified in the last 120 seconds is reported as "starting" and exits 0;
+# a closed port with a stale log is a failure. No clock, no API call, no
+# hand-tuned grace period that drifts out of date as the modpack grows.
+#
+# HOW THE ALERT REACHES A HUMAN
+# ---------------------------------------------------------------------------
+# Nothing new: a non-zero exit trips `CronJobLastRunFailed` (for: 20m) from
+# kubernetes/monitoring/alerts/cronjob-health.yaml, which is already wired to
+# dispatch. At */5 that means a wedged server is announced ~25 minutes in,
+# instead of the 78 minutes it took a human to notice on 2026-08-18. The job is
+# deliberately NOT a Deployment with its own alerting path — reusing the
+# existing CronJob alerting is the whole reason it is shaped this way.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# ---------------------------------------------------------------------------
+# It does not restart, repair, or touch the world. Every mount is readOnly, and
+# `/fml confirm` is a decision about possibly discarding progress — that belongs
+# to a person. The fix for the 2026-08-18 incident (preserve the truncated file,
+# copy level.dat_old over level.dat, restart) is recorded here as the runbook,
+# not automated:
+#
+#   kubectl -n game-hub exec deploy/gt-new-horizons -c gt-new-horizons -- sh -c '
+#     cd /home/container/World
+#     cp -p level.dat "level.dat.truncated-$(date -u +%Y%m%dT%H%M%SZ)"
+#     cp -p level.dat_old level.dat && gzip -t level.dat'
+#   kubectl -n game-hub rollout restart deploy/gt-new-horizons
+#
+# ⚠️ A server blocked on the FML prompt cannot process `stop`, so its pod hangs
+#    in Terminating for the full 120s grace period and beyond. That is safe to
+#    force-delete precisely because the world was never loaded: there is nothing
+#    in memory to flush.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gt-new-horizons-health
+  namespace: game-hub
+  labels:
+    app.kubernetes.io/name: gt-new-horizons-health
+    infraweaver.io/automation: health
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  # A probe that queues up behind a stuck predecessor is worse than one that
+  # skips: startingDeadlineSeconds keeps a missed slot from being replayed late
+  # and reporting on a state that has already changed.
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # No retries. A retry would paper over exactly the transient-looking
+      # failure this job exists to surface, and `CronJobLastRunFailed` needs the
+      # failure to be visible on the Job.
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: gt-new-horizons-health
+            infraweaver.io/automation: health
+        spec:
+          restartPolicy: Never
+          # Talks to no API server; see the note in world-archive.yaml about why
+          # this belongs on the pod and not on the ServiceAccount.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            # 1000:1000 is the `ubuntu` uid the server runs as and owns
+            # /home/container; any other uid cannot read the world tree.
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: health
+              # Same pinned digest as world-archive.yaml: already on the nodes
+              # and already in the restrict-image-registries allowlist. Provides
+              # gzip, nc, find and stat; nothing else is needed.
+              image: docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              # LimitRange game-hub-limits sets a floor of 100m / 256Mi on
+              # requests AND limits, with no selector to exempt a short helper —
+              # so this matches the floor rather than asking for less.
+              resources:
+                requests: {cpu: 100m, memory: 256Mi}
+                limits:   {cpu: 200m, memory: 256Mi}
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: HOST
+                  value: gt-new-horizons.game-hub.svc.cluster.local
+                - name: PORT
+                  value: "25565"
+              command:
+                - sh
+                - -c
+                - |
+                  SRC=/world-src
+                  LOG="$SRC/logs/latest.log"
+                  rc=0
+                  say() { echo "$1"; }
+                  fail() { echo "FAIL: $1"; rc=1; }
+
+                  # ── 1. is the game port actually accepting connections ──────
+                  if nc -z -w 5 "$HOST" "$PORT" 2>/dev/null; then
+                    say "OK   port $HOST:$PORT accepting connections"
+                  else
+                    # Closed port is only a failure once the server has stopped
+                    # making progress. See the header for why writing to the log
+                    # is the signal and elapsed time is not.
+                    if [ -n "$(find "$LOG" -mmin -2 2>/dev/null)" ]; then
+                      say "SKIP port closed but $LOG was written in the last 2 minutes — server is still loading"
+                    else
+                      fail "port $HOST:$PORT refused and $LOG is not being written — server is not serving"
+                    fi
+                    # The prompt is the known cause, so name it when present
+                    # rather than making a human go and read the log.
+                    if tail -c 4000 "$LOG" 2>/dev/null | grep -q 'fml confirm'; then
+                      fail "server is BLOCKED on the Forge level.dat prompt (/fml confirm) — see the runbook in this file"
+                    fi
+                  fi
+
+                  # ── 2. world metadata integrity ─────────────────────────────
+                  # Checked every run and not only when something else is wrong:
+                  # a truncated level.dat survives happily until the next restart,
+                  # which is what made all three past incidents surprises.
+                  prim=bad; back=bad
+                  gzip -t "$SRC/World/level.dat"     2>/dev/null && prim=ok
+                  gzip -t "$SRC/World/level.dat_old" 2>/dev/null && back=ok
+                  if [ "$prim" = ok ] && [ "$back" = ok ]; then
+                    say "OK   level.dat and level.dat_old both pass gzip -t"
+                  elif [ "$prim" = bad ] && [ "$back" = bad ]; then
+                    fail "level.dat AND level.dat_old are both unreadable — this volume can no longer start the world"
+                  elif [ "$prim" = bad ]; then
+                    fail "level.dat is corrupt ($(stat -c%s "$SRC/World/level.dat" 2>/dev/null) bytes); the world now depends on level.dat_old"
+                  else
+                    fail "level.dat_old is corrupt — the fallback that recovered the 2026-08-18 outage is gone"
+                  fi
+
+                  # ── 3. snapshots are still following player activity ────────
+                  # The test is NOT "is the newest zip old". With
+                  # need_online_players=true an idle server correctly takes no
+                  # backups, so age alone would alert on every quiet night.
+                  #
+                  # The fault condition is a snapshot that play has moved past:
+                  # a file under World/playerdata that is NEWER than the newest
+                  # zip (so someone played after it was taken) and is ITSELF
+                  # older than 90 minutes (so the 30-minute timer has had three
+                  # chances to fire since, and has not). Fresh activity in the
+                  # last 90 minutes is excluded on purpose — a player who joined
+                  # two minutes ago has not yet earned a backup.
+                  NEWEST="$(ls -1t "$SRC"/backups/*.zip 2>/dev/null | head -1)"
+                  if [ -z "$NEWEST" ]; then
+                    fail "no world snapshot in $SRC/backups — the in-server backup routine has never run or its output was removed"
+                  else
+                    STALE_ACTIVITY="$(find "$SRC/World/playerdata" -type f -name '*.dat' -newer "$NEWEST" ! -mmin -90 2>/dev/null | head -1)"
+                    if [ -n "$STALE_ACTIVITY" ]; then
+                      fail "players were active after $(basename "$NEWEST") and no snapshot has been taken in the 90+ minutes since — the in-server backup routine has stopped, and world-archive will keep copying a stale zip"
+                    elif [ -n "$(find "$NEWEST" -mmin -90 2>/dev/null)" ]; then
+                      say "OK   newest snapshot $(basename "$NEWEST") ($(stat -c%s "$NEWEST") bytes)"
+                    else
+                      say "OK   newest snapshot $(basename "$NEWEST") is idle-old and no play has happened since — expected with need_online_players=true"
+                    fi
+                  fi
+
+                  # ── 4. headroom ─────────────────────────────────────────────
+                  # A full volume is how a half-written level.dat happens. This
+                  # is the node's EPHEMERAL partition, shared with every other
+                  # local-path volume and every Longhorn replica on cp1.
+                  USEPCT="$(df -P "$SRC" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+                  if [ -n "$USEPCT" ] && [ "$USEPCT" -ge 90 ]; then
+                    fail "world volume is ${USEPCT}% full — writes are at risk of being truncated"
+                  else
+                    say "OK   world volume ${USEPCT}% used, $(df -Ph "$SRC" | awk 'NR==2 {print $4}') free"
+                  fi
+
+                  [ "$rc" = 0 ] && say "HEALTHY gt-new-horizons"
+                  exit "$rc"
+              volumeMounts:
+                # readOnly everywhere: a health check must never be able to alter
+                # the world it is reporting on.
+                - {name: world-src, mountPath: /world-src, readOnly: true}
+                - {name: tmp,       mountPath: /tmp}
+          volumes:
+            - name: world-src
+              persistentVolumeClaim:
+                claimName: gt-new-horizons-container-local
+                readOnly: true
+            - name: tmp
+              emptyDir: {}
+# ═══════════════════════════════════════════════════════════════════════════
+# SCHEDULING: no nodeSelector, for the reason spelled out in world-archive.yaml —
+#   the source PV carries nodeAffinity kubernetes.io/hostname In [talos-prod-cp1]
+#   and pins the pod by itself. ReadWriteOnce is per-node, so sharing cp1 with the
+#   server pod is not a conflict.
+#
+# NETWORK: this is the one job in the namespace that DOES open a socket, and it
+#   needs no policy change — checked, not assumed. `airgap-baseline` in game-hub
+#   already permits egress to game-hub endpoints and to kube-dns:53
+#   (kubernetes/core/network-policies/manifests/airgap-baseline.yaml), which is
+#   exactly the DNS lookup plus in-namespace TCP this job performs.
+#
+# ADMISSION: written restricted-compliant (non-root, seccomp RuntimeDefault, all
+#   capabilities dropped, read-only root, no privilege escalation) so it passes
+#   the namespace's warn=restricted level and does not depend on game-hub staying
+#   outside the Kyverno catalog-app selector. It mounts a PVC, never a hostPath.
+# ═══════════════════════════════════════════════════════════════════════════
