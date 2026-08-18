@@ -358,7 +358,10 @@ schedules:
     template:
       ttl: "336h"                      # 14 days = 2 weekly copies
       includedNamespaces:
-        - n8n-prod
+        # n8n-prod removed 2026-08-18: n8n was made optional and disabled, its
+        # namespace deleted and all of its data wiped. A schedule naming a
+        # namespace that does not exist still runs and still reports Completed,
+        # so leaving it here would have been a backup of nothing that looked green.
         - nextcloud
         - jellyfin
         - authentik
