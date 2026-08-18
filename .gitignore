@@ -63,3 +63,4 @@ talos/clusterconfig/talosconfig
 
 # Local tooling caches (design hooks); never manifests.
 .impeccable/
+.ruff_cache/

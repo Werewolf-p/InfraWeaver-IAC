@@ -399,7 +399,6 @@ COMPANIONS = {
         "app-n8n-manifests.yaml",
     ],
     "core-platform.external-dns": [
-        "app-external-dns-helm.yaml",
         "app-external-dns-manifests.yaml",
     ],
 }
