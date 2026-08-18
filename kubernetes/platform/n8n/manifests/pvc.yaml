@@ -1,3 +1,7 @@
+# gitops-coverage: dormant - n8n is optional and disabled (platform.yaml groups.core-platform.apps.n8n.enabled: false).
+# Set that flag to true and re-run scripts/sync-groups.sh to re-enable; it flips
+# kubernetes/bootstrap/app-n8n-manifests.yaml.disabled back to active. The old
+# instance's data was deleted on 2026-08-18, so re-enabling is a FRESH install.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -132,6 +132,14 @@ groups:
         description: "Automatic DNS record management via Cloudflare"
         enabled: true
         replicas: 1
+      # DISABLED 2026-08-18 on request, together with a wipe of its data (the
+      # two local-path PVCs, the longhorn pg-dumps volume and the kopia repo).
+      # Re-enabling deploys a FRESH n8n: nothing of the old instance survives,
+      # so treat this as a new install, not a restore.
+      n8n:
+        description: "Workflow automation"
+        enabled: false
+        replicas: 1
       homepage:
         description: "Homelab dashboard (console /home tab provides same content)"
         enabled: false    # optional: console has built-in home tab

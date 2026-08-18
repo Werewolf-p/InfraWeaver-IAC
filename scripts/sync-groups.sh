@@ -395,6 +395,9 @@ COMPANIONS = {
     "core-platform.argocd-image-updater": [
         "app-argocd-image-updater.yaml",
     ],
+    "core-platform.n8n": [
+        "app-n8n-manifests.yaml",
+    ],
     "core-platform.external-dns": [
         "app-external-dns-helm.yaml",
         "app-external-dns-manifests.yaml",
