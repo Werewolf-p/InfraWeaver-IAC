@@ -221,8 +221,28 @@ spec:
                     fail "no world snapshot in $SRC/backups — the in-server backup routine has never run or its output was removed"
                   else
                     STALE_ACTIVITY="$(find "$SRC/World/playerdata" -type f -name '*.dat' -newer "$NEWEST" ! -mmin -90 2>/dev/null | head -1)"
-                    if [ -n "$STALE_ACTIVITY" ]; then
-                      fail "players were active after $(basename "$NEWEST") and no snapshot has been taken in the 90+ minutes since — the in-server backup routine has stopped, and world-archive will keep copying a stale zip"
+                    # A short session is not a fault. ServerUtilities only backs
+                    # up while players are ONLINE and on a 30-minute timer, so a
+                    # 15-minute visit legitimately produces play with no zip
+                    # after it — and that state persists until someone plays
+                    # long enough, which would leave this alert firing forever.
+                    # What actually matters is whether the changed world has ANY
+                    # recent protected copy. Since 2026-08-18 there is a nightly
+                    # off-node copy of every local-path volume
+                    # (kubernetes/core/local-path/localpath-offnode-backup.yaml),
+                    # so this only fails when BOTH are stale.
+                    OFFNODE_RECENT=""
+                    if [ -d /offnode ]; then
+                      # Layout written by localpath-offnode-backup:
+                      #   /offnode/localpath-backup/<node>/<UTC stamp>/<pvc-dir>.tar.gz
+                      # 1560 minutes = 26h, so one missed nightly run is still a
+                      # pass and two are not.
+                      OFFNODE_RECENT="$(find /offnode/localpath-backup -maxdepth 3 -name '*game-hub_gt-new-horizons*' -mmin -1560 2>/dev/null | head -1)"
+                    fi
+                    if [ -n "$STALE_ACTIVITY" ] && [ -z "$OFFNODE_RECENT" ]; then
+                      fail "players were active after $(basename "$NEWEST"), no in-server snapshot followed in 90+ minutes, AND there is no off-node copy from the last 26h — this world is genuinely unprotected"
+                    elif [ -n "$STALE_ACTIVITY" ]; then
+                      say "OK   in-server snapshot $(basename "$NEWEST") predates the last session, but a nightly off-node copy exists — expected with need_online_players=true and a short session"
                     elif [ -n "$(find "$NEWEST" -mmin -90 2>/dev/null)" ]; then
                       say "OK   newest snapshot $(basename "$NEWEST") ($(stat -c%s "$NEWEST") bytes)"
                     else
@@ -247,12 +267,18 @@ spec:
                 # readOnly everywhere: a health check must never be able to alter
                 # the world it is reporting on.
                 - {name: world-src, mountPath: /world-src, readOnly: true}
+                - {name: offnode,   mountPath: /offnode, readOnly: true}
                 - {name: tmp,       mountPath: /tmp}
           volumes:
             - name: world-src
               persistentVolumeClaim:
                 claimName: gt-new-horizons-container-local
                 readOnly: true
+            - name: offnode
+              # The nightly catch-all backup, read-only. If this mount is
+              # unavailable the check degrades to "no off-node copy found", i.e.
+              # it becomes stricter rather than silently passing.
+              nfs: {server: 10.1.0.135, path: /mnt/pool/k8s-longhorn-backups, readOnly: true}
             - name: tmp
               emptyDir: {}
 # ═══════════════════════════════════════════════════════════════════════════
