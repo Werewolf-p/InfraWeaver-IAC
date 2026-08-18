@@ -115,21 +115,10 @@ spec:
       toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
     - toEntities: [kube-apiserver]
 ---
-# ─────────────────────────────── n8n-prod ──────────────────────────────────
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata: {name: airgap-baseline, namespace: n8n-prod, labels: {app.kubernetes.io/managed-by: gitops, infraweaver.io/posture: airgapped}}
-spec:
-  endpointSelector: {}
-  ingress:
-    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": n8n-prod}}]
-    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": traefik}}]
-    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": monitoring}}]
-  egress:
-    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": n8n-prod}}]
-    - toEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s-app": kube-dns}}]
-      toPorts: [{ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}], rules: {dns: [{matchPattern: "*"}]}}]
-    - toEntities: [kube-apiserver]
+# n8n-prod removed 2026-08-18 together with the namespace. A CiliumNetworkPolicy
+# for a namespace that does not exist cannot be applied, so leaving it here held
+# core-network-policies permanently OutOfSync. Re-enabling n8n (platform.yaml
+# groups.core-platform.apps.n8n.enabled) needs this block restored from history.
 ---
 # ─────────────────────────────── game-hub ──────────────────────────────────
 # `toEntities: [kube-apiserver]` REMOVED from this catch-all 2026-08-12. It gave
