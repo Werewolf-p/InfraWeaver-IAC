@@ -107,6 +107,14 @@ metadata:
     app.kubernetes.io/name: nextcloud-data-archive
     infraweaver.io/automation: backup
 spec:
+  # ── SUSPENDED 2026-08-18, together with the parked workload ───────────────
+  # A CronJob left running against a parked app does not stay quiet: it fails
+  # every night against a database with no pod and lights up CronJobLastRunFailed.
+  # Suspending is exempt from CronJobMissedSuccess by that rule's own
+  # `unless ... kube_cronjob_spec_suspend == 1` clause, and the CronJobSuspended
+  # warning is scoped away from these two namespaces in
+  # kubernetes/monitoring/alerts/cronjob-health.yaml — un-park means undoing both.
+  suspend: true
   schedule: "45 0 * * *"
   timeZone: Etc/UTC
   concurrencyPolicy: Forbid

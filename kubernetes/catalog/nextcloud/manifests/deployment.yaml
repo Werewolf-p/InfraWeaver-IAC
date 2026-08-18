@@ -8,7 +8,18 @@ metadata:
     app.kubernetes.io/managed-by: infraweaver
     infraweaver.io/source: catalog
 spec:
-  replicas: 1
+  # ── PARKED 2026-08-18 ────────────────────────────────────────────────────
+  # Deployment kept, pods stopped, at the operator's request: "turn off
+  # nextcloud, jellyfin but keep all configs just not the active pods so just
+  # like tradesphere". This is the tradesphere shape — tradesphere-api,
+  # tradesphere-web and tradesphere-db have sat at 0/0 for 64 days with their
+  # ArgoCD app Synced/Healthy and data-tradesphere-db-0 still Bound.
+  #
+  # Nothing is deleted. Every PVC in this directory keeps its data, the
+  # ExternalSecrets keep resolving, the IngressRoutes and the Authentik provider
+  # keep existing, and the PVs are `Retain` regardless. Un-park by setting this
+  # back to 1 — no restore step, the volume is still there.
+  replicas: 0
   strategy:
     type: Recreate
   selector:

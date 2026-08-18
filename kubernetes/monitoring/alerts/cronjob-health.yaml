@@ -166,9 +166,15 @@ spec:
               --sort-by=.metadata.creationTimestamp -o name | tail -1 | cut -d/ -f2)
 
         - alert: CronJobSuspended
+          # `namespace!~"nextcloud|jellyfin"` covers two DELIBERATELY PARKED apps
+          # (2026-08-18): their Deployments sit at replicas 0 with all config and
+          # data kept, so their CronJobs are suspended on purpose and would
+          # otherwise hold this warning firing forever. Scoped by namespace rather
+          # than by job name because the whole namespace is parked — un-parking is
+          # a single commit that must delete this exclusion in the same change.
           expr: |
             max by (namespace, cronjob) (
-              kube_cronjob_spec_suspend{namespace!="infraweaver-console",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
+              kube_cronjob_spec_suspend{namespace!="infraweaver-console",namespace!~"nextcloud|jellyfin",cronjob!~"truenas-backup-daily|truenas-backup-weekly|local-snapshot-daily|longhorn-backup-verifier|etcd-snapshot-verifier"}
             ) == 1
           for: 15m
           labels:
