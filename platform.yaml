@@ -126,7 +126,7 @@ groups:
         replicas: 1
       minio-velero:
         description: "S3-compatible storage for Velero backups"
-        enabled: false
+        enabled: true
         replicas: 1
       external-dns:
         description: "Automatic DNS record management via Cloudflare"

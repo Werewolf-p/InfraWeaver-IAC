@@ -53,6 +53,72 @@ spec:
           - '{{ if eq (default "true" .serverSideApply) "false" }}ServerSideApply=false{{ else }}ServerSideApply=true{{ end }}'
           - RespectIgnoreDifferences=true
       ignoreDifferences:
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: deletingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: generatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: imagevalidatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: mutatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: namespaceddeletingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: namespacedgeneratingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: namespacedimagevalidatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: namespacedmutatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: namespacedvalidatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: policyexceptions.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
+        - group: apiextensions.k8s.io
+          kind: CustomResourceDefinition
+          name: validatingpolicies.policies.kyverno.io
+          jsonPointers:
+            - /spec/conversion
+            - /metadata/labels
         - kind: Secret
           jqPathExpressions:
             - '.data["admin-password"]'

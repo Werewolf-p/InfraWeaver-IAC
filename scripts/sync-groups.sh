@@ -67,6 +67,46 @@ with open(platform_file) as fh:
 _repo = os.environ.get("GIT_REPO_URL", "${DEPLOY_REPO_URL}")
 REPO_URL = _repo if _repo.startswith("${") else _repo.rstrip("/") + ".git"
 
+# Kyverno 1.18 policy CRDs (arrived with the 3.2.8 -> 3.8.2 chart upgrade). Two
+# unsyncable diffs on the same 11 objects:
+#   /spec/conversion  — the chart omits it, the apiserver defaults it to
+#                       {strategy: None}.
+#   /metadata/labels  — the crds subchart renders these 11 with an EMPTY map
+#                       (labels: {}). The apiserver stores no labels field at
+#                       all, so desired {} vs live absent never converges. The
+#                       other 11 kyverno CRDs get real labels and stay Synced —
+#                       that split is exactly how this was identified.
+# Without BOTH pointers the app sits OutOfSync forever while every sync reports
+# Succeeded. Ignoring only /spec/conversion was tried first and did not clear it.
+#
+# ⚠️ Scoped BY NAME on purpose. This helper templates every core-* Application,
+# including core-longhorn, whose CRDs legitimately declare
+# `conversion.strategy: Webhook`. A blanket `kind: CustomResourceDefinition`
+# ignore would hide a real change to that wiring — and a stale longhorn
+# conversion webhook pointing at a Service with zero endpoints is a bug that was
+# cleaned up on the same day the by-name scoping was written.
+KYVERNO_POLICY_CRD_IGNORES = "".join(
+    "        - group: apiextensions.k8s.io\n"
+    "          kind: CustomResourceDefinition\n"
+    f"          name: {_n}.policies.kyverno.io\n"
+    "          jsonPointers:\n"
+    "            - /spec/conversion\n"
+    "            - /metadata/labels\n"
+    for _n in (
+        "deletingpolicies",
+        "generatingpolicies",
+        "imagevalidatingpolicies",
+        "mutatingpolicies",
+        "namespaceddeletingpolicies",
+        "namespacedgeneratingpolicies",
+        "namespacedimagevalidatingpolicies",
+        "namespacedmutatingpolicies",
+        "namespacedvalidatingpolicies",
+        "policyexceptions",
+        "validatingpolicies",
+    )
+)
+
 def appset_yaml(appset_name, appset_label, metadata_name, path_pattern, comment, managed_comment, automated_prune="false", extra_params=""):
     """Generate a full ApplicationSet YAML — single source of truth for all AppSets."""
     return (
@@ -126,6 +166,7 @@ def appset_yaml(appset_name, appset_label, metadata_name, path_pattern, comment,
         f"          - '{{{{ if eq (default \"true\" .serverSideApply) \"false\" }}}}ServerSideApply=false{{{{ else }}}}ServerSideApply=true{{{{ end }}}}'\n"
         f"          - RespectIgnoreDifferences=true\n"
         f"      ignoreDifferences:\n"
+        f"{KYVERNO_POLICY_CRD_IGNORES}"
         f"        - kind: Secret\n"
         f"          jqPathExpressions:\n"
         f'            - \'.data["admin-password"]\'\n'
