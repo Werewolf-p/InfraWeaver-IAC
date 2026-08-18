@@ -105,7 +105,17 @@ spec:
             unless on (namespace, cronjob)
               max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
             and on (namespace, cronjob)
-              (time() - max by (namespace, cronjob) (kube_cronjob_created) > 93600)
+              # 694800s = 8 days, not 26 hours. 26h assumed a daily cadence and
+              # fired on every WEEKLY job before its first slot could arrive:
+              # etcd-metrics-logger (0 2 * * 0, created Sun 15:49, i.e. after
+              # that week's 02:00) alerted on 2026-08-17 having never had a
+              # single opportunity to run. truenas-backup-weekly sits in the
+              # backup variant of this rule with the same schedule and the same
+              # exposure. 8 days clears the longest schedule in use while still
+              # catching a genuinely dead weekly job. Fast failure detection is
+              # not lost — CronJobLastRunFailed and *MissedSuccess still fire
+              # within hours; this rule only covers the never-ran-at-all case.
+              (time() - max by (namespace, cronjob) (kube_cronjob_created) > 694800)
           for: 15m
           labels:
             severity: warning
@@ -270,7 +280,17 @@ spec:
             unless on (namespace, cronjob)
               max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
             and on (namespace, cronjob)
-              (time() - max by (namespace, cronjob) (kube_cronjob_created) > 93600)
+              # 694800s = 8 days, not 26 hours. 26h assumed a daily cadence and
+              # fired on every WEEKLY job before its first slot could arrive:
+              # etcd-metrics-logger (0 2 * * 0, created Sun 15:49, i.e. after
+              # that week's 02:00) alerted on 2026-08-17 having never had a
+              # single opportunity to run. truenas-backup-weekly sits in the
+              # backup variant of this rule with the same schedule and the same
+              # exposure. 8 days clears the longest schedule in use while still
+              # catching a genuinely dead weekly job. Fast failure detection is
+              # not lost — CronJobLastRunFailed and *MissedSuccess still fire
+              # within hours; this rule only covers the never-ran-at-all case.
+              (time() - max by (namespace, cronjob) (kube_cronjob_created) > 694800)
           for: 15m
           labels:
             severity: critical

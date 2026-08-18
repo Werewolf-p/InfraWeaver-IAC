@@ -54,20 +54,50 @@ fi
 TMP_PVC="${PVC}-lh-migrate"
 
 # ArgoCD with selfHeal reverts the scale-to-0 within seconds, so the workload
-# keeps its RWO volume mounted and the copy Job can never attach. Suspend
-# auto-sync for the duration and always restore it, even on failure.
+# keeps its RWO volume mounted and the copy Job can never attach.
+#
+# ⚠️ Patching the Application does NOT hold. Every Application here is generated
+# by an ApplicationSet (appset-core*.yaml), and the appset controller re-applies
+# spec.syncPolicy.automated within ~20s. On 2026-08-18 that raced a live
+# migration: ArgoCD scaled n8n back up mid-copy, the new pod re-mounted the PVC
+# that was already pending deletion, and kubernetes.io/pvc-protection then held
+# that PVC in Terminating indefinitely. The workload was left down and the PVC
+# had to be recovered by hand. The same applies to ignoreDifferences and to any
+# other field on the Application — the appset owns all of it.
+#
+# So suspend the CONTROLLER instead. Scaling argocd-application-controller to 0
+# is self-referential: with it stopped nothing is reconciling, so nothing can
+# undo the scale-down — including the scale-down of the controller itself. It is
+# a normal maintenance action and fully reversible. Reconciliation pauses
+# cluster-wide for the few minutes a copy takes; the trap restores it on every
+# exit path, including failure and Ctrl-C.
+ARGO_CTRL_STS="argocd-application-controller"
+ARGO_CTRL_REPLICAS=""
 restore_argocd() {
-  [ -n "$ARGO_APP" ] || return 0
-  kubectl -n argocd patch application "$ARGO_APP" --type=merge \
-    -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}' >/dev/null 2>&1 \
-    && echo "    restored ArgoCD auto-sync on ${ARGO_APP}"
+  [ -n "$ARGO_CTRL_REPLICAS" ] || return 0
+  kubectl -n argocd scale statefulset "$ARGO_CTRL_STS" \
+    --replicas="$ARGO_CTRL_REPLICAS" >/dev/null 2>&1 \
+    && echo "    restored ${ARGO_CTRL_STS} to ${ARGO_CTRL_REPLICAS} replica(s)"
 }
 if [ -n "$ARGO_APP" ]; then
-  echo "==> suspending ArgoCD auto-sync on ${ARGO_APP}"
-  kubectl -n argocd patch application "$ARGO_APP" --type=json \
-    -p '[{"op":"remove","path":"/spec/syncPolicy/automated"}]' >/dev/null 2>&1 \
-    || echo "    (already manual)"
-  trap restore_argocd EXIT
+  ARGO_CTRL_REPLICAS=$(kubectl -n argocd get statefulset "$ARGO_CTRL_STS" \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
+  if [ -z "$ARGO_CTRL_REPLICAS" ]; then
+    echo "!! cannot read ${ARGO_CTRL_STS} replicas — refusing to run blind" >&2
+    echo "   (without a reliable pause, ArgoCD deadlocks the PVC deletion)" >&2
+    exit 1
+  fi
+  # Trap BEFORE scaling down, so an interrupt between the two still restores.
+  trap restore_argocd EXIT INT TERM
+  echo "==> pausing ArgoCD reconciliation (${ARGO_CTRL_STS} ${ARGO_CTRL_REPLICAS} -> 0)"
+  kubectl -n argocd scale statefulset "$ARGO_CTRL_STS" --replicas=0 >/dev/null
+  for _ in $(seq 1 30); do
+    [ "$(kubectl -n argocd get pods \
+         -l app.kubernetes.io/name=argocd-application-controller \
+         --no-headers 2>/dev/null | grep -c .)" = "0" ] && break
+    sleep 2
+  done
+  echo "    reconciliation paused"
 fi
 
 echo "==> 1/6 stopping ${WORKLOAD}"
