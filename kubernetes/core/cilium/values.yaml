@@ -16,6 +16,34 @@ k8s:
 kubeProxyReplacement: false
 policyEnforcementMode: default
 
+# Reach the apiserver through Talos KubePrism (127.0.0.1:7445), NOT through the
+# in-cluster ClusterIP.
+#
+# ADDED 2026-08-18 to break a deadlock that took the whole cluster's datapath
+# down. By default the agent connects to https://10.96.0.1:443 — a Service whose
+# translation the agent itself programs. That is a cycle, and it is fine right up
+# until the agent's service map points at an apiserver that stops answering:
+#
+#   cilium-agent  → 10.96.0.1:443 → (stale backend) → connection refused
+#   → agent never becomes ready → cannot learn the correct backends
+#   → the entry it needs to fix is the one it cannot reach the API to fix
+#
+# MEASURED that day: all three agents 0/1 with
+#   "Kubernetes service is not ready: Get https://10.96.0.1:443/version:
+#    dial tcp 10.96.0.1:443: connect: connection refused"
+# and every new pod cluster-wide failing to mount its ServiceAccount token,
+# because kubelet could not reach the API either. Nothing recovers on its own.
+#
+# KubePrism is a host-local load balancer over ALL control-plane endpoints, run by
+# Talos outside Kubernetes, so it has no dependency on cilium, on any Service, or
+# on any single apiserver being up. Both the ConfigMap keys and the container env
+# are required: the `config` init container builds its client from the standard
+# KUBERNETES_SERVICE_* env vars and ignores the ConfigMap, so setting only
+# k8sServiceHost leaves the init container looping on 10.96.0.1 and the pod stuck
+# in Init:0/5 — which is exactly what happened before the env was added.
+k8sServiceHost: localhost
+k8sServicePort: "7445"
+
 cni:
   exclusive: true
 
