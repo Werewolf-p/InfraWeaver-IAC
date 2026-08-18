@@ -31,7 +31,15 @@ spec:
         value: 1
         periodSeconds: 60
     scaleUp:
-      stabilizationWindowSeconds: 30
+      # 300s, matching scaleDown. At 30s a single one-minute cron burst
+      # (alerts-dispatch runs `* * * * *`, plus the wordpress/game-hub sweeps)
+      # was enough to trip the 70% CPU target and add a pod. Each new pod is a
+      # Next.js cold start that fails readiness ~5x before serving, which then
+      # perturbs the average again -- 623 rescale events in 3d18h, oscillating
+      # 2<->3<->4 forever, while steady-state CPU is 1-22m against a 250m
+      # request. Requiring the load to persist 5 minutes ends the oscillation
+      # without changing capacity; min/max are untouched.
+      stabilizationWindowSeconds: 300
       policies:
       - type: Pods
         value: 1
