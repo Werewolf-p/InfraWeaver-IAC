@@ -198,6 +198,19 @@ metrics:
 # ║   kubernetes/catalog/game-hub/manifests/world-archive.yaml       00:30   ║
 # ║   kubernetes/catalog/wordpress-cache/manifests/wp-data-archive.yaml  00:35/00:40 ║
 # ║   kubernetes/catalog/nextcloud/manifests/data-archive.yaml       00:45   ║
+# ║                                                                          ║
+# ║ ADDED 2026-08-18 — the per-app archives above are per-app by definition,  ║
+# ║ so a local-path volume belonging to no app with an archive job was still  ║
+# ║ covered by nothing. cp1's reset that day erased eight of them and only a  ║
+# ║ hand-made tar saved the data. There is now a catch-all that copies EVERY  ║
+# ║ local-path directory on a node straight to the NAS over NFS:              ║
+# ║   kubernetes/core/local-path/localpath-offnode-backup.yaml       00:40   ║
+# ║ It exits NON-ZERO when it finds nothing, so "the mount broke" is a        ║
+# ║ failure rather than another green job protecting nothing.                 ║
+# ║                                                                          ║
+# ║ ⚠️ The schedule below is still called `weekly-localpath`, and that name    ║
+# ║ invites exactly the belief this box exists to correct. It is kept because ║
+# ║ its OBJECT capture is real; it is not, and never was, volume coverage.    ║
 # ╚═════════════════════════════════════════════════════════════════════════╝
 #
 # Times are cluster-local UTC. Deliberately placed AROUND the existing backup
