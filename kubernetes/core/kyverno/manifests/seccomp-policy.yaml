@@ -95,6 +95,21 @@ kind: ClusterPolicy
 metadata:
   name: require-seccomp-profile-wide
   annotations:
+    # Autogen off: kyverno derives a Deployment/ReplicaSet/etc. copy of every
+    # Pod rule, and against a controller whose template carries
+    # `securityContext: {}` (authentik-server and 61 other workloads) the
+    # derived rule cannot walk to seccompProfile. It reports the engine text
+    # "pattern and resource have different structures … Expected
+    # map[string]interface {}, found <nil>" instead of the message below —
+    # 129 of the 170 warning events this policy produced, none of them
+    # actionable. The Pod rule is unaffected and evaluates every pod at
+    # admission regardless of its controller, so coverage does not change:
+    # PolicyReports read 166 fail / 185 pass with the correct message. Verify
+    # after any edit, do not assume:
+    #     kubectl get policyreports -A -o json | jq '[.items[].results[]?
+    #       | select(.policy=="require-seccomp-profile-wide") | .result]
+    #       | group_by(.) | map({r:.[0],n:length})'
+    pod-policies.kyverno.io/autogen-controllers: "none"
     policies.kyverno.io/title: Require Seccomp Profile (wide scope, audit)
     policies.kyverno.io/category: Pod Security Standards (Restricted)
     policies.kyverno.io/severity: medium
