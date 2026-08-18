@@ -16,6 +16,23 @@ metadata:
     # upgrade also re-runs the script (occ takes care of no-ops).
     argocd.argoproj.io/hook: PostSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    # ── PARKED 2026-08-18, with the workload ─────────────────────────────
+    # Skip=true while nextcloud sits at replicas 0. This hook's init container
+    # polls http://nextcloud.nextcloud.svc/status.php until it reports
+    # "installed":true — and a Deployment at 0 replicas gives that Service no
+    # endpoints, so the poll can only ever return
+    #     wget: can't connect to remote host (10.105.160.22): Connection refused
+    # It also carries a REQUIRED podAffinity to a nextcloud pod that does not
+    # exist. As a PostSync hook that does not fail politely: it blocks the whole
+    # Application's sync operation from ever completing, and ArgoCD recreates it
+    # on every attempt. Measured after the parking commit: the hook pod cycled
+    # continuously while catalog-nextcloud-manifests reported Synced/Healthy.
+    #
+    # The file itself is deliberately kept intact — parking must not delete
+    # config. Un-parking is one commit that sets replicas back to 1 AND removes
+    # this annotation; leaving it behind would silently disable the post-install
+    # script on a live nextcloud, which is worse than the bug it fixes.
+    argocd.argoproj.io/sync-options: Skip=true
 spec:
   backoffLimit: 3
   ttlSecondsAfterFinished: 3600
