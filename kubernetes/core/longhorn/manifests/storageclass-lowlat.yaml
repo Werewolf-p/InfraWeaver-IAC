@@ -1,0 +1,71 @@
+# longhorn-lowlat — replicated storage FENCED OFF the offsite node.
+#
+# WHY THIS CLASS EXISTS
+# ---------------------
+# Longhorn acknowledges a write only when EVERY replica has acked it. cp4
+# (zone=hypatia) is a Hetzner box across a stretched VLAN: 14.9-16.3 ms away,
+# versus 0.19-0.63 ms between cp1 and cp3. Putting a latency-sensitive volume's
+# replica there does not merely slow it down, it breaks it. Measured
+# 2026-08-14, moving the Authentik database onto plain `longhorn`:
+#
+#     FATAL:  could not open file "global/pg_filenode.map": I/O error
+#
+# ...and the migration was reverted the same day. The note left in
+# kubernetes/platform/authentik/values.yaml said the precondition for retrying
+# was to "fence latency-sensitive volumes off the remote node (Longhorn disk
+# tags / a dedicated StorageClass with a diskSelector)". This class is that
+# fence, and 2026-08-18 is the retry.
+#
+# HOW THE FENCE WORKS — and why the pre-existing `offsite` tag was NOT enough
+# ---------------------------------------------------------------------------
+# cp4's disk was already tagged `offsite`. That tag alone excludes nothing:
+# measured 2026-08-18, ALL 27 Longhorn volumes — every one of them with an
+# empty diskSelector — had a replica on cp4's `offsite` disk. A tag on a disk
+# does not make that disk exclusive; it only gives volumes something to select
+# ON. Exclusion has to come from the volume side.
+#
+# So the low-latency disks (cp1, cp3) are tagged `lowlat` and this class sets
+#     diskSelector: "lowlat"
+# A disk is eligible only if it carries EVERY tag in the selector. cp4's disk
+# has `offsite` and not `lowlat`, so it can never hold a replica of a volume in
+# this class. Nothing else changes for any other volume.
+#
+# ⚠️ The disk tags themselves are NOT in git — they live on the
+# `nodes.longhorn.io` CRs, which Longhorn owns and creates. This file is
+# useless without them. To re-apply after a node rebuild:
+#     kubectl -n longhorn-system patch nodes.longhorn.io <node> --type=merge \
+#       -p '{"spec":{"disks":{"<disk>":{"tags":["lowlat"], ...}}}}'
+# Verify with: kubectl -n longhorn-system get nodes.longhorn.io \
+#       -o custom-columns=N:.metadata.name,TAGS:.spec.disks.*.tags
+#
+# REPLICA COUNT
+# -------------
+# numberOfReplicas 2, but only cp3 can satisfy it today: cp1's Longhorn disk
+# has been Ready=False since the 2026-08-18 reset ("record diskUUID doesn't
+# match the one on the disk" — the EPHEMERAL wipe gave /var/lib/longhorn a new
+# filesystem). A volume here is therefore DEGRADED-but-serving until that disk
+# is re-registered, at which point Longhorn rebuilds the second replica by
+# itself. Degraded is the honest signal and is deliberate: 1 is not set here,
+# because that would report "healthy" while providing no redundancy at all.
+#
+# Volumes in this class carry no recurring-job labels, so Longhorn applies the
+# `default` group (see backup-jobs.yaml): midnight snapshot + 01:00 backup to
+# TrueNAS. That is real off-box protection, which a local-path PV can never
+# have.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-lowlat
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "2"
+  staleReplicaTimeout: "2880"
+  diskSelector: "lowlat"
+  dataLocality: "best-effort"
+  fromBackup: ""
+  fsType: ext4
