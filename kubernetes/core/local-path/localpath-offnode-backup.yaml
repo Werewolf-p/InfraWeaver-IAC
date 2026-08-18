@@ -1,0 +1,170 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Nightly off-node backup of every local-path volume on cp1
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# local-path PVs are `hostPath`, and Velero's file-system backup skips hostPath
+# volumes by design. `velero-weekly-localpath` has therefore reported Completed
+# since the day it was created while copying ZERO bytes of local-path data — the
+# velero values.yaml in this repo says so at length. Longhorn cannot see these
+# volumes either, because they are not Longhorn volumes. So the honest summary
+# was: the local-path volumes had no automated protection of any kind.
+#
+# That stopped being theoretical on 2026-08-18. cp1 was reset
+# (`--system-labels-to-wipe EPHEMERAL`), which erased every local-path directory
+# on it — two live WordPress sites, jellyfin, nextcloud, GT New Horizons and
+# authentik's Postgres. The data survived only because a human took an ad-hoc tar
+# to the NAS first and verified it by hand. This CronJob is that procedure,
+# written down and run every night.
+#
+# WHAT IT COPIES
+# ---------------------------------------------------------------------------
+# Every directory under /opt/local-path-provisioner matching the provisioner's
+# `pvc-<uid>_<ns>_<name>` convention. Leftover directories from deleted PVCs are
+# copied too, deliberately: the cost is disk on a 3.3 TB export, and the
+# alternative is a hand-maintained allowlist that silently stops covering a
+# volume the day someone adds one.
+#
+# ⚠️ These copies are CRASH-CONSISTENT, not quiesced. For anything with its own
+# logical dump — authentik, nextcloud — prefer the dump on restore; for a
+# database this copy is a last resort, not a first choice. A Minecraft world is
+# safe to take this way only while the server is stopped, which is why game-hub
+# keeps its own quiesced world-archive job; this is its backstop, not its
+# replacement.
+#
+# WHERE IT WRITES
+# ---------------------------------------------------------------------------
+# nfs://10.1.0.135:/mnt/pool/k8s-longhorn-backups → localpath-backup/<node>/<stamp>/
+# The same export Longhorn writes to: reachable from every node, needs no
+# credential (the SMB share's ROOT is not writable — only its `media` subdir is,
+# measured 2026-08-18, which is why SMB is not used here), 3.3 TB free.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: localpath-offnode-backup-cp1
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: localpath-offnode-backup
+    infraweaver.io/automation: backup
+spec:
+  # 00:40 — after the game-hub world archive (00:30), so a quiesced world zip
+  # already exists, and before truenas-backup-daily (01:00).
+  schedule: "40 0 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: localpath-offnode-backup
+            infraweaver.io/automation: backup
+        spec:
+          # Pinned to the node whose disk is being read. hostPath is node-local,
+          # so this is not a scheduling preference — it is the whole job.
+          nodeName: talos-prod-cp1
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          # Tolerate a cordoned or tainted node: the moment a node is unhealthy
+          # is exactly when its only copy of this data matters most. cp1 is
+          # cordoned as of 2026-08-18 pending an image-corruption diagnosis, and
+          # this job must keep running through that.
+          tolerations:
+            - operator: Exists
+          containers:
+            - name: backup
+              image: busybox:1.36
+              securityContext:
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits:   {cpu: "1",  memory: 512Mi}
+              command: ["sh", "-ec"]
+              args:
+                - |
+                  NODE="${MY_NODE:-unknown}"
+                  # /opt is mounted, NOT /opt/local-path-provisioner: right after
+                  # a reboot kubelet fails the hostPath type check on the nested
+                  # path while happily mounting the parent (measured 2026-08-18).
+                  SRC=/srcroot/local-path-provisioner
+                  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/nas/localpath-backup/${NODE}/${stamp}"
+                  mkdir -p "$out"
+                  {
+                    echo "# local-path volumes on ${NODE}, captured ${stamp}"
+                    echo "# CRASH-CONSISTENT. Prefer a logical dump on restore where one exists."
+                    echo ""
+                  } > "$out/MANIFEST.txt"
+                  rc=0; n=0
+                  for d in "$SRC"/*; do
+                    [ -d "$d" ] || continue
+                    b=$(basename "$d")
+                    case "$b" in pvc-*) : ;; *) continue ;; esac
+                    src_bytes=$(du -sb "$d" 2>/dev/null | cut -f1)
+                    if tar -czf "$out/$b.tar.gz" -C "$SRC" "$b" 2>/dev/null; then
+                      arc=$(stat -c%s "$out/$b.tar.gz")
+                      # A truncated archive is worse than none, because it still
+                      # looks like a backup.
+                      if [ "$arc" -lt 512 ]; then
+                        echo "FAILED ${b}: archive only ${arc}B" >> "$out/MANIFEST.txt"; rc=1; continue
+                      fi
+                      echo "$b  src_bytes=$src_bytes  archive_bytes=$arc" >> "$out/MANIFEST.txt"
+                      n=$((n+1))
+                    else
+                      echo "FAILED ${b}: tar error" >> "$out/MANIFEST.txt"; rc=1
+                    fi
+                  done
+                  # Refuse to report success on an empty backup. A run that finds
+                  # nothing means the mount is wrong, not that there is nothing to
+                  # protect — that distinction is the whole point of this file.
+                  if [ "$n" -eq 0 ]; then
+                    echo "FATAL: no local-path volumes found under $SRC" >&2
+                    rc=1
+                  fi
+                  echo "" >> "$out/MANIFEST.txt"
+                  echo "archives: $n" >> "$out/MANIFEST.txt"
+                  cat "$out/MANIFEST.txt"
+                  echo "total: $(du -sh "$out" | cut -f1)"
+                  # Retention: 7 nightly copies per node.
+                  ls -1t "/nas/localpath-backup/${NODE}" 2>/dev/null | tail -n +8 | while read -r old; do
+                    rm -rf "/nas/localpath-backup/${NODE}/$old" && echo "rotated out $old"
+                  done
+                  exit $rc
+              env:
+                - name: MY_NODE
+                  valueFrom:
+                    fieldRef: {fieldPath: spec.nodeName}
+              volumeMounts:
+                # readOnly: this job must never be able to write into a live volume.
+                - {name: srcroot, mountPath: /srcroot, readOnly: true}
+                - {name: nas,     mountPath: /nas}
+          volumes:
+            - name: srcroot
+              hostPath: {path: /opt, type: Directory}
+            - name: nas
+              nfs: {server: 10.1.0.135, path: /mnt/pool/k8s-longhorn-backups}
+# ═══════════════════════════════════════════════════════════════════════════
+# ADMISSION: kube-system is on the exclude list of `disallow-hostpath-volumes`
+#   (Enforce), which is why this lives here rather than beside each app — the
+#   same reason the 2026-08-18 wipe job had to run here.
+#
+# ALERTING: a failure trips the existing CronJobLastRunFailed rule
+#   (kubernetes/monitoring/alerts/cronjob-health.yaml). Because this job exits
+#   non-zero when it finds NOTHING, "the mount broke" is a failure rather than a
+#   silent success — the exact failure mode that made velero-weekly-localpath
+#   useless for its entire life.
+#
+# ADDING A NODE: copy this CronJob, change `nodeName` and the metadata name.
+#   Nothing detects a missing node automatically; that gap is written down here
+#   rather than pretended away.
+# ═══════════════════════════════════════════════════════════════════════════
