@@ -186,11 +186,16 @@ metrics:
 # ║     kubectl -n velero get podvolumebackups.velero.io \                   ║
 # ║       -l velero.io/backup-name=<backup> -o wide                          ║
 # ║                                                                          ║
-# ║ So these three schedules are GAP-C2 again — green jobs that back up      ║
-# ║ nothing — for exactly the volumes they were written to protect. They are ║
-# ║ kept because their OBJECT capture is real and useful (PVC specs,         ║
-# ║ Deployments, ConfigMaps: enough to rebuild the shape of a namespace),    ║
-# ║ but they are NOT volume coverage and must not be counted as such.        ║
+# ║ So these three schedules were GAP-C2 again — green jobs that back up     ║
+# ║ nothing — for exactly the volumes they were written to protect. TWO OF   ║
+# ║ THEM ARE NOW DELETED (2026-08-19): `daily-gamehub` and `weekly-localpath`║
+# ║ produced 0 PVBs on every run, AND their object capture turned out to be  ║
+# ║ a strict subset of `daily-objects` measured same-day over durable kinds  ║
+# ║ (0 items captured by either that daily-objects did not also capture).    ║
+# ║ The full measurement is recorded where they used to be defined, below.   ║
+# ║ `daily-wordpress` stays: it moves real bytes, and since the 08-18/19     ║
+# ║ migrations it now reaches 11 `data` volumes including zonnevaarwater-nl  ║
+# ║ at 1.63 GiB — the site files, not just the emptyDirs it used to catch.   ║
 # ║                                                                          ║
 # ║ The actual volume coverage for local-path now comes from three archive   ║
 # ║ CronJobs that write onto `longhorn-retain` PVCs and ride the existing    ║
@@ -208,9 +213,10 @@ metrics:
 # ║ It exits NON-ZERO when it finds nothing, so "the mount broke" is a        ║
 # ║ failure rather than another green job protecting nothing.                 ║
 # ║                                                                          ║
-# ║ ⚠️ The schedule below is still called `weekly-localpath`, and that name    ║
-# ║ invites exactly the belief this box exists to correct. It is kept because ║
-# ║ its OBJECT capture is real; it is not, and never was, volume coverage.    ║
+# ║ ⚠️ The rule this banner now enforces: a schedule whose name promises      ║
+# ║ volume coverage it cannot deliver gets DELETED, not annotated. An        ║
+# ║ annotation is read once; the name is read every time someone asks        ║
+# ║ "is it backed up?".                                                       ║
 # ╚═════════════════════════════════════════════════════════════════════════╝
 #
 # Times are cluster-local UTC. Deliberately placed AROUND the existing backup
@@ -300,84 +306,45 @@ schedules:
       defaultVolumesToFsBackup: true   # kopia FSB — the only local-path mechanism
       storageLocation: default
 
-  # ── Tier 2 in practice: game-hub OBJECTS only. NOT the world. ──────────────
-  # game-hub/gt-new-horizons-container-local — local-path-retain, 30Gi claim,
-  # 2.9G actual, PINNED to talos-prod-cp1. The running server pod mounts THIS
-  # PVC (not the longhorn-game one, which is detached).
+  # ── DELETED 2026-08-19: `daily-gamehub` and `weekly-localpath` ─────────────
+  # Both schedules reported Completed for months while protecting nothing, and
+  # the "keep them for their OBJECT capture" defence written above them did not
+  # survive being measured. Re-measured 2026-08-19 before the deletion:
   #
-  # ⚠️ THIS SCHEDULE HAS NEVER BACKED UP THE WORLD AND CANNOT. Measured
-  # 2026-08-16 on the run that reported Completed:
-  #   kubectl -n velero get podvolumebackups.velero.io \
-  #     -l velero.io/backup-name=velero-daily-gamehub-20260816083024
-  #   → No resources found.
-  # The PV is hostPath-backed and Velero's FSB skips hostPath by design — see the
-  # banner above the schedules block. `defaultVolumesToFsBackup: true` below is
-  # therefore inert here; it is left in place only so that a future migration of
-  # this PVC onto a CSI-backed class starts working without another edit.
+  #   VOLUME BYTES — PodVolumeBackups produced by real runs, counted, not inferred:
+  #     velero-daily-gamehub-20260816083024   → 0 PVBs
+  #     velero-daily-gamehub-20260817083025   → 0 PVBs
+  #     velero-daily-gamehub-20260818083026   → 0 PVBs   (Completed, 7 warnings)
+  #     velero-weekly-localpath-20260816050024→ 0 PVBs   (PartiallyFailed, 1 error)
+  #   Reproduce:
+  #     kubectl -n velero get podvolumebackups.velero.io \
+  #       -l velero.io/backup-name=<backup> -o json | jq '.items | length'
   #
-  # The world is covered instead by
-  # kubernetes/catalog/game-hub/manifests/world-archive.yaml at 00:30, which
-  # copies the server's own 30-minutely save-flushed zip onto a longhorn-retain
-  # PVC — a QUIESCED artefact, which no file-system copy of a live Minecraft
-  # server can be.
+  #   OBJECT CAPTURE — the actual reason they were kept, now refuted. Both
+  #   backups' resource lists were downloaded (velero DownloadRequest, kind
+  #   BackupResourceList) and set-differenced against the SAME-DAY daily-objects
+  #   run, over durable kinds only (Event/Pod/ReplicaSet/ControllerRevision/
+  #   EndpointSlice/Endpoints/CiliumEndpoint/EphemeralReport/Job excluded — all
+  #   controller-regenerated, and Events are excludedResources on daily-objects):
+  #     daily-gamehub 08-18   vs daily-objects 08-18, ns=game-hub
+  #        36 durable items vs 36 — captured ONLY by daily-gamehub: 0
+  #     weekly-localpath 08-16 vs daily-objects 08-16, ns=nextcloud+jellyfin+authentik
+  #       103 durable items vs 103 — captured ONLY by weekly-localpath: 0
+  #   daily-objects reaches those namespaces because it has no includedNamespaces
+  #   and excludes only kube-system/kube-public/kube-node-lease/velero — measured
+  #   2026-08-19: game-hub 91 items, nextcloud 76, jellyfin 38, authentik 108.
+  #   Its ttl is 720h against their 168h/336h, so retention IMPROVES on deletion.
   #
-  # ⚠️ THE 08:30 TIME IS NOT LOAD-BEARING, and the reasoning that said it was
-  # rested on a false premise. It read: "game-hub-scale-down runs at 00:00 and
-  # scales game-hub to ZERO; scale-up restores it at 08:00, and FSB reads volumes
-  # through a running pod, so a 02:00 run would find no pod." Both scale jobs are
-  # shipped DORMANT (scaleDownEnabled=false, targetDeployments="") and log
-  # "…is disabled; exiting" — the server is never scaled down, so every hour of
-  # the day has a running pod. The time may be moved freely.
-  daily-gamehub:
-    disabled: false
-    schedule: "30 8 * * *"
-    template:
-      ttl: "168h"                      # 7 days
-      includedNamespaces:
-        - game-hub
-      snapshotVolumes: false
-      defaultVolumesToFsBackup: true
-      storageLocation: default
-
-  # ── Tier 3: OBJECTS for the remaining local-path workloads, weekly ─────────
-  # ⚠️ ZERO VOLUME DATA. Measured 2026-08-16:
-  #   kubectl -n velero get podvolumebackups.velero.io \
-  #     -l velero.io/backup-name=velero-weekly-localpath-20260816050024
-  #   → No resources found.       (and the backup was PartiallyFailed)
-  # Every PVC named below is local-path, i.e. hostPath-backed, i.e. invisible to
-  # Velero's FSB — see the banner above the schedules block. What this schedule
-  # really delivers for these namespaces is their object graph, which is worth
-  # keeping but is not a volume backup.
+  #   So: zero volume bytes, and an object capture that is a strict subset of a
+  #   schedule that runs more often and keeps it longer. Two green jobs proving
+  #   nothing, deleted. Volume coverage for these namespaces is unchanged and is
+  #   where it always actually was — the archive CronJobs and pg-dumps listed in
+  #   the banner above, riding the Longhorn → TrueNAS chain.
   #
-  #   n8n-prod   n8n-data + postgresql-n8n-data      → pg covered by
-  #              kubernetes/platform/n8n/manifests/pg-backup.yaml (00:25).
-  #              n8n-data (2Gi claim) has NO volume coverage.
-  #   nextcloud  nextcloud-data-lp (1.1G actual, of which 340M is irreplaceable)
-  #              → covered by catalog/nextcloud/manifests/data-archive.yaml (00:45);
-  #              postgresql-nextcloud-data-lp → pg-backup.yaml (00:20)
-  #   jellyfin   jellyfin-data-0-lp  (config only)  → NO volume coverage
-  #   authentik  postgres + redis                   → pg_dump'd nightly at 00:15
-  #              into authentik-pg-dumps, a longhorn-retain PVC TrueNAS holds.
-  #              Redis is deliberately not backed up (sessions/cache).
+  #   Existing backups were NOT touched. Schedule-created Backup objects carry
+  #   no ownerReferences (verified 2026-08-19), so deleting a Schedule cannot
+  #   cascade-delete a Backup; the remaining copies age out on their own TTL.
   #
-  # DELIBERATELY EXCLUDED — see README "What is NOT backed up":
-  #   registry/zot-data (local-path-retain, cp3) — a container image cache.
-  #     Rebuildable from source via buildkit; not worth the MinIO footprint.
-  #   nextcloud + jellyfin NAS media (500Gi SMB PVs) — those live on TrueNAS
-  #     already and are not Velero's to copy.
-  weekly-localpath:
-    disabled: false
-    schedule: "0 5 * * 0"
-    template:
-      ttl: "336h"                      # 14 days = 2 weekly copies
-      includedNamespaces:
-        # n8n-prod removed 2026-08-18: n8n was made optional and disabled, its
-        # namespace deleted and all of its data wiped. A schedule naming a
-        # namespace that does not exist still runs and still reports Completed,
-        # so leaving it here would have been a backup of nothing that looked green.
-        - nextcloud
-        - jellyfin
-        - authentik
-      snapshotVolumes: false
-      defaultVolumesToFsBackup: true
-      storageLocation: default
+  #   If a future migration puts these PVCs on a CSI-backed class, the correct
+  #   move is a NEW schedule written against that class — not a resurrection of
+  #   one of these, whose names were the lie in the first place.

@@ -15,8 +15,8 @@ Everything below was measured against the live cluster on 2026-08-15, not assume
 | Layer | State | Evidence |
 |---|---|---|
 | Velero controller | **Absent** | `kubectl get crd \| grep velero` → no output. No BSL, no schedules, no backups. |
-| `minio-velero` | Running, but **only the S3 target** | `velero/minio-velero` Deployment 1/1, Service ClusterIP `10.96.59.43` :9000/:9001, PVC `minio-velero-data` 20Gi on `longhorn-retain`, 2 replicas, healthy. |
-| The backup bucket | **Empty — never used** | `df -h /data` → `20G  196K  20G  1%`. `velero-backups/` is a 4.0K empty dir. |
+| `minio-velero` | Running, but **only the S3 target** | `velero/minio-velero` Deployment 1/1, Service ClusterIP `10.96.59.43` :9000/:9001, PVC `minio-velero-data` **50Gi** on `longhorn-retain` (re-measured 2026-08-19; it was 20Gi when this row was written), 2 replicas, healthy. |
+| The backup bucket | **In use** | Re-measured 2026-08-19: `df -h /data` → `50G  2.6G  47G  6%`. The "empty, never used" reading below dates from before the first successful run. |
 | MinIO credentials | OpenBao via ESO, **live** | `ExternalSecret velero/minio-velero-credentials` → `SecretSynced True`, path `secret/platform/minio-velero` (`access_key`, `secret_key`). |
 | `velero-s3-credentials` | **Declared but never applied** | Present in `platform/minio-velero/manifests/minio.yaml`, but no Application owns that dir. `kubectl -n velero get externalsecret` returns only `minio-velero-credentials`. |
 | GitOps ownership of `velero` ns | **NONE** | Every object in the namespace has `app.kubernetes.io/instance = None`. Hand-applied 62 days ago; nothing reconciles it. |
@@ -81,7 +81,7 @@ additional controller to duplicate a Longhorn capability that is already running
 and already producing 185 completed backups to off-cluster NFS.
 
 The alternative — pointing Velero's file-system backup at *every* volume — would
-copy multi-gigabyte Longhorn volumes into a **20Gi** MinIO PVC that is itself a
+copy multi-gigabyte Longhorn volumes into a **50Gi** MinIO PVC that is itself a
 Longhorn volume in the same cluster. That is strictly worse than what exists.
 
 ### Why not Longhorn for everything
@@ -151,23 +151,37 @@ duplicating Longhorn.
 | Schedule | When (UTC) | Scope | Volume data | TTL |
 |---|---|---|---|---|
 | `daily-objects` | 03:30 daily | all ns except `kube-*`, `velero` | **none** | 30d |
-| `daily-wordpress` | 03:45 daily | `wordpress` | kopia FSB | 7d |
-| `daily-gamehub` | **08:30** daily | `game-hub` | kopia FSB | 7d |
-| `weekly-localpath` | Sun 05:00 | `n8n-prod`, `nextcloud`, `jellyfin`, `authentik` | kopia FSB | 14d |
+| `daily-wordpress` | 03:45 daily | `wordpress` | kopia FSB (Longhorn PVCs only) | 7d |
 
-Estimated steady-state footprint **~10–14 GB** against a 20Gi MinIO PVC (kopia
+**`daily-gamehub` and `weekly-localpath` were DELETED on 2026-08-19.** Both
+produced **0 PodVolumeBackups on every run they ever made** (counted, per run:
+gamehub 08-16/08-17/08-18 → 0, 0, 0; localpath 08-16 → 0 and PartiallyFailed),
+because every PVC they named is `local-path`, i.e. `hostPath`-backed, which
+Velero's file-system backup skips by design. They were retained for a while on
+the argument that their *object* capture was still worth having; that argument
+was then measured and failed. Downloading both backups' `BackupResourceList` and
+set-differencing them against the **same-day** `daily-objects` run over durable
+kinds gives **0 objects captured by either that `daily-objects` did not also
+capture** (game-hub 36 vs 36; nextcloud+jellyfin+authentik 103 vs 103) — and
+`daily-objects` runs daily with a 720h TTL against their 168h/336h, so deleting
+them lengthened retention. Existing backups were left alone; schedule-created
+Backups carry no `ownerReferences`, so they age out on their own TTL.
+
+Measured footprint **2.6 GB** of a **50Gi** MinIO PVC (6%) on 2026-08-19 (kopia
 deduplicates and compresses across snapshots). See §6 for the headroom caveat.
 
-#### The 08:30 game-hub slot is load-bearing
+#### The 08:30 game-hub slot was never load-bearing (and the schedule is gone)
 
-`game-hub/game-hub-scale-down` runs at **00:00** and takes game-hub to **zero
-replicas**; `game-hub-scale-up` restores it at **08:00**. Velero file-system
-backup reads volumes **through a running pod**. The previous `values.yaml`
-scheduled everything at **02:00** — squarely inside the down window. It would
-have found no pod, copied nothing, and reported `Completed`.
+The reasoning that put `daily-gamehub` at 08:30 read: *scale-down runs at 00:00
+and takes game-hub to zero replicas, FSB reads volumes through a running pod, so
+a 02:00 run would find no pod.* Both halves were false. Both scale jobs ship
+**dormant** — measured in the live ConfigMap `game-hub/game-hub-scale-schedule-config`:
+`scaleDownEnabled: "false"`, `targetDeployments: ""`, and the job logs say
+*"scale-down is disabled; exiting"*. The server runs 24/7. And the schedule could
+not have copied the world at any hour, because the PV is `hostPath`-backed.
 
-That is the exact failure mode this repo already documented for the Longhorn
-jobs: *"A green job that backs up nothing is worse than a red one."*
+The lesson survives its schedule: *"A green job that backs up nothing is worse
+than a red one."* That is why the schedule was deleted rather than re-timed.
 
 #### Why `daily-objects` excludes volume data
 
@@ -264,10 +278,10 @@ resource mapping not found for kind "BackupStorageLocation" / "Schedule"
 
 # BSL + Schedules validated against the chart's own bundled CRD OpenAPI schemas:
 PASS  BackupStorageLocation   default
-PASS  Schedule                velero-daily-gamehub
+PASS  Schedule                velero-daily-gamehub      # deleted 2026-08-19
 PASS  Schedule                velero-daily-objects
 PASS  Schedule                velero-daily-wordpress
-PASS  Schedule                velero-weekly-localpath
+PASS  Schedule                velero-weekly-localpath   # deleted 2026-08-19
 
 $ kubectl apply --dry-run=server -f manifests/externalsecret.yaml
 externalsecret.external-secrets.io/velero-s3-credentials created (server dry run)
@@ -340,38 +354,68 @@ default. Use `update` **only** when you intend to overwrite live objects.
 
 ### 3. Restore a single application / PVC
 
+> ## ⚠️ STOP — this section used to be a data-loss trap. Corrected 2026-08-19.
+>
+> It previously said *"For a local-path PVC the data comes back via kopia"* and
+> then told you to **delete the damaged PVC** and restore from
+> `velero-daily-gamehub-<timestamp>`. Every one of those backups contains **zero
+> volume bytes** — measured, per run, 0 PodVolumeBackups — because local-path PVs
+> are `hostPath` and Velero's FSB skips them. Following the old steps would have
+> deleted a live PVC and restored nothing into its replacement.
+>
+> **Velero can restore the OBJECT graph of a namespace. For any `local-path` PVC
+> it cannot restore the DATA. Never delete a PVC on the strength of a Velero
+> backup without first proving that backup holds bytes for that exact volume:**
+>
+> ```bash
+> kubectl -n velero get podvolumebackups.velero.io \
+>   -l velero.io/backup-name=<backup> \
+>   -o custom-columns=POD:.spec.pod.name,VOL:.spec.volume,PHASE:.status.phase,BYTES:.status.progress.totalBytes
+> ```
+>
+> An empty result means the backup protects **nothing** for that volume.
+
+Restoring the object graph of one application (safe — creates, does not delete):
+
 ```bash
 velero restore create restore-gtnh-$(date +%s) \
-  --from-backup velero-daily-gamehub-<timestamp> \
+  --from-backup velero-daily-objects-<timestamp> \
   --include-namespaces game-hub \
-  --include-resources persistentvolumeclaims,persistentvolumes,deployments,configmaps,secrets \
+  --include-resources persistentvolumeclaims,deployments,configmaps,secrets \
   --selector app=gt-new-horizons
 ```
 
-**For a local-path PVC the data comes back via kopia**, which requires the
-node-agent to write into a **freshly provisioned** PVC. So:
+**Where the DATA actually comes from, per storage class:**
 
-```bash
-# 1. scale the workload down
-kubectl -n game-hub scale deploy/gt-new-horizons --replicas=0
-# 2. delete the damaged PVC (local-path-retain => the PV is RETAINED, not erased)
-kubectl -n game-hub delete pvc gt-new-horizons-container-local
-# 3. restore — Velero recreates PVC + pod and the node-agent restores into it
-velero restore create --from-backup <backup> --include-namespaces game-hub
-# 4. watch the PodVolumeRestore, not just the Restore
-kubectl -n velero get podvolumerestores -w
-```
+| Volume | Class | Restore source (the real one) |
+|---|---|---|
+| `game-hub/gt-new-horizons-container-local` | `local-path-retain` | the world archive on `longhorn-retain` — `kubernetes/catalog/game-hub/manifests/world-archive.yaml` (00:30), a save-flushed zip, then the Longhorn → TrueNAS chain |
+| `wordpress/hihi-wp-data`, `wordpress/yonavaarwater-nl-wp-data` | `local-path-retain` | `wp-data-archive-group-a` (00:35) → `longhorn-retain` → NAS |
+| `nextcloud/nextcloud-data-lp` | `local-path-retain` | `catalog/nextcloud/manifests/data-archive.yaml` (00:45) |
+| any other local-path volume | `local-path*` | the catch-all `core/local-path/localpath-offnode-backup.yaml` (00:40) → NFS |
+| every Longhorn volume | `longhorn-*` | Longhorn snapshot + TrueNAS backup; check `kubectl -n longhorn-system get backupvolumes.longhorn.io` and read `.status.lastBackupAt` |
+| every Postgres | — | the `*-pg-dump` CronJobs → `longhorn-retain`. A logical dump is the only restore-grade DB artefact here. |
 
-> **local-path is node-pinned.** A restored local-path PVC binds wherever the pod
-> is scheduled, which may be a **different node** than before. That is a feature
-> here — it is exactly how you evacuate a node that is about to be wiped.
+The RTO for a local-path volume is therefore: extract the archive tarball/zip
+into a fresh PVC and point the workload at it — **not** a Velero restore.
+
+> **local-path is node-pinned.** A newly provisioned local-path PVC binds
+> wherever the pod is scheduled, which may be a **different node** than before.
+> That is useful when evacuating a node — but the bytes still have to come from
+> an archive, not from Velero.
 
 ### 4. Evacuating a node before a wipe (the live use case)
 
 ```bash
 # 1. force a fresh backup of everything pinned to that node, while pods still run
+# ⚠️ --default-volumes-to-fs-backup does NOT reach a local-path PVC (hostPath).
+# This captures the OBJECT graph plus any LONGHORN volumes in those namespaces.
+# For the local-path ones, trigger the archive CronJobs instead (see §3's table)
+# and confirm the archive landed BEFORE the node is touched.
+# n8n-prod was deleted 2026-08-18 — naming a namespace that does not exist still
+# reports Completed, which is the same lie this file exists to prevent.
 velero backup create evac-cp1-$(date +%s) \
-  --include-namespaces game-hub,wordpress,nextcloud,n8n-prod,jellyfin,authentik \
+  --include-namespaces game-hub,wordpress,nextcloud,jellyfin,authentik \
   --default-volumes-to-fs-backup \
   --wait
 
@@ -428,7 +472,7 @@ kubectl delete ns velero-drill
 1. **`registry/zot-data` (20Gi claim, local-path on cp3) is NOT backed up.**
    A deliberate exclusion: it is a container-image cache, rebuildable from source
    via buildkit, and it is the single largest local-path consumer. Including it
-   would risk filling the 20Gi MinIO PVC. **If cp3 is wiped, the Zot registry
+   would risk filling the MinIO PVC. **If cp3 is wiped, the Zot registry
    contents are lost and images must be rebuilt and re-pushed.**
 
 2. **File-system backup only captures volumes of RUNNING pods.** Anything scaled
@@ -442,13 +486,13 @@ kubectl delete ns velero-drill
    `/home/container/backups` (1.6G of the 2.4G) partially compensates but has
    only ~6h retention.
 
-4. **The MinIO PVC is 20Gi and estimated usage is ~10–14 GB.** That is real but
-   thin headroom, and the estimate is from `du` on current data, not from a
-   measured kopia repo. **Recommended follow-up: expand
-   `minio-velero-data` to 50Gi** (`longhorn-retain` has
-   `allowVolumeExpansion: true`) and alert on MinIO disk usage. If the bucket
-   fills, backups fail — and nothing currently watches for that beyond the
-   ServiceMonitor added here.
+4. **The MinIO PVC sizing concern is CLOSED.** The recommended expansion happened:
+   re-measured 2026-08-19, `minio-velero-data` is **50Gi** and `df -h /data`
+   reports `50G  2.6G  47G  6%` — a real kopia-repo number, not a `du` estimate.
+   Deleting `daily-gamehub` and `weekly-localpath` on the same day reduced it
+   further. What is still **open** is the alerting: if the bucket ever fills,
+   backups fail, and nothing watches for that beyond the ServiceMonitor added
+   here. That is the follow-up worth doing, not more capacity.
 
 5. **`minio-velero` is still NOT GitOps-managed, and this change set does not fix
    it.** Every object in the `velero` namespace was hand-applied 62 days ago and

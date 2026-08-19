@@ -321,172 +321,48 @@ spec:
               persistentVolumeClaim: {claimName: wp-data-archive-group-a}
             - name: tmp
               emptyDir: {}
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: wp-data-archive-group-b
-  namespace: wordpress
-  labels:
-    app.kubernetes.io/name: wp-data-archive
-    infraweaver.io/automation: backup
-    infraweaver.io/archive-group: b
-spec:
-  # Group B = the site volumes whose PVs pin to talos-prod-cp3. Five minutes
-  # after group A so the two never contend for node I/O or for the 01:00 window.
-  schedule: "40 0 * * *"
-  timeZone: Etc/UTC
-  concurrencyPolicy: Forbid
-  startingDeadlineSeconds: 1200
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 2
-  jobTemplate:
-    spec:
-      backoffLimit: 2
-      activeDeadlineSeconds: 900
-      ttlSecondsAfterFinished: 172800
-      template:
-        metadata:
-          labels:
-            app.kubernetes.io/name: wp-data-archive
-            infraweaver.io/automation: backup
-            infraweaver.io/archive-group: b
-        spec:
-          restartPolicy: OnFailure
-          automountServiceAccountToken: false
-          # Repeated verbatim from group A — see the note there on why this is
-          # not a YAML anchor.
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 33
-            runAsGroup: 33
-            fsGroup: 33
-            fsGroupChangePolicy: OnRootMismatch
-            seccompProfile:
-              type: RuntimeDefault
-          containers:
-            - name: archive
-              image: docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
-              securityContext:
-                allowPrivilegeEscalation: false
-                readOnlyRootFilesystem: true
-                capabilities:
-                  drop: ["ALL"]
-              resources:
-                requests: {cpu: 100m, memory: 256Mi}
-                limits:   {cpu: "1",  memory: 512Mi}
-              env:
-                - name: HOME
-                  value: /tmp
-                - name: SITES
-                  value: "lol zonnevaarwater-nl"
-              command:
-                - sh
-                - -ec
-                - |
-                  set -o pipefail
-                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-                  DST=/archive
-                  RC=0
-
-                  for SITE in $SITES; do
-                    SRC="/sites/$SITE"
-
-                    # An empty source means the PVC was renamed, re-provisioned or
-                    # migrated out from under this job. Backing up nothing and
-                    # exiting 0 is the failure mode this whole file exists to stop
-                    # repeating, so it is fatal.
-                    if [ ! -d "$SRC" ] || [ -z "$(ls -1A "$SRC" 2>/dev/null)" ]; then
-                      echo "FATAL: $SRC is missing or empty — refusing to report success"
-                      RC=1
-                      continue
-                    fi
-
-                    if [ ! -f "$SRC/wp-config.php" ]; then
-                      echo "FATAL: $SRC has no wp-config.php — not a WordPress root"
-                      RC=1
-                      continue
-                    fi
-
-                    OUT="$DST/$SITE-wp-data-$STAMP.tar.gz"
-
-                    tar -czf "$OUT" -C "$SRC" \
-                        --exclude='./wp-content/cache' \
-                        --exclude='./wp-content/uploads/cache' \
-                        . || { echo "FATAL: tar failed for $SITE"; rm -f "$OUT"; RC=1; continue; }
-
-                    if ! gzip -t "$OUT"; then
-                      echo "FATAL: $OUT fails gzip integrity check"
-                      rm -f "$OUT"; RC=1; continue
-                    fi
-                    ENTRIES="$(tar -tzf "$OUT" | wc -l)"
-                    if [ "$ENTRIES" -lt 100 ]; then
-                      echo "FATAL: $OUT holds only $ENTRIES entries"
-                      rm -f "$OUT"; RC=1; continue
-                    fi
-                    if ! tar -tzf "$OUT" | grep -c '^\./wp-config\.php$' > /dev/null; then
-                      echo "FATAL: $OUT does not contain wp-config.php"
-                      rm -f "$OUT"; RC=1; continue
-                    fi
-
-                    sha256sum "$OUT" > "$OUT.sha256"
-                    echo "OK $SITE -> $OUT ($(stat -c%s "$OUT") bytes, $ENTRIES entries)"
-
-                    ls -1t "$DST/$SITE-wp-data-"*.tar.gz 2>/dev/null | tail -n +3 \
-                      | while read -r f; do rm -f "$f" "$f.sha256"; done
-                  done
-
-                  echo "volume now $(du -sh "$DST" | cut -f1), $(ls -1 "$DST"/*.tar.gz 2>/dev/null | wc -l) archives"
-                  exit "$RC"
-              volumeMounts:
-                - {name: lol,               mountPath: /sites/lol,               readOnly: true}
-                - {name: zonnevaarwater-nl, mountPath: /sites/zonnevaarwater-nl, readOnly: true}
-                - {name: archive,           mountPath: /archive}
-                - {name: tmp,               mountPath: /tmp}
-          volumes:
-            - name: lol
-              persistentVolumeClaim: {claimName: lol-wp-data, readOnly: true}
-            - name: zonnevaarwater-nl
-              persistentVolumeClaim: {claimName: zonnevaarwater-nl-wp-data, readOnly: true}
-            - name: archive
-              persistentVolumeClaim: {claimName: wp-data-archive-group-b}
-            - name: tmp
-              emptyDir: {}
 # ═══════════════════════════════════════════════════════════════════════════
-# WHY THIS FILE LIVES UNDER catalog/wordpress-cache/manifests/
-#   `catalog-wordpress-cache-manifests` is the only ArgoCD Application whose
-#   source path targets the `wordpress` namespace, and it is a plain
-#   (non-recursive, non-Helm, no-CMP) directory source — so every .yaml in that
-#   directory is applied to `wordpress`. A dedicated `catalog-wordpress-backup`
-#   Application would be tidier, but Applications are hand-written into
-#   kubernetes/bootstrap/, which is applied imperatively by
-#   scripts/deploy/deploy-argocd.sh and is owned elsewhere. Adding a file here
-#   needs no bootstrap change and no deploy run.
-#   ⚠️ That app syncs with prune: true — deleting this file deletes the CronJobs.
-#   The PVCs survive on `longhorn-retain` (Retain), so the archives outlive a
-#   revert.
-#
-# ADMISSION: wordpress is PSA enforce=baseline / warn=restricted, and the Kyverno
-#   Enforce policies (require-non-root, require-seccomp-profile,
-#   require-drop-all-capabilities, disallow-privilege-escalation,
-#   disallow-hostpath-volumes) match only namespaces labelled
-#   `infraweaver.io/type: catalog-app` — which `wordpress` is not. The pods above
-#   are written restricted-compliant regardless. They mount PVCs, never a
-#   hostPath, so disallow-hostpath-volumes is satisfied even though the PVs
-#   behind the claims are hostPath-backed — the policy reads the pod spec.
-#
-# QUOTA: ResourceQuota wordpress-quota allows 40 PVCs (15 used), 40 pods (14),
-#   4 CPU requests (1475m) and 8Gi memory requests (3904Mi). +2 PVCs, +1 pod at a
-#   time, +100m/+256Mi while running — inside it.
-#
-# NETWORK: no policy change is required, and that was checked rather than assumed
-#   — these pods open no socket at all. `airgap-baseline` in this namespace is a
-#   CiliumNetworkPolicy with `endpointSelector: {}` and an egress section, which
-#   default-denies egress for every pod here except intra-namespace and DNS.
-#   That is also why these jobs do NOT query the API server to detect a
-#   newly-provisioned site that nobody added to SITES: reaching the apiserver
-#   would mean opening an egress hole in a default-deny namespace to make a
-#   backup job's convenience check work. The closed-cohort argument at the top of
-#   this file is what makes that acceptable — every site created since
-#   2026-08-14 lands on longhorn-retain and is covered by Longhorn directly.
+# `wp-data-archive-group-b` (the CronJob) DELETED 2026-08-19 — its two sources
+# migrated to Longhorn, so it had become a Longhorn -> Longhorn copy.
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# RE-MEASURED 2026-08-19 before deleting, not inherited from the plan that
+# proposed it:
+#
+#   kubectl -n wordpress get pvc -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName
+#     lol-wp-data                 longhorn-retain    <- was local-path-retain (cp3)
+#     zonnevaarwater-nl-wp-data   longhorn-retain    <- was local-path-retain (cp3)
+#     hihi-wp-data                local-path-retain  <- group A, UNCHANGED
+#     yonavaarwater-nl-wp-data    local-path-retain  <- group A, UNCHANGED
+#
+# Group B's job therefore read two Longhorn volumes and wrote a tarball onto a
+# third Longhorn volume, all three of which the same nightly recurring chain
+# already ships to the NAS. That is not a second copy in any sense that
+# survives a failure the first copy would not.
+#
+# THE SOURCES ARE PROVEN COVERED — three independent copies each, measured
+# 2026-08-19, and this job was the redundant third:
+#
+#   1. Longhorn -> TrueNAS. BackupVolume lastBackupAt:
+#        lol-wp-data               pvc-12b5b88e...-2ab6d29b  2026-08-19T01:03:43Z
+#        zonnevaarwater-nl-wp-data pvc-88d21891...-54b16841  2026-08-19T01:10:19Z
+#      (both volumes carry recurring-job-group.longhorn.io/default=enabled)
+#   2. velero-daily-wordpress, run velero-daily-wordpress-20260819034542 —
+#      `data` PodVolumeBackups that DID NOT EXIST before the migration:
+#        lol-854ddd8f98-6r2vj             data  Completed    102,803,307 B
+#        zonnevaarwater-nl-7dcc757487-... data  Completed  1,746,453,648 B
+#   3. this job. Deleted.
+#
+# ⚠️ GROUP A STAYS AND IS NOT REDUNDANT. The same 08-19 measurement shows
+# velero-daily-wordpress still produces NO `data` PVB for `hihi` and none for
+# `yonavaarwater-nl` (only their `wp-cli` emptyDir, and the yonavaarwater-nl-db
+# Longhorn volume) — because those two site volumes are still hostPath-backed
+# local-path, which Velero's FSB skips by design. Group A is the ONLY file-level
+# coverage for hihi-wp-data and yonavaarwater-nl-wp-data. Do not touch it until
+#   kubectl -n wordpress get pvc hihi-wp-data yonavaarwater-nl-wp-data
+# reports longhorn-retain for both.
+#
+# ⚠️ THE group-b PVC ABOVE IS DELIBERATELY KEPT. It still holds the retained
+# archives this job wrote. Deleting the PVC would destroy them, so it stays
+# until an operator retires it in a maintenance window with the inventory line
+# written first. Nothing writes to it now; nothing is lost by it sitting there.
