@@ -69,6 +69,11 @@ Current membership: authentik server/worker/postgresql, wordpress-cache
 **n8n + postgresql-n8n**, and the MetalLB `prod-l2` / `dns-l2` advertisements
 (a VIP announced from the far side of the WAN hairpins every request through it).
 
+**Membership is also conferred by storage, automatically.** Anything that mounts
+a `longhorn-lowlat` volume is latency-bound by definition and does not need — and
+must not rely on — a hand-written copy of the block above. See
+[the storage-derived rule](#the-rule-you-do-not-write-longhorn-lowlat) below.
+
 **latency-tolerant** — the default. **No zone rule at all.** Batch work,
 backups, image builds, DNS/DHCP-style controllers, anything reconciling on a
 timer. These are free to use cp4, and most already do.
@@ -78,6 +83,54 @@ That second class is the load-bearing half. cp4 holds ~2.70 spare cores and
 buildkitd, the ArgoCD repo/appset/notifications controllers and most CronJobs.
 **The goal is "nothing latency-critical crosses the WAN", not "cp4 is empty."**
 Nothing here pushes work onto cp4 and nothing taxes it for being used.
+
+---
+
+## The rule you do not write: `longhorn-lowlat`
+
+A Longhorn volume has two halves and they are placed by two different systems.
+
+* **Replicas** hold the data. `longhorn-lowlat` fences them with
+  `diskSelector: lowlat` — cp1 and cp3 carry that disk tag, cp4's disk carries
+  `offsite`, so a replica can never land across the WAN.
+* **The engine** does the I/O. It runs wherever the volume is *attached*, which
+  is wherever the **pod** was scheduled, and it writes to every replica
+  synchronously, acknowledging only once all of them have acked.
+
+Fencing only the first half is worse than fencing neither. Measured 2026-08-19:
+`lol-db`, `yonavaarwater-nl-db` and `zonnevaarwater-nl-db` each ran on cp4 with
+both replicas correctly on cp1+cp3, so **every write left the node, crossed the
+15 ms link twice, and blocked until it came back.** Nothing was misconfigured;
+they had been moved off cp3 the previous night when it hit 99% memory requests,
+and the scheduler had no reason to prefer cp1 over cp4.
+
+So the rule is attached to the **volume**, not to the workload:
+`kubernetes/core/kyverno/manifests/lowlat-pv-node-affinity.yaml` stamps exactly
+the latency-bound block above onto `spec.nodeAffinity` of every
+`longhorn-lowlat` PersistentVolume at admission, and the scheduler's built-in
+VolumeBinding plugin enforces it against every pod that binds that PV — the same
+mechanism that makes a `local-path` PVC pin its pod to one node.
+
+Three consequences worth knowing:
+
+1. **You do not add an affinity block for a lowlat workload.** It is already
+   fenced, including workloads generated outside this repo (the WordPress site
+   Deployments are written at runtime by the console addon and have no affinity
+   field at all).
+2. **PV `nodeAffinity` is immutable once set.** Editing the policy changes what
+   NEW volumes get; re-stamping an existing one means deleting and recreating
+   its PV — safe on this `Retain` class, but a deliberate maintenance action.
+3. **A lowlat pod is unschedulable if both cp1 and cp3 are down.** Intended.
+   Running these databases over the WAN is what produced
+   `FATAL: could not open file "global/pg_filenode.map": I/O error` on
+   2026-08-14.
+
+`dataLocality` is not the mechanism and cannot be. The class has always set
+`best-effort`; what that produced on those three volumes was a third replica
+with `hardNodeAffinity: talos-prod-cp4` stuck permanently in state `stopped`,
+because it wants a replica next to the engine and the diskSelector forbids one
+there. The two settings contradict each other the moment the pod is on the wrong
+node, and the diskSelector is the one that must win.
 
 ---
 

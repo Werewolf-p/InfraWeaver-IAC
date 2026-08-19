@@ -38,15 +38,42 @@
 # Verify with: kubectl -n longhorn-system get nodes.longhorn.io \
 #       -o custom-columns=N:.metadata.name,TAGS:.spec.disks.*.tags
 #
+# THE OTHER HALF OF THE FENCE — THE POD
+# -------------------------------------
+# ⚠️ A diskSelector fences REPLICAS. It does not fence the ENGINE, which runs on
+# whichever node the volume is attached to, i.e. wherever the consuming POD was
+# scheduled, and which writes to every replica synchronously. A pod on cp4 with
+# its replicas correctly on cp1+cp3 is therefore the WORST arrangement this
+# class can produce, not a safe one: every write leaves the node, crosses the
+# 15 ms link to both replicas, and blocks until both ack.
+#
+# That is not hypothetical. Measured 2026-08-19, all three WordPress databases
+# on this class (lol, yonavaarwater-nl, zonnevaarwater-nl) were running exactly
+# like that, having been moved off cp3 the previous night when it hit 99%
+# memory requests.
+#
+# The pod-side half now lives in
+#     kubernetes/core/kyverno/manifests/lowlat-pv-node-affinity.yaml
+# which stamps `zone NotIn [hypatia]` onto `spec.nodeAffinity` of every
+# PersistentVolume in this class at admission. Read that file before changing
+# anything here — and note that `dataLocality: best-effort` below is NOT that
+# mechanism and cannot be: it wants a replica next to the engine, which this
+# diskSelector forbids, so on a wrongly-placed pod it only produces a permanent
+# `stopped` replica with hardNodeAffinity to the node it may not use.
+#
 # REPLICA COUNT
 # -------------
-# numberOfReplicas 2, but only cp3 can satisfy it today: cp1's Longhorn disk
-# has been Ready=False since the 2026-08-18 reset ("record diskUUID doesn't
-# match the one on the disk" — the EPHEMERAL wipe gave /var/lib/longhorn a new
-# filesystem). A volume here is therefore DEGRADED-but-serving until that disk
-# is re-registered, at which point Longhorn rebuilds the second replica by
-# itself. Degraded is the honest signal and is deliberate: 1 is not set here,
-# because that would report "healthy" while providing no redundancy at all.
+# numberOfReplicas 2, and BOTH are satisfiable again as of 2026-08-19: cp1's
+# Longhorn disk is back to allowScheduling with ~637 GiB available, and all four
+# volumes in this class report robustness `healthy` with one replica on cp1 and
+# one on cp3.
+#
+# (History, kept because it explains the choice of 2: on 2026-08-18 cp1's disk
+# was Ready=False — "record diskUUID doesn't match the one on the disk", the
+# EPHEMERAL wipe having given /var/lib/longhorn a new filesystem — so a volume
+# here was DEGRADED-but-serving until it re-registered. Degraded is the honest
+# signal and is deliberate: 1 is not set here, because that would report
+# "healthy" while providing no redundancy at all.)
 #
 # Volumes in this class carry no recurring-job labels, so Longhorn applies the
 # `default` group (see backup-jobs.yaml): midnight snapshot + 01:00 backup to

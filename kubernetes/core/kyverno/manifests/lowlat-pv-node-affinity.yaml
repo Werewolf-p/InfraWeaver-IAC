@@ -1,0 +1,197 @@
+---
+# =============================================================================
+# longhorn-lowlat — make the POD follow the CLASS, not the scheduler's luck
+# =============================================================================
+# THE DEFECT THIS CLOSES, measured 2026-08-19 (all times UTC):
+#
+#   PVC                                    class            pod ran on   replicas on
+#   wordpress/lol-db-data                  longhorn-lowlat  cp4          cp1 + cp3
+#   wordpress/yonavaarwater-nl-db-data     longhorn-lowlat  cp4          cp1 + cp3
+#   wordpress/zonnevaarwater-nl-db-data    longhorn-lowlat  cp4          cp1 + cp3
+#   authentik/data-authentik-postgresql-0  longhorn-lowlat  cp1          cp1 + cp3   (correct)
+#
+# `longhorn-lowlat` (storageclass-lowlat.yaml) fences REPLICAS off the remote
+# node with `diskSelector: lowlat`, and it does that job perfectly — every
+# replica above is on cp1 or cp3. But a Longhorn volume has TWO halves. The
+# replicas hold the data; the ENGINE runs on whatever node the volume is
+# attached to, i.e. wherever the consuming POD was scheduled, and the engine
+# writes to every replica synchronously and acknowledges only when all of them
+# have acked.
+#
+# So a pod on cp4 (zone=hypatia, 14.9-16.3 ms across the stretched VLAN) with
+# its replicas correctly fenced onto cp1+cp3 does not get a fast local volume
+# and a slow remote copy. It gets the WORST possible arrangement: EVERY SINGLE
+# WRITE leaves the node, crosses the WAN to both replicas, and the round trip is
+# paid before the write returns. The diskSelector made the data safe and made
+# the I/O path worse, because nothing anywhere expressed the other half of the
+# rule: a volume that may only live on low-latency disks must only be MOUNTED
+# from a low-latency node.
+#
+# This is the same failure mode, on the storage axis, that
+# docs/SCHEDULING-ZONES.md was written for: intent that is written down in one
+# place and binds in none. Nothing was misconfigured. The three databases were
+# migrated off cp3 on 2026-08-18 when it hit 99% memory requests, the scheduler
+# had no reason to prefer cp1 over cp4, and it chose cp4.
+#
+# -----------------------------------------------------------------------------
+# WHY THE OTHER THREE CANDIDATE FIXES WERE REJECTED
+# -----------------------------------------------------------------------------
+# (a) nodeAffinity on each consuming workload.
+#     It works, and it is what docs/SCHEDULING-ZONES.md prescribes for a
+#     latency-bound workload — but as the ONLY mechanism here it fails for a
+#     specific reason: the three Deployments above are not in this repo. They
+#     carry `app.kubernetes.io/managed-by: infraweaver` and are generated at
+#     runtime by the console addon (`buildDbManifests`, InfraWeaver-platform),
+#     which has no affinity field at all. A rule this repo cannot write is a
+#     rule that does not exist, and the NEXT site provisioned onto this class
+#     would arrive unfenced with nobody to notice.
+#
+# (b) Longhorn `dataLocality`.
+#     ALREADY SET, and measured to be incapable of fixing this. The class has
+#     carried `dataLocality: best-effort` since it was created. What that
+#     produced on all three volumes was a THIRD replica with
+#     `hardNodeAffinity: talos-prod-cp4` stuck permanently in state `stopped`,
+#     because best-effort wants a replica local to the engine and cp4's only
+#     disk is tagged `offsite`, never `lowlat`. dataLocality and diskSelector
+#     are in direct contradiction the moment the pod is on the wrong node, and
+#     dataLocality loses: it can move DATA toward the pod, and the whole point
+#     of this class is that the data must not go there. `strict-local` would be
+#     worse still — it would fail the attach outright and take the database
+#     down rather than move it.
+#
+# (c) `allowedTopologies` on the StorageClass.
+#     The textbook answer, and genuinely close: Longhorn's CSINode does publish
+#     `topology.kubernetes.io/zone`, so it would bind. Rejected on three counts.
+#     It can only express `In` — `allowedTopologies: [proxmox, microserver]` —
+#     and this repo has a measured rule against `In`-form zone lists (see
+#     scripts/validate-scheduling.py G4 and the cp2 incident: an In-list that
+#     goes stale silently narrows to a hard pin). StorageClass fields are
+#     immutable, so adopting it means deleting and recreating the class. And it
+#     applies only to volumes provisioned AFTER the change — it does nothing for
+#     the four that exist.
+#
+# -----------------------------------------------------------------------------
+# WHAT THIS DOES INSTEAD
+# -----------------------------------------------------------------------------
+# Stamps the standard latency-bound zone rule onto the PersistentVolume itself,
+# at admission, for every PV in the `longhorn-lowlat` class.
+#
+# `PersistentVolume.spec.nodeAffinity` is enforced by the scheduler's built-in
+# VolumeBinding plugin: a pod may only be placed on a node that satisfies the
+# nodeAffinity of EVERY PV it binds. It is the same mechanism that makes a
+# local-path PVC pin its pod to one node — a first-class, long-standing
+# Kubernetes guarantee, not a webhook that has to keep working.
+#
+# That gives the property the three rejected options each miss:
+#
+#   * The constraint travels WITH THE VOLUME. Any pod that mounts a lowlat
+#     volume is fenced, whether its manifest lives in this repo, is generated by
+#     the console, is a `kubectl debug` copy, or has not been written yet. There
+#     is nothing to remember and nothing to duplicate.
+#   * It is keyed on the CLASS, so it cannot drift away from what the class
+#     means. A new lowlat PVC is stamped at creation.
+#   * Once stamped it is part of the PV object. If Kyverno is down, uninstalled
+#     or its webhook fails open, every already-stamped volume stays fenced —
+#     the failure mode is "a NEW volume is not fenced", never "the fence
+#     silently disappeared from a running database".
+#   * scripts/validate-scheduling.py checks the rule below (G2/G3/G4), so the
+#     zone list here is held to the same standard as every hand-written one and
+#     goes red in CI the day fleet-topology.yaml grows a second remote zone.
+#
+# -----------------------------------------------------------------------------
+# ⚠️ SHARP EDGE: PV nodeAffinity IS IMMUTABLE ONCE SET. Measured 2026-08-19 on
+# a scratch PV:
+#     absent -> set        : ACCEPTED
+#     set    -> different  : "nodeAffinity: Invalid value: ...: field is
+#                            immutable, except for updating from beta label to GA"
+# That is why this rule is CREATE-only. Editing the values below changes what
+# NEW volumes get; the four already stamped keep what they have. To re-stamp an
+# existing volume you must delete and recreate its PV — safe on this class
+# (`reclaimPolicy: Retain`, so the Longhorn volume and its data outlive the PV
+# object) but it is a deliberate maintenance action, not an edit.
+#
+# ⚠️ AND THE COROLLARY: with cp4 excluded, a lowlat volume's pod is
+# UNSCHEDULABLE if both cp1 and cp3 are unavailable. That is the intended
+# behaviour and it is the whole point — running the database over the WAN is
+# what produced
+#     FATAL: could not open file "global/pg_filenode.map": I/O error
+# on 2026-08-14. Unschedulable and loud beats attached and corrupting.
+#
+# -----------------------------------------------------------------------------
+# THE FOUR PRE-EXISTING VOLUMES were stamped ONCE, by hand, in the same change
+# that added this file — admission rules do not reach objects that already
+# exist, and `mutateExistingOnPolicyUpdate` is deliberately not used here for
+# the reasons documented at length in mutate-default-sa-automount.yaml (the
+# background controller walks `mutate.targets` directly and rule-level `exclude`
+# does not filter it). One-time sweep, then admission-only from here. Confirm
+# the set is complete at any time with:
+#
+#   kubectl get pv -o json | jq -r '.items[]
+#     | select(.spec.storageClassName=="longhorn-lowlat")
+#     | .metadata.name + "  " + (.spec.nodeAffinity != null | tostring)'
+#
+# Every row must end in `true`.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: lowlat-pv-node-affinity
+  annotations:
+    policies.kyverno.io/title: Fence longhorn-lowlat volumes off the remote zone
+    policies.kyverno.io/category: Storage
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: PersistentVolume
+    policies.kyverno.io/description: >-
+      The longhorn-lowlat StorageClass fences replicas off zone hypatia with a
+      diskSelector, but nothing fenced the consuming pod, so a pod scheduled onto
+      hypatia drove every write across a 15 ms WAN link to its remote replicas.
+      This stamps the standard latency-bound zone rule onto each lowlat
+      PersistentVolume, which the scheduler's VolumeBinding plugin then enforces
+      against every pod that mounts it.
+spec:
+  # Pinned rather than ignored, same treatment as the sibling mutate policies:
+  # kyverno 1.18 defaults this in even on a mutate-only policy.
+  validationFailureAction: Audit
+  admission: true
+  background: false
+  # FALSE, deliberately — see the one-time-sweep note in the header.
+  mutateExistingOnPolicyUpdate: false
+  rules:
+    - name: stamp-lowlat-zone-affinity
+      skipBackgroundRequests: true
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolume
+              # CREATE only. On UPDATE the same patch would re-assert the value,
+              # and any PV whose affinity had been set to something else would be
+              # rejected by the apiserver's immutability check — turning this
+              # rule into a block on unrelated PV updates. Longhorn's CSI
+              # provisioner never sets nodeAffinity (measured 2026-08-19: 33 of
+              # 34 live Longhorn PVs have none, and the one exception is a
+              # hand-written legacy PV pinned to the retired cp2), so on CREATE
+              # this patch is always purely additive.
+              operations:
+                - CREATE
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.storageClassName || '' }}"
+            operator: Equals
+            value: longhorn-lowlat
+      mutate:
+        patchStrategicMerge:
+          spec:
+            nodeAffinity:
+              required:
+                nodeSelectorTerms:
+                  # Verbatim the latency-bound rule from docs/SCHEDULING-ZONES.md.
+                  # `values` must equal `remote_zones` in
+                  # scripts/fleet-topology.yaml exactly — validate-scheduling.py
+                  # G4 fails the build otherwise, which is how a second remote
+                  # site gets picked up here instead of being forgotten.
+                  - matchExpressions:
+                      - key: topology.kubernetes.io/zone
+                        operator: NotIn
+                        values:
+                          - hypatia
