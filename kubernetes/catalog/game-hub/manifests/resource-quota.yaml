@@ -7,8 +7,24 @@ metadata:
 spec:
   hard:
     # CPU/memory caps: prevent game servers from starving infra services.
-    # With 3 nodes at ~8 CPU / 11Gi each, cap game-hub at ~40% total cluster memory.
-    requests.memory: "16Gi"
+    #
+    # TEMPORARILY RAISED 16Gi -> 28Gi on 2026-08-19 for the first real GT New
+    # Horizons server update. An update builds the NEW server BESIDE the old one
+    # and carries the world across; GTNH requests 12Gi, so both at once need
+    # 24Gi, plus ~1.5Gi for the namespace's helper Jobs (archive, health, the
+    # two scale Jobs) and the timeline's read/write companion pods, which must
+    # still be admitted while both game servers are up.
+    #
+    # 28Gi is ~17% of this cluster's 166Gi allocatable memory (cp1 45.7Gi,
+    # cp3 8.4Gi, cp4 112.6Gi measured 2026-08-19) — the "~40% of cluster memory"
+    # note below dates from three ~11Gi nodes and no longer describes this
+    # cluster. limits.memory is NOT raised: 12+12 plus helpers is ~26.5Gi and
+    # already fits under the existing 32Gi.
+    #
+    # RESTORE TO 16Gi once only ONE GTNH-class server remains in the namespace.
+    # Two 12Gi servers can never both fit under 16Gi, so this cannot be reverted
+    # while the old and the new server are both present.
+    requests.memory: "28Gi"
     requests.cpu: "12"
     limits.memory: "32Gi"
     limits.cpu: "24"
