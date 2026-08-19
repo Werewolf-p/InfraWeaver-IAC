@@ -86,14 +86,14 @@ def load_docs(path: str):
     scheduling block as a STRING (openbao's `affinity: |`), so string values are
     re-parsed too — a rule hidden inside a template string is still a rule."""
     text = read(path)
-    docs = []
     try:
-        for doc in yaml.safe_load_all(text):
-            if doc is not None:
-                docs.append(doc)
+        # Built inside the try on purpose: safe_load_all is a generator, so a
+        # YAMLError can surface part-way through a multi-doc file. Returning []
+        # discards the partial result, exactly as the append loop did — half a
+        # file is not a set of rules.
+        return [doc for doc in yaml.safe_load_all(text) if doc is not None]
     except yaml.YAMLError:
         return []
-    return docs
 
 
 def iter_nodes(obj, path=()):
@@ -153,14 +153,10 @@ def collect(root: str):
                     values = [str(v) for v in (expr.get("values") or [])]
                     if key == HOSTNAME_KEY:
                         seen.append((rel, where, f"hostname {op} {values}"))
-                        for v in values:
-                            if v not in known_nodes:
-                                findings.append(("G1", rel, where, v))
+                        findings.extend(("G1", rel, where, v) for v in values if v not in known_nodes)
                     elif key == ZONE_KEY:
                         seen.append((rel, where, f"zone {op} {values}"))
-                        for v in values:
-                            if v not in known_zones:
-                                findings.append(("G2", rel, where, v))
+                        findings.extend(("G2", rel, where, v) for v in values if v not in known_zones)
                         if PREFERRED in crumb:
                             findings.append(("G3", rel, where, f"zone {op} {values}"))
                         if op == "NotIn" and set(values) != remote_zones:

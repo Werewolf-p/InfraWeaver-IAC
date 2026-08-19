@@ -8,6 +8,10 @@ name: validate-code
 # validate-iac branch-protection check is untouched. shellcheck + ruff are
 # blocking; tofu fmt/validate starts non-blocking (continue-on-error) until
 # proven consistently green, then flip `continue-on-error: false`.
+#
+# Every gate here asserts its own REACH before it reports a pass — a lint of
+# zero files is an unknown, not a green tick. See the shellcheck and ruff
+# steps; the same reasoning as validate-iac.sh's SKIPPED[] accounting.
 on:
   pull_request:
     paths:
@@ -32,10 +36,34 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Lint shell scripts
+        env:
+          # Floor, not a count: 54 *.sh are tracked today. Raise it if that ever
+          # halves for a real reason; never lower it to make a red job green.
+          MIN_SH: "20"
         run: |
-          # All tracked *.sh plus the bash git-hook (no extension).
+          # A GATE THAT LINTS NOTHING IS NOT A PASS — the lesson validate-iac.sh
+          # learned on 2026-08-19, in a different disguise. Nothing in this
+          # workflow is a "missing tool prints skipping" skip: every tool is
+          # installed by a step that fails hard, and a missing binary exits 127.
+          # What CAN collapse silently is the file DISCOVERY. `files` always gets
+          # scripts/git-hooks/pre-push appended, so if `find` ever matched
+          # nothing — scripts/ renamed, layout changed — this step would lint
+          # 1 file of 54, print "shellcheck: 1 files", and report GREEN.
+          # Measured 2026-08-19: exit 0. So assert the floor instead of assuming it.
           mapfile -t files < <(find scripts -type f -name '*.sh')
+          if (( ${#files[@]} < MIN_SH )); then
+            echo "::error::shellcheck discovered ${#files[@]} *.sh under scripts/ (floor ${MIN_SH}) — this gate is guarding nothing." >&2
+            exit 1
+          fi
+          # Named explicitly above, so its absence must be an error and not a
+          # silently shorter list. This is the hook that runs the IaC gates
+          # client-side; it is the last thing that should go unlinted.
+          if [[ ! -f scripts/git-hooks/pre-push ]]; then
+            echo "::error::scripts/git-hooks/pre-push is missing — the client-side IaC gate would ship unlinted." >&2
+            exit 1
+          fi
           files+=(scripts/git-hooks/pre-push)
+          shellcheck --version | head -2
           printf 'shellcheck: %d files\n' "${#files[@]}"
           # --severity=error: real errors block; style/warning noise (SC2034,
           # SC1090, ...) does not. Tighten later by cleaning warnings.
@@ -59,7 +87,29 @@ jobs:
         # when someone bumps it deliberately. Bump + re-lint in the SAME commit.
         run: pip install ruff==0.16.3
       - name: Lint python scripts
-        run: ruff check scripts
+        env:
+          MIN_PY: "5"   # floor, not a count: 8 *.py are tracked today
+        run: |
+          # Same rule as the shellcheck job: this gate must prove it is guarding
+          # something before it is allowed to say "passed".
+          #
+          #  · ruff.toml IS the rule set. Without it ruff silently falls back to
+          #    its own defaults — the exact drift the version pin above exists to
+          #    stop, arriving through the other door.
+          #  · `ruff check <path with no *.py>` prints "warning: No Python files
+          #    found" and exits 0 — "All checks passed!" over nothing. Measured
+          #    2026-08-19 with the pinned 0.16.3.
+          if [[ ! -f ruff.toml ]]; then
+            echo "::error::ruff.toml is missing — this gate would silently lint against ruff's defaults, not the rule set this repo chose." >&2
+            exit 1
+          fi
+          count=$(find scripts -type f -name '*.py' | wc -l)
+          if (( count < MIN_PY )); then
+            echo "::error::ruff discovered ${count} *.py under scripts/ (floor ${MIN_PY}) — this gate is guarding nothing." >&2
+            exit 1
+          fi
+          printf 'ruff: %d files, %s\n' "$count" "$(ruff --version)"
+          ruff check scripts
 
   terraform:
     name: terraform

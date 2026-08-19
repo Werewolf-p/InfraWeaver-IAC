@@ -137,9 +137,7 @@ def _source_paths(spec: dict) -> list[dict]:
     out = []
     if isinstance(spec.get("source"), dict):
         out.append(spec["source"])
-    for src in spec.get("sources") or []:
-        if isinstance(src, dict):
-            out.append(src)
+    out.extend(src for src in spec.get("sources") or [] if isinstance(src, dict))
     return out
 
 
@@ -189,7 +187,7 @@ def covered_paths(root: str) -> tuple[set[str], set[str]]:
 def kustomize_reachable(root: str, seeds: set[str]) -> set[str]:
     """Follow kustomization.yaml `resources:` from every seed directory."""
     seen: set[str] = set()
-    queue = [s for s in seeds]
+    queue = list(seeds)
     while queue:
         rel = queue.pop()
         if rel in seen:
@@ -247,9 +245,13 @@ def main() -> int:
         if rel in kust:
             return "kustomize"
         parts = rel.split("/")
-        if len(parts) >= 3 and parts[0] == "kubernetes" and parts[1] == "catalog":
-            if os.path.isfile(os.path.join(root, "kubernetes", "catalog", parts[2], "catalog.yaml")):
-                return "catalog registry (on-demand install)"
+        if (
+            len(parts) >= 3
+            and parts[0] == "kubernetes"
+            and parts[1] == "catalog"
+            and os.path.isfile(os.path.join(root, "kubernetes", "catalog", parts[2], "catalog.yaml"))
+        ):
+            return "catalog registry (on-demand install)"
         return None
 
     uncovered: list[tuple[str, list[str]]] = []
