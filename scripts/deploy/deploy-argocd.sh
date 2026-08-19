@@ -79,9 +79,19 @@ kubectl --kubeconfig "$KB" patch svc argocd-redis -n argocd \
 
 REPO_TOKEN="${ARGOCD_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 if [[ -n "$REPO_TOKEN" ]]; then
+  # GITHUB_ORG must be REAL here. repo-creds are matched by URL PREFIX, so a
+  # secret for https://github.com/your-org/ matches nothing: ArgoCD falls back to
+  # anonymous access and every private-repo Application fails to refresh with a
+  # 404/auth error that looks like a repo problem, not a credential one. The
+  # placeholder is fine in .env.example; it is never fine on a cluster.
+  : "${GITHUB_ORG:?GITHUB_ORG required when a GitHub token is set (repo-creds are matched by URL prefix; the .env.example placeholder would silently match no repo)}"
+  if [[ "$GITHUB_ORG" == "your-org" ]]; then
+    echo "✖ GITHUB_ORG is still the .env.example placeholder 'your-org' — set the real org in .env" >&2
+    exit 1
+  fi
   kubectl --kubeconfig "$KB" create secret generic repo-creds-github \
     --namespace argocd \
-    --from-literal=url="https://github.com/${GITHUB_ORG:-your-org}/" \
+    --from-literal=url="https://github.com/${GITHUB_ORG}/" \
     --from-literal=username="x-access-token" \
     --from-literal=password="${REPO_TOKEN}" \
     --dry-run=client -o yaml | kubectl --kubeconfig "$KB" apply -f -

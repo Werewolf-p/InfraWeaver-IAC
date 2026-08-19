@@ -59,26 +59,3 @@ ignore = [
     "E501",    # length is enforced by `line-length`; a second rule just duplicates it
     "RUF005",  # list concatenation over unpacking — style only, no defect risk
 ]
-
-[lint.per-file-ignores]
-# -- scripts/init/init/server.py — 2180-line first-boot init wizard ------------
-# Carries ~79 findings under the four judgment rules above. It is the DISASTER
-# RECOVERY entry point: it is what rebuilds a cluster that no longer exists, and
-# it is exercised by hand roughly once per rebuild. A broad blind refactor there
-# is riskier than the debt it would repay, so the debt is named here instead of
-# hidden by loosening the rule for everyone.
-#
-# TODO(2026-08-14): retire these entries as the wizard is split into modules.
-# Every other Python file in this repo already passes all four.
-"scripts/init/init/server.py" = [
-    "BLE001",   # 49x blind `except Exception`
-    "S110",     # 16x try/except/pass
-    "S112",     #  1x try/except/continue
-    "PLW1510",  # 13x subprocess.run without explicit check=
-    "SIM102",   #  1x collapsible if — cosmetic, inside the exempted body
-    "DTZ006",   #  1x naive fromtimestamp — renders a local-time string for the
-                #     operator's own terminal; UTC would be the wrong display
-    "PLW2901",  #  2x loop variable rebound — deliberate normalise-in-place
-    "PERF401",  #  3x manual list build inside branching wizard logic
-    "SIM105",   #  5x try/except/pass around optional teardown steps
-]

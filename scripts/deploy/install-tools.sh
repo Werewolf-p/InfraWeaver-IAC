@@ -13,14 +13,30 @@ if [ "$(swapon --show --noheadings | wc -l)" -eq 0 ]; then
   sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null 2>&1 || true
   sudo swapon /swapfile 2>/dev/null || true
 fi
-command -v tofu || (curl -fsSL https://get.opentofu.org/install-opentofu.sh | sudo sh -s -- --install-method deb)
+command -v tofu || (
+  TOFU_VER=1.8.5
+  cd /tmp
+  curl -fsSL -O "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VER}/tofu_${TOFU_VER}_linux_amd64.tar.gz"
+  curl -fsSL -O "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VER}/tofu_${TOFU_VER}_SHA256SUMS"
+  sha256sum --ignore-missing -c "tofu_${TOFU_VER}_SHA256SUMS"
+  sudo tar -xzf "tofu_${TOFU_VER}_linux_amd64.tar.gz" -C /usr/local/bin/ tofu
+  sudo chmod +x /usr/local/bin/tofu
+)
 command -v sops || (sudo curl -fsSL -o /usr/local/bin/sops \
   https://github.com/getsops/sops/releases/download/v3.10.2/sops-v3.10.2.linux.amd64 && \
   sudo chmod +x /usr/local/bin/sops)
 command -v age || (curl -fsSL -o /tmp/age.tar.gz \
   https://github.com/FiloSottile/age/releases/download/v1.1.1/age-v1.1.1-linux-amd64.tar.gz && \
   sudo tar -xzf /tmp/age.tar.gz -C /usr/local/bin/ --strip-components=1 age/age age/age-keygen)
-command -v helm || (curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash)
+command -v helm || (
+  HELM_VER=v3.16.3
+  cd /tmp
+  curl -fsSL -O "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz"
+  curl -fsSL -o "helm-${HELM_VER}-linux-amd64.tar.gz.sha256sum" \
+    "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz.sha256sum"
+  echo "$(awk '{print $1}' "helm-${HELM_VER}-linux-amd64.tar.gz.sha256sum")  helm-${HELM_VER}-linux-amd64.tar.gz" | sha256sum -c -
+  sudo tar -xzf "helm-${HELM_VER}-linux-amd64.tar.gz" -C /usr/local/bin/ --strip-components=1 linux-amd64/helm
+)
 # talosctl: download from GitHub releases first (no Docker Hub needed).
 # If binary fails to execute (AMD64 v2 CPU feature issue), build from source via Go (not Docker).
 if ! talosctl version --client >/dev/null 2>&1; then

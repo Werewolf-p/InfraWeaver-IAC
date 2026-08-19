@@ -176,20 +176,14 @@ DUP_SCRIPT_BASELINE=(
   "deploy-local.sh"          # diff 453 and platform's is NEWER — the merge reverses; needs its own session (plan C4)
   "configure-platform.sh"    # itself a fork, diff ~132 (plan C4)
   "generate-from-env.sh"     # diff 121 (plan C4)
-  # ── The init-VM wizard. PLATFORM owns it: README.md publishes
-  #    raw.githubusercontent.com/.../InfraWeaver-platform/main/scripts/init/setup.sh
-  #    as the documented one-liner installer, and build-ui.sh's APP_DIR resolves to
-  #    <repo>/apps/infraweaver-init, which exists in platform and NOT in infra
-  #    (infra's copy computes <infra>/scripts/apps/infraweaver-init — a path that has
-  #    never existed). Infra's tree is also nested one level too deep at
-  #    scripts/init/init/, so every caller string inside it ("scripts/init/server.py")
-  #    points at a path infra does not have. Closed by plan C3: delete infra's
-  #    scripts/init/init/** (6,898 lines), not platform's.
-  "build-ui.sh"
-  "create-init-vm.sh"
-  "server.py"
+  # ── setup.sh is NOT two copies of one script — it is two unrelated scripts that
+  #    collide on a basename this gate can only see by basename. infra
+  #    scripts/setup.sh is the .env first-run wizard for a fresh fork (and the one
+  #    the PUBLIC mirror's README quick-start actually names); platform
+  #    scripts/init/setup.sh is the init-VM installer entry point. 171 of 207
+  #    sorted lines differ. De-duplicating them would mean renaming one, not
+  #    deleting one, so this entry stays until someone picks a new name.
   "setup.sh"
-  "start-local.sh"
   # ── get-kubeconfig.sh: byte-identical, but NOT safe to defer. It derives
   #    REPO_ROOT from its own directory and then reads $REPO_ROOT/terraform and
   #    $REPO_ROOT/envs/<env>/generated/talosconfig. Those live in the PLATFORM
@@ -201,21 +195,14 @@ DUP_SCRIPT_BASELINE=(
   #    missing or stale kubeconfig for a live cluster. Closed by giving infra's copy
   #    a --repo-root override (the sync-groups.sh pattern), THEN deleting platform's.
   "get-kubeconfig.sh"
-  # ── Remaining drifted pairs, smallest first. Each is "diff, pick the survivor,
-  #    delete the other, point the caller at it" — no analysis blockers known.
-  "bootstrap-externalsecrets.sh"  # diff 24
-  "configure-authentik.sh"        # diff 289
-  "configure-oidc.sh"             # diff 193
-  "deploy-argocd.sh"              # diff 21
-  "ensure-cloudflare-dns.sh"      # diff 60
-  "install-tools.sh"              # diff 24
-  "new-app.sh"                    # diff 24
-  "restore-from-truenas.sh"       # diff 14 — platform's adds onedev-data; confirm OneDev's retirement first
-  "seed-catalog-secrets.sh"       # diff 82
-  "seed-openbao-platform.sh"      # diff 20
-  "send-deploy-email.py"          # diff 82
-  "send-welcome-email.py"         # diff 14 — infra's is newer (08-14 ruff fix); platform's is only reached via CWD-relative calls
-  "set-user-passwords.sh"         # diff 21
+  # ── restore-from-truenas.sh is the last drifted pair. Platform's restores an
+  #    extra `onedev-data` volume. OneDev is retired as the GitOps source
+  #    (scripts/git-hooks/README.md:30) and the cluster holds no onedev namespace
+  #    or Application (measured 2026-08-19) — but "nothing runs it" is not
+  #    "nothing needs restoring from it". Dropping a volume from a RESTORE path is
+  #    not symmetric with dropping a seed: confirm the onedev PVC/backup is gone
+  #    for good before deleting platform's copy.
+  "restore-from-truenas.sh"       # diff 14
 )
 
 # Snapshot of InfraWeaver-platform's script inventory. Regenerate with

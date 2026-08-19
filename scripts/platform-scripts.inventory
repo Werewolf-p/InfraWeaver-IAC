@@ -8,22 +8,14 @@
 # on a machine that has both checkouts. The gate FAILS if a live platform
 # checkout is present and disagrees with this snapshot.
 #
-# source:    InfraWeaver-platform 2debaff8
-# committed: 2026-08-19T04:22:37+02:00
-# snapshot:  2026-08-19T02:40:20Z
+# source:    InfraWeaver-platform d3798283
+# committed: 2026-08-19T04:48:09+02:00
+# snapshot:  2026-08-19T03:14:35Z
 scripts/bootstrap.sh
 scripts/check-feature-flag-coverage.mjs
 scripts/ci-update-manifest-tags.sh
 scripts/configure-platform.sh
 scripts/deploy-local.sh
-scripts/deploy/bootstrap-externalsecrets.sh
-scripts/deploy/configure-authentik.sh
-scripts/deploy/configure-oidc.sh
-scripts/deploy/deploy-argocd.sh
-scripts/deploy/ensure-cloudflare-dns.sh
-scripts/deploy/install-tools.sh
-scripts/deploy/seed-openbao-platform.sh
-scripts/deploy/set-user-passwords.sh
 scripts/dev-start.sh
 scripts/generate-admin-config.sh
 scripts/generate-from-env.sh
@@ -37,12 +29,8 @@ scripts/init/setup.sh
 scripts/init/start-local.sh
 scripts/init/test_server.py
 scripts/lib.sh
-scripts/new-app.sh
 scripts/restore-from-truenas.sh
 scripts/scaffold-page.mjs
-scripts/seed-catalog-secrets.sh
-scripts/send-deploy-email.py
-scripts/send-welcome-email.py
 scripts/setup-onedev.sh
 scripts/sync-console-image-tag.mjs
 scripts/test-ci-update-manifest-tags.sh

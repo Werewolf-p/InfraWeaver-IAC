@@ -9,9 +9,10 @@ set -euo pipefail
 
 # Cleanup on exit
 PF_PID=""
+TMP_PY=""
 cleanup() {
   [[ -n "${PF_PID:-}" ]] && kill "$PF_PID" 2>/dev/null || true
-  rm -f /tmp/ak_setpw.py
+  [[ -n "${TMP_PY:-}" ]] && rm -f "$TMP_PY"
 }
 trap cleanup EXIT
 KB=~/.kube/config-platform-${ENV_NAME:?ENV_NAME required}
@@ -46,6 +47,8 @@ if [ "$HAS_ANY" = "false" ]; then
   echo "⚠️ No user passwords found in authentik-secrets — skipping force-set"
 else
   # Write ak_setpw.py via printf (heredoc at col-0 breaks YAML block scalars)
+  # mktemp gives an unpredictable, mode-0600, exclusively-created path — no /tmp symlink race
+  TMP_PY=$(mktemp "${TMPDIR:-/tmp}/ak_setpw.XXXXXX.py")
   {
     printf 'import base64\n'
     printf 'from authentik.core.models import User\n'
@@ -61,12 +64,12 @@ else
     printf '        print("OK: Password set for " + u)\n'
     printf '    except User.DoesNotExist:\n'
     printf '        print("WARN: User " + u + " not found, skipping")\n'
-  } > /tmp/ak_setpw.py
+  } > "$TMP_PY"
   # Single atomic exec: write script and run it — avoids stale pod name issue.
-  cat /tmp/ak_setpw.py | \
+  cat "$TMP_PY" | \
     $KT exec -i -n authentik deploy/authentik-worker -c worker -- \
     sh -c 'cat > /tmp/ak_setpw.py && ak shell < /tmp/ak_setpw.py' 2>&1 | tail -10
-  rm -f /tmp/ak_setpw.py
+  rm -f "$TMP_PY"
   echo "✅ User passwords force-set"
 fi
 

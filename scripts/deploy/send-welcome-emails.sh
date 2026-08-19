@@ -13,6 +13,16 @@ set -euo pipefail
 KB=~/.kube/config-platform-${ENV_NAME}
 KT="kubectl --kubeconfig $KB --insecure-skip-tls-verify"
 
+# Resolve the mailer as a SIBLING of this script, not CWD-relative. This script is
+# invoked from the InfraWeaver-platform checkout (via platform scripts/infra-repo.sh)
+# with CWD deliberately left there, because send-welcome-email.py reads users.yaml
+# from the CURRENT DIRECTORY. A CWD-relative `python3 scripts/send-welcome-email.py`
+# therefore picked up PLATFORM's copy — which is why that duplicate could not be
+# deleted before. Resolve the file here, and fail loudly: the send below is
+# `|| true`, so a missing mailer would otherwise mean "no welcome emails, no error".
+WELCOME_MAILER="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/send-welcome-email.py"
+[ -f "$WELCOME_MAILER" ] || { echo "✖ send-welcome-email.py not found at $WELCOME_MAILER" >&2; exit 1; }
+
 _NONADMIN_PY="aW1wb3J0IHlhbWwKdXNlcnMgPSB5YW1sLnNhZmVfbG9hZChvcGVuKCJ1c2Vycy55YW1sIikpWyJ1c2VycyJdCmZvciB1LCBkIGluIHVzZXJzLml0ZW1zKCk6CiAgICBpZiBkLmdldCgiYWNjZXNzX2xldmVsIikgIT0gImFkbWluIiBhbmQgZC5nZXQoInNlbmRfcmVjb3ZlcnlfZW1haWwiKSBhbmQgZC5nZXQoImVtYWlsIik6CiAgICAgICAgcHJpbnQodSkK"
 NON_ADMIN_USERS=$(echo "$_NONADMIN_PY" | base64 -d | python3)
 
@@ -46,7 +56,7 @@ for USERNAME in $NON_ADMIN_USERS; do
       2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('link',''))" || echo "")
     LINK=$(echo "$RAW_LINK" | sed "s|http://localhost:8086|https://auth.${BASE_DOMAIN}|g")
     if [ -n "$LINK" ]; then
-      python3 scripts/send-welcome-email.py --username "$USERNAME" --recovery-link "$LINK" || true
+      python3 "$WELCOME_MAILER" --username "$USERNAME" --recovery-link "$LINK" || true
     else
       echo "  ⚠️ Could not generate recovery link for ${USERNAME} — skipping"
     fi
