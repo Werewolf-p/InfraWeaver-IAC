@@ -1431,3 +1431,399 @@ NEW server rather than the same one:
 4. Next in code: **Task 5 (`run.ts`)**, whose deps surface is now fully
    determined by `advancePhase` / `phaseIsAlreadyDone` / `seedNewServer`; then
    7, 8, 9.
+
+---
+
+# Part G — Tasks 5, 7, 8, 9 are built, and the cross-server flow is PROVEN LIVE
+
+> Written 2026-08-19. Commits in `/home/runner/InfraWeaver-platform` (local only,
+> not pushed, nothing deployed): `dab8cb3f` the orchestrator, `69af0ba8` the
+> routes + datastore hop + resume sweep, `2750323d` the page and the
+> wrong-world check.
+>
+> Everything below is either shipped code with a test behind it or a measured
+> fact. The live cluster was read-only except for two throwaway servers created
+> and deleted inside this session.
+
+## G.1 What shipped
+
+| Plan task | State | Commit |
+|---|---|---|
+| Task 5 — `upgrade/run.ts` + `upgrade/verdict.ts` | **DONE** | `dab8cb3f` |
+| Task 7 — API routes, `route-support.ts`, the `GAMEHUB_UPDATE` gate, the fourth `proxy.ts` bypass | **DONE** | `69af0ba8` |
+| Task 8 — `upgrade/sweep.ts`, wired into `game-hub-power-sweep` | **DONE** | `69af0ba8` |
+| Task 9 — `pages/server-update.tsx` + `components/update/*`, manifest route, tool-strip entry | **DONE** | `2750323d` |
+| Task 10 — the LIVE cross-server proof | **DONE** (vanilla pair; NOT GTNH) | — |
+
+144 gamehub + ratchet suites / 3,248 tests green; `tsc --noEmit` exit 0;
+`eslint` clean. Five deliberate mutations were run to prove the load-bearing
+assertions are not decorative — each reverted and the tree re-verified:
+
+| Mutation | Tests that failed |
+|---|---|
+| `seedInputFor` returns the SOURCE as the target (the world-destroying bug) | 3 |
+| `phaseForVerdict` lets `inconclusive` reach `done` | 2 |
+| `capturing` ignores the point already on the record | 3 |
+| the confirm panel offers its hold button when the quota is unreadable | 1 |
+| the divergence caveat is dropped from the confirm panel | 1 |
+
+## G.2 Six corrections and additions the plan does not contain
+
+**1. `done` is gated on the verdict, and `inconclusive` does NOT reach it.**
+Part A says the done state is "gated on the verdict" without saying which
+verdicts pass. `phaseForVerdict` answers it: `pass` and `pass-with-warnings`
+reach `done`; `fail` and `inconclusive` reach `failed` with the verdict on the
+record. An `inconclusive` is the harness saying it could not tell, and a flow
+that reads that as permission is worse than one with no verification at all,
+because it looks verified.
+
+**2. `observeRehearsal` could not watch a real game pod, at all.** It finds the
+container by the hardcoded name `rehearsal`, which is the clone's name and
+nobody else's. Pointed at a real server it returns `exitCode: null, restarts: 0,
+probePassed: null` — an observation that says nothing, which the verdict then
+reports as `inconclusive` forever while looking exactly like a slow boot. It now
+takes an optional `container`.
+
+It also had no early exit. A rehearsal watches its whole 45-minute window on
+purpose; an update watches TWO boots of a real server with the old one stopped,
+so holding each to the deadline turns a ten-minute update into a two-hour
+outage. `readyExits` is opt-in; rehearsal is unchanged.
+
+**3. `driveUpgrade` must re-read the record between phases, or Abort is a lie.**
+The start runs on the datastore pod (that is where the chunk store is) while
+Abort is a ConfigMap patch a console replica makes. A driver holding its
+in-memory run advances straight past the abort and overwrites it: the button
+reports success and changes nothing.
+
+**4. The sweep cannot resume from a console replica, and says so instead of
+pretending.** Driving a run forward means capturing or restoring, both of which
+need the datastore pod. The sweep CronJob calls the console Service. So
+`resume` returns a boolean, and a resumer that knows it cannot closes the run at
+once with a sentence naming what the operator must do — rather than burning
+`MAX_RESUME_ATTEMPTS` on something structurally impossible, three sweep
+intervals in a row. **Consequence, stated: in production today the sweep CLOSES
+abandoned runs, it does not resume them.** Nothing is destroyed by that; the run
+record names the rollback.
+
+**5. `proxy.ts` needed a FOURTH service-token bypass, and only for the start
+verb.** An update is a capture plus a restore, so `POST …/update` takes the same
+hop every timeline verb takes. It gets its own anchored pattern rather than a
+branch bolted onto the timeline one — two exhaustive patterns can each be read
+and refuted on sight, whereas one pattern that grows an alternation per caller
+is how `servers/[^/]+/.*` happens by accident. GET and abort are console-side
+and are deliberately NOT admitted: they only touch a ConfigMap.
+
+**6. THE ONE THAT WOULD HAVE FAKED A PASS — the world name.**
+Minecraft picks its world directory from `level-name` in `server.properties`,
+and the itzg image rewrites that key from its own `LEVEL` env var on EVERY boot.
+A target created without the source's world name therefore unpacks the copied
+world into `UpdA/` and then opens `world/` — generating a fresh, empty one
+beside it and reporting a completely clean start.
+
+Every other signal passes: no crash signature, the port accepts, and a
+`./*/level.dat` glob finds two perfectly valid gzip files. The operator is told
+to share the address of a server holding none of their data. Two halves fix it,
+both exercised live:
+
+- `provisionTarget` carries the SIGNED point's `manifest.worldName` into the new
+  server's `LEVEL` (measured live: `iw-upd-b` was created with `LEVEL=UpdA`);
+- `judgeUpgrade` reads `Preparing level "<name>"` out of the seeded boot's log
+  and **fails** when it names a different world than the point carries. Silence
+  is not a mismatch — a log that never said claims nothing.
+
+## G.3 The live cross-server proof
+
+Two throwaway servers in `game-hub`, both created and deleted inside this
+session. `gt-new-horizons` was read-only throughout and never scaled.
+
+**Setup.** `iw-upd-a` (SOURCE) created through `createServer`: vanilla 1.21.4,
+`LEVEL=UpdA` — a capitalised, non-default world directory, GTNH's `World/` shape
+on something disposable — 3Gi/300m, 3Gi `longhorn`. 3Gi was chosen so the
+capacity plan comes out `requires-source-stopped` against the live quota, which
+is the harder mode and the one GTNH takes. Then seeded with canaries: a world
+marker, a 1 MiB random blob under `UpdA/data/`, a 4 KiB playerdata file, the
+full identity set, and one file in each of the four modded directories.
+
+**Headroom checked BEFORE anything was created** (the namespace holds 16Gi and
+`gt-new-horizons` alone requests 12Gi): 4Gi free, so `A` at 3Gi fits with 1Gi
+spare, and `B` only fits after `A` stops. Nothing was evicted and GTNH was never
+touched.
+
+**Driven through the production path.** `planCapacityFor` → `newUpgradeRun` →
+`advanceUpgrade`/`driveUpgrade` with `wireUpgradeDeps` — the same functions the
+route calls. Two substitutions, both recorded: the timeline root was a local
+directory (this box cannot mount the datastore PVC) with `IW_BACKUP_ROLE=datastore`
+so `assertTimelineDatastore` passes exactly as it does on that pod, and the
+driver ran here rather than inside the console pod. Every Kubernetes verb was
+the real one against the real cluster.
+
+```
+CAPACITY PLAN: requires-source-stopped
+  "Both servers do not fit in quota "game-hub-quota" at once: requests.memory
+   would need 3Gi but only 1Gi is free (15Gi of 16Gi used). The old server will
+   therefore be STOPPED after its world is captured and before the new one
+   starts. It is stopped, never deleted …"
+
+PHASE planned          -> capturing
+PHASE capturing        -> stopping-source
+PHASE stopping-source  -> provisioning
+PHASE provisioning     -> fresh-boot-proof
+PHASE fresh-boot-proof -> seeding
+PHASE seeding          -> verifying
+PHASE verifying        -> done
+```
+
+The point, signed and two-streamed:
+
+```
+worldName:   "UpdA"          consistency: "quiesced"
+flushProof:  proven, ./UpdA/level.dat, 1532 bytes
+streams:     world.tar     1,607,680 B  2 chunks  csum 8249b2f0…
+             identity.tar     40,960 B  1 chunk   csum 50f44fb7…
+verify:      ok: true, 3 chunks re-hashed, 1,648,640 bytes, 0 issues
+```
+
+The finished record:
+
+```json
+{ "phase": "done",
+  "pointId": "2026-08-19T01-08-05Z",
+  "sourceStopped": true, "newServerCreated": true,
+  "freshBootProvenAt": "2026-08-19T01:16:14.610Z",
+  "seededAt": "2026-08-19T01:18:33.945Z",
+  "seedPreCapturePointId": "2026-08-19T01-16-14Z",
+  "seedWarnings": [],
+  "verdict": { "kind": "pass", "evidence": [
+      "the new server reported ready 182.3s after start",
+      "./UpdA/level.dat passes gzip -t",
+      "./UpdA/level.dat_old passes gzip -t" ] },
+  "error": null }
+```
+
+`iw-upd-b` was created with `LEVEL=UpdA` (carried from the signed manifest) and
+its seeded boot logged `Preparing level "UpdA"` … `Done (90.103s)!`.
+
+### The two gates Part F.7 names
+
+**GATE 1 — the source is never written.** `iw-upd-a` was hashed at three points
+with `sha256sum` from inside a READ-ONLY companion (so the measurement itself
+could not be what changed it):
+
+```
+A @ T0  before anything                      35 files
+A @ T1  after the capture and the stop       35 files
+A @ T2  after the whole run reached done     35 files
+A @ T3  after a second cross-server seed     35 files
+
+diff T1 vs T2 → IDENTICAL, every path, every sha256
+diff T1 vs T3 → IDENTICAL, every path, every sha256
+```
+
+T0→T1 differs in exactly nine files — `level.dat`, `level.dat_old`,
+`data/random_sequences.dat`, two `entities/*.mca` and four `region/*.mca` — which
+is the game's own `save-all flush` inside the quiesce bracket plus its shutdown
+save. Every canary and every identity file is unchanged even there. The deployment
+stayed at `replicas: 0`: **stopped, never deleted.**
+
+**GATE 2 — the target carries the point, byte for byte.** Both streams were
+reassembled out of the chunk store under their SIGNED checksums (the same
+enforcement the restore applies) and extracted; `iw-upd-b`'s volume was hashed
+through its companion after a seed whose `startServer` was recorded rather than
+performed — the one substitution Part D already used and documented, so the
+volume could be read before a booting server rewrote `session.lock` and
+`level.dat`. The deferred call is asserted, so the "always restart" contract is
+still checked.
+
+```
+point files: 35   B's volume: 35
+IDENTICAL — every file in the point came back byte for byte on iw-upd-b
+```
+
+Read back off `iw-upd-b`'s own volume:
+
+```
+world canary : IW-UPGRADE-CANARY cross-server proof
+ops.json     : [{"uuid":"8f0e…0001","name":"CanaryOp","level":4,…}]
+whitelist    : [{"uuid":"8f0e…0001","name":"CanaryWhitelisted"}]
+usernamecache: {"8f0e…0001":"CanaryOp"}
+level-name   : level-name=UpdA
+modded dirs  : blueprints journeymap serverutilities visualprospecting
+1MiB blob    : 1048576 bytes
+playerdata   : 8f0e1c2a-4b3d-4e5f-9a01-ca0000000001.dat
+```
+
+**And the invariant, observed rather than reasoned about.** The live seed logged
+`restoreDepsFor was called with: ["iw-upd-b"]` — the restore's stop, its
+companion, its pre-capture and its start were all built from the TARGET name and
+from no other. The same-server call was refused before a single read.
+
+### Two live findings the unit suite could not have produced
+
+- **`pre-capture-failed` is real and it aborts.** A seed attempted while the
+  target had no pod refused with *"The current world could not be captured
+  before the restore, so the restore was abandoned. Nothing was changed — a
+  restore with no way back is the failure this refuses to create."* Exactly the
+  behaviour F.6.1 predicts, observed.
+- **Hashing a RUNNING target proves nothing.** The first comparison was taken
+  ten minutes after B had booted, and 18 of 35 files differed — `level.dat`, the
+  region and entity files, `raids.dat`, and `ops.json` / `usercache.json` /
+  `banned-*.json` / `server.properties`, all of which a live Minecraft server
+  rewrites on load. Every canary matched. The byte-exact gate needs the deferred
+  start; without it the comparison measures the server, not the restore.
+
+### Cleanup, proven
+
+Deployments, Services, Secrets, ConfigMaps (including the run store
+`game-hub-upgrade-iw-upd-a`), PVCs, companion pods and the `iw-upd-a`
+power-state entry were deleted. `kubectl get deploy,svc,secret,cm,pvc,pod -n
+game-hub | grep iw-upd` returns nothing, and the namespace is back to its exact
+baseline: `gt-new-horizons` alone, `requests.memory 12Gi`, 4 PVCs, 60Gi longhorn
+— the same numbers measured before the run started. GTNH's pod was never
+restarted (same 5h-uptime pod throughout).
+
+## G.4 What a REAL GT New Horizons upgrade would do — and what is unverified
+
+⚠️ **Nothing in this section has been run.** The live proof was a vanilla pair.
+Everything below is derived from code that now has tests and from facts measured
+on the live GTNH Deployment today, read-only. It is an assessment, not a result.
+
+### G.4.1 The measured starting point
+
+```
+Deployment   gt-new-horizons, 1/1 Running, revision 15
+image        ghcr.io/parkervcp/yolks:java_21      (a Java RUNTIME image)
+egg id       modpack/gtnh/gt-new-horizons
+modpack      gtnh/gtnh@2.8.4-java17
+mountPath    /home/container
+volume       gt-new-horizons-container-local  (30Gi, local-path-retain, PV nodeAffinity → cp1)
+requests     cpu 600m / memory 12Gi      limits  cpu 3 / memory 12Gi
+initC        installer, config-sync
+env          IW_MODPACK_URL, SERVER_MEMORY, STARTUP, RCON_*, RUNTIME_JAVA_MAJOR
+world dir    World   (capital — world-archive.yaml, and Part C's measurement)
+```
+
+### G.4.2 What the flow would do, phase by phase
+
+1. **Capacity plan → `requires-source-stopped`.** 12Gi + 12Gi against a 16Gi
+   hard cap; with the source stopped the target's 12Gi fits in 16Gi exactly.
+   The dialog would carry that sentence and the arithmetic behind it.
+   Storage: the target gets a **30Gi `longhorn`** PVC (sized from the source,
+   class forced to `longhorn`), taking the longhorn class to **90Gi of 100Gi**.
+   It fits, by 10Gi, and it is asserted rather than assumed — but it is the
+   tightest dimension in the whole flow and worth checking before starting.
+2. **Capture.** Quiesce via RCON on the live pod (`save-off`, `save-all flush`,
+   `save-on`), flush proof against `./World/level.dat`, two signed streams. The
+   old server keeps running until this finishes.
+3. **Stop the source.** Graceful stop (GTNH's preStop save takes up to 110s),
+   the durable `stopped` power intent so the power sweep cannot restart it
+   mid-update, then a wait for zero pod objects.
+4. **Provision.** `createServer` with `modpack: {provider:"gtnh", packId:"gtnh",
+   versionId:"<chosen>", channel:"java17"}`, memory/cpu/storage from the source,
+   `storageClass: "longhorn"`, the operator's DNS name, and a FRESH EULA
+   acceptance. The installer downloads and unzips the new pack (≈420 MB).
+5. **Fresh-boot proof.** The new pack boots on an empty world. A pack that
+   cannot generate a world fails here with **zero data at stake** — the cost is
+   one PVC.
+6. **Seed.** Pre-restore capture of the new server's throwaway world (wasted
+   minutes, deliberately kept), stop, zero pods, writable companion, both
+   streams staged and swapped.
+7. **Verify.** Rehearsal log signatures + kubelet readiness (the game port) +
+   `gzip -t` on `World/level.dat` and `level.dat_old` + the world-name check.
+
+### G.4.3 Which directories travel, and which must not
+
+**Travel** (`worlds/identity-layout.ts` + `worlds/world-layout.ts`, both tested):
+
+| Path | Why |
+|---|---|
+| `World/` — resolved from `server.properties` `level-name`, recorded and **signed** on the point | The world. GTNH is 1.7.10 Forge, so the Nether and End live inside `World/DIM-1`, `World/DIM1`, … rather than in sibling directories; the `_nether`/`_the_end` entries are listed and dropped harmlessly when absent |
+| `ops.json`, `whitelist.json`, `banned-players.json`, `banned-ips.json` | Who is an operator, who may join, who may not |
+| `usercache.json`, `usernamecache.json` | The UUID↔name caches. `usernamecache.json` is Forge's and is NOT in Part A's list — without it every offline player is an unresolvable UUID until they next log in |
+| `server.properties` | Gameplay identity, including the `level-name` that must name the directory just unpacked |
+| `server-icon.png` | The icon in the server list |
+| `serverutilities/` | Ranks and permissions |
+| `visualprospecting/` | Per-world ore discovery the World zip does not carry |
+| `journeymap/` | Server-side map data |
+| `blueprints/` | Player-created blueprints |
+
+**Must NOT travel:**
+
+| Path | Why |
+|---|---|
+| `mods/`, `config/`, `coretweaks/`, `scripts/`, `libraries/`, top-level jars and launch scripts | **This is the update.** The new pack ships all of them; carrying the old set forward undoes the upgrade or mixes two packs, which is worse than either. The old server stays browsable, so `config/` can be diffed afterwards |
+| `World2/` | **Q1, answered in Part C by measurement**: server-generated (it appears a day after the pack install), but its `playerdata/` is empty and its `level.dat` has not been rewritten since the day it appeared. Nothing has ever been played in it |
+| `logs/`, `crash-reports/`, `backups/`, `.infraweaver-backups/`, `.timeline-stage*` | Noise, and a recursion trap — `UNIVERSAL_EXCLUDES` already refuses these |
+| `eula.txt` | Acceptance belongs to the new server's creation record, not to a copied file |
+
+### G.4.4 What is unverified, stated plainly
+
+1. **No GTNH run has ever been performed.** Not by this session, not by any
+   earlier one. Every claim in G.4.2 is inference from tested code plus measured
+   Deployment facts.
+2. **The `identity-stream-missing` gate will refuse any point taken before this
+   build.** `seedNewServer` throws unless the point carries an identity stream.
+   The operator must take a FRESH capture with this code before an update can
+   seed anything.
+3. **The yolks image's treatment of `server.properties` is inferred, not
+   observed.** The `LEVEL` carry that fixed the vanilla case is itzg-specific;
+   for GTNH the egg declares no `configFiles`, so `config-sync` templates only
+   the RCON block and the restored `level-name=World` should survive. That
+   reasoning has never been watched on a GTNH boot, and it is the single point
+   where a silent wrong-world boot could still happen. The `Preparing level`
+   check in `judgeUpgrade` would CATCH it — the run would fail rather than lie —
+   but it would fail.
+4. **Q2 — cross-version config expectations — is still open.** GTNH release
+   notes occasionally require carrying specific config or running migration
+   steps between versions. "Never copy `config/`" matches a clean-pack upgrade;
+   whether any GTNH version pair needs more is unverified, and the changelog for
+   the actual target version has to be read by a human.
+5. **Q4 — whole-file `server.properties` carry — is still open.** GTNH 2.8.x is
+   Minecraft 1.7.10. If a newer pack's stock file carries new keys with
+   load-bearing defaults, a whole-file carry drops them.
+6. **Durations are budgeted, not measured.** The capture of GTNH's world stream
+   out of a 2.9 GiB volume, and the 420 MB pack install, have never been timed
+   through this path. The phase budgets (60 min capture, 60 min provisioning,
+   45 min per boot) were chosen to be generous.
+7. **The new server escapes the cp1 pin, deliberately — and that is a change.**
+   The target's PVC is `longhorn`, not `local-path-retain`, so the new instance
+   is portable and reachable by every backup system, which is a real gain. It
+   also means it does not inherit the node pin: measured today, cp1 has ~23Gi
+   free and cp4 ~104Gi, so a 12Gi pod places comfortably, but cp3 (2.4Gi free)
+   cannot hold it and `predictNodeFit` is acknowledged-only, never a refusal.
+8. **The console→datastore leg of the hop is still unproven in-cluster**
+   (Part F.7 #2), and **nothing here is deployed**. Everything above assumes the
+   console image is rebuilt from these commits.
+9. **The sweep cannot resume a run in production**, only close it (G.2 #4). A
+   GTNH update whose console pod is replaced mid-`provisioning` will be closed
+   with a sentence, and the operator has to press Start on the old server and
+   delete or keep the half-built new one.
+10. **The DNS cutover does not exist.** Phase 1 gives the new server its own
+    name; adopting the old server's address is Phase 2 and is not built.
+
+### G.4.5 The order a first GTNH run should go in
+
+1. Rebuild and deploy the console image from `2750323d`.
+2. Confirm `GAMEHUB_UPDATE` resolves ON (`PLATFORM_ENABLE_ALL=1` is live) and
+   that a plain **capture** of `gt-new-horizons` succeeds through the datastore
+   hop — that proves the console→datastore leg, which is the one piece the live
+   proof could not exercise.
+3. **Verify** that point, and check its manifest says `worldName: "World"` and
+   lists two streams.
+4. Read the target version's GTNH changelog for migration steps (Q2).
+5. Only then run the update, at a time when the server can be down for the
+   length of a pack install, and watch the phases.
+6. Join the new address yourself and check your own builds and inventory before
+   telling anyone else the address. Keep the old server until you are sure.
+
+## G.5 Still open after this part
+
+1. `rehearsal/promote`'s pre-promote capture still needs the datastore hop (E.2).
+2. The console→datastore leg is still unproven in-cluster (F.7 #2).
+3. **Phase 2 is untouched**: vanilla/Paper version feeds, CurseForge/FTB
+   dropdowns, the plugin-data opt-in, and the "adopt the old DNS name" cutover.
+   The route's zod schema is `provider: "gtnh"` only; the vanilla arm exists in
+   `UpgradeTarget` and in the wiring (it is what the live proof drove) but no
+   route accepts it yet.
+4. The dashboard "Update available" chip (A.9) is not built; the entry point is
+   the per-server tool strip.
+5. Nothing is deployed and nothing is pushed.
