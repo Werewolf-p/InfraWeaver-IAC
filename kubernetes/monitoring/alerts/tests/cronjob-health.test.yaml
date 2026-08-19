@@ -116,16 +116,22 @@ tests:
   # ── REGRESSION: suspended CronJob never fires staleness ────────────────────
   # last_successful_time freezes while suspended, so time()-lst grows without
   # bound. Without the `unless` this fires forever on a deliberate operator pause.
+  #
+  # The fixture is longhorn-replica-guardian (*/15) and NOT the
+  # jellyfin-library-bootstrap it named until 2026-08-19. jellyfin is one of the
+  # two namespaces b445a6d parked and carved out of CronJobSuspended, so
+  # asserting a fire there asserts the opposite of the intended behaviour. The
+  # carve-out has its own case below; this one keeps testing the generic rule.
   - interval: 1m
     name: suspended cronjob does not fire missed-success
     input_series:
-      - series: 'kube_cronjob_status_last_successful_time{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="longhorn-system",cronjob="longhorn-replica-guardian"}'
         values: '0+0x3000'
-      - series: 'kube_cronjob_status_last_schedule_time{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="longhorn-system",cronjob="longhorn-replica-guardian"}'
         values: '0+0x3000'
-      - series: 'kube_cronjob_next_schedule_time{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
-        values: '1800+0x3000'
-      - series: 'kube_cronjob_spec_suspend{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+      - series: 'kube_cronjob_next_schedule_time{namespace="longhorn-system",cronjob="longhorn-replica-guardian"}'
+        values: '900+0x3000'
+      - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-replica-guardian"}'
         values: '1+0x3000'
     alert_rule_test:
       - eval_time: 40h
@@ -136,25 +142,63 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              namespace: jellyfin
-              cronjob: jellyfin-library-bootstrap
+              namespace: longhorn-system
+              cronjob: longhorn-replica-guardian
             exp_annotations:
-              summary: 'CronJob jellyfin/jellyfin-library-bootstrap is suspended'
-              description: 'CronJob jellyfin-library-bootstrap is suspended and will not run until resumed: kubectl -n jellyfin patch cronjob jellyfin-library-bootstrap -p ''{"spec":{"suspend":false}}'''
+              summary: 'CronJob longhorn-system/longhorn-replica-guardian is suspended'
+              description: 'CronJob longhorn-replica-guardian is suspended and will not run until resumed: kubectl -n longhorn-system patch cronjob longhorn-replica-guardian -p ''{"spec":{"suspend":false}}'''
 
-  # ── Never succeeded: fires after the 26h creation grace, not before ────────
+  # ── REGRESSION: a DELIBERATELY PARKED namespace stays silent ───────────────
+  # nextcloud and jellyfin were parked on 2026-08-18 (Deployments at 0, all three
+  # of their CronJobs suspended, every PVC kept), so CronJobSuspended carries
+  # `namespace!~"nextcloud|jellyfin"`: without it a deliberate park holds a
+  # warning firing forever and the operator learns to ignore the alertname.
+  #
+  # This case is the other half of that contract. Un-parking must delete the
+  # exclusion in the same commit, and deleting it turns THIS assertion red — so
+  # a stale carve-out cannot outlive the park in silence. When you un-park,
+  # delete this case together with the exclusion.
+  #
+  # These are the only three suspend:true CronJobs in the repo, so today the
+  # exclusion suppresses nothing else; a suspension anywhere outside these two
+  # namespaces still fires, which is what the case above proves.
+  - interval: 1m
+    name: parked-namespace cronjob does not fire suspended
+    input_series:
+      - series: 'kube_cronjob_spec_suspend{namespace="jellyfin",cronjob="jellyfin-library-bootstrap"}'
+        values: '1+0x60'
+      - series: 'kube_cronjob_spec_suspend{namespace="nextcloud",cronjob="nextcloud-pg-dump"}'
+        values: '1+0x60'
+      - series: 'kube_cronjob_spec_suspend{namespace="nextcloud",cronjob="nextcloud-data-archive"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: CronJobSuspended
+        exp_alerts: []
+
+  # ── Never succeeded: fires after the 8-day creation grace, not before ──────
+  # The grace was 26h until d857698 widened it to 694800s, because 26h assumed a
+  # daily cadence and paged every WEEKLY job before its first slot could arrive
+  # (etcd-metrics-logger, live, on 2026-08-17). This case still asserted 27h.
+  #
+  # kube_cronjob_created is NEGATIVE for the same reason the weekly-clamp case
+  # above uses a negative last_successful_time: an honest 8-day horizon at a 1m
+  # evaluation_interval is ~11 600 steps of every rule in the repo, and promtool
+  # re-evaluates all of them at every step. -694000 leaves the 694800s grace 800s
+  # away, so it is crossed at t=14m and fires at t=29m after `for: 15m`. The
+  # arithmetic under test (time() - created vs the grace) is identical either way.
   - interval: 1m
     name: never-succeeded cronjob fires after grace
     input_series:
       - series: 'kube_cronjob_spec_suspend{namespace="game-hub",cronjob="game-hub-scale-down"}'
-        values: '0+0x1700'
+        values: '0+0x60'
       - series: 'kube_cronjob_created{namespace="game-hub",cronjob="game-hub-scale-down"}'
-        values: '0+0x1700'
+        values: '-694000+0x60'
     alert_rule_test:
-      - eval_time: 20h
+      - eval_time: 10m
         alertname: CronJobNeverSucceeded
         exp_alerts: []
-      - eval_time: 27h
+      - eval_time: 35m
         alertname: CronJobNeverSucceeded
         exp_alerts:
           - exp_labels:
@@ -163,20 +207,25 @@ tests:
               cronjob: game-hub-scale-down
             exp_annotations:
               summary: 'CronJob game-hub/game-hub-scale-down has NEVER succeeded'
-              description: 'CronJob game-hub-scale-down was created over 26 hours ago, is not suspended, and has no recorded successful run at all. The missed-success alert cannot fire for it because the metric it subtracts from does not exist yet. Check the job template, image, RBAC, and NetworkPolicies.'
+              description: 'CronJob game-hub-scale-down was created more than 8 days ago, is not suspended, and has no recorded successful run at all — long enough that even a weekly schedule has had a slot. The missed-success alert cannot fire for it because the metric it subtracts from does not exist yet. Check the job template, image, RBAC, and NetworkPolicies.'
 
   # ── REGRESSION: a CronJob that HAS succeeded must not fire never-succeeded ──
+  # `created` is negative so the 8-day grace IS met at eval time. With the old
+  # created=0 fixture this case was green at 27h only because the grace had not
+  # been reached — it would have stayed green with the
+  # `unless kube_cronjob_status_last_successful_time` clause deleted, i.e. it
+  # protected nothing. The success series is now the only reason it is silent.
   - interval: 1m
     name: healthy cronjob never fires never-succeeded
     input_series:
       - series: 'kube_cronjob_spec_suspend{namespace="game-hub",cronjob="game-hub-scale-up"}'
-        values: '0+0x1700'
+        values: '0+0x60'
       - series: 'kube_cronjob_created{namespace="game-hub",cronjob="game-hub-scale-up"}'
-        values: '0+0x1700'
+        values: '-694000+0x60'
       - series: 'kube_cronjob_status_last_successful_time{namespace="game-hub",cronjob="game-hub-scale-up"}'
-        values: '0+60x1700'
+        values: '0+60x60'
     alert_rule_test:
-      - eval_time: 27h
+      - eval_time: 35m
         alertname: CronJobNeverSucceeded
         exp_alerts: []
 
@@ -266,15 +315,19 @@ tests:
         exp_alerts: []
 
   # ── Backup chain: verifier that never succeeded is CRITICAL ────────────────
+  # Negative `created` and the 8-day grace, for the reasons on the generic
+  # never-succeeded case above. The generic-silence assertion is now load-bearing
+  # too: at the old 27h the grace was unmet, so CronJobNeverSucceeded was silent
+  # for the whole fixture rather than because of its cronjob!~ exclusion.
   - interval: 1m
     name: backup verifier never succeeded fires critical
     input_series:
       - series: 'kube_cronjob_spec_suspend{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
-        values: '0+0x1700'
+        values: '0+0x60'
       - series: 'kube_cronjob_created{namespace="longhorn-system",cronjob="longhorn-backup-verifier"}'
-        values: '0+0x1700'
+        values: '-694000+0x60'
     alert_rule_test:
-      - eval_time: 27h
+      - eval_time: 35m
         alertname: BackupCronJobNeverSucceeded
         exp_alerts:
           - exp_labels:
@@ -283,8 +336,8 @@ tests:
               cronjob: longhorn-backup-verifier
             exp_annotations:
               summary: 'BACKUP CronJob longhorn-system/longhorn-backup-verifier has NEVER succeeded'
-              description: 'Backup-chain CronJob longhorn-backup-verifier has no successful run at all and is older than 26h. A backup control that has never succeeded is a hypothesis, not a control. (This alert fired on deploy day for longhorn-backup-verifier — that was correct.)'
-      - eval_time: 27h
+              description: 'Backup-chain CronJob longhorn-backup-verifier has no successful run at all and is older than 8 days. A backup control that has never succeeded is a hypothesis, not a control. (This alert fired on deploy day for longhorn-backup-verifier — that was correct.)'
+      - eval_time: 35m
         alertname: CronJobNeverSucceeded   # generic must NOT double-fire
         exp_alerts: []
 

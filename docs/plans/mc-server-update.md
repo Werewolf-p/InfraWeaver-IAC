@@ -1124,3 +1124,310 @@ C.6's order still holds for tasks 4/6/5/7-10, with these amendments:
    boundary. All three defects here — a shell script vs its parser, a PodSpec vs
    an admission controller, a stream vs a WebSocket handshake — were invisible to
    3,108 passing tests and took one live run each to surface.
+
+---
+
+# Part E — D.4 answered: the timeline persists through the datastore pod
+
+> Written 2026-08-19. Commits (local, not pushed): `74c2b45d` the hop moves to
+> `@/lib`, `f32201c4` the timeline takes it, `4307d2be` config-sync ownership.
+
+## E.1 The remedy D.4 proposed was wrong
+
+Part D said the console Deployment needed the datastore PVC mounted. It does
+not, and mounting it would have been wrong three ways — all three visible in
+`kubernetes/catalog/infraweaver-console/base/`:
+
+- `backup-deployment.yaml` runs the SAME console image with
+  `IW_BACKUP_ROLE=datastore`, `replicas: 1`, `strategy: Recreate`, and its own
+  comment calls it "THE datastore. The only writable path that survives a
+  restart. DO NOT add an HPA, raise replicas, or switch to RWX."
+- The volume is **RWO** and the console runs **1-8 replicas behind an HPA**, so
+  at most one replica could ever mount it and the rest would fail to schedule.
+- The console is the internet-facing pod. Direct write access to the backup
+  store would hand any application-layer bug the backups as well — and a second
+  writer to a content-addressed store with a mark-and-sweep collector is exactly
+  how chunks get swept out from under a live point.
+
+`deployment.yaml` is `readOnlyRootFilesystem: true` **by design**, with two
+writable emptyDirs, and reaches the datastore over `BACKUP_SERVICE_URL` with
+`BACKUP_SERVICE_TOKEN`. The timeline was not missing a mount. It was the only
+persistent writer in this app that had not taken the hop.
+
+## E.2 What changed
+
+**The hop is now platform plumbing.** `addons/wordpress-manager/lib/backup/
+service.ts` was never WordPress-specific — its nine exports are the role check,
+the service URL, the constant-time token compare, the actor header and the
+streaming proxy. Moved verbatim to `@/lib/datastore-hop`, old path re-exports.
+180 tests across six backup suites pass unchanged. A second hop would have been
+the same mistake as a second capture implementation.
+
+**The timeline takes it.** Three pieces:
+
+| Piece | What it does |
+|---|---|
+| `timeline/datastore.ts` | the fork — `proxy` on a console replica, token-authenticated `local` on the datastore pod, `refused` with no usable token — and the wall behind it, `assertTimelineDatastore()` |
+| `timeline/route-gate.ts` | `withTimelineRoute`, stated once for six route files and thirteen handlers. Datastore fork FIRST (that pod has no session); console side still spends rate limit, session, scope and RBAC before forwarding |
+| `proxy.ts` | a third service-token bypass, anchored to `servers/<name>/timeline/**` and nothing else under `servers/<name>/` |
+
+The point segment in that pattern is bounded by **shape** (`[A-Za-z0-9-]{1,40}`),
+not by the point-id grammar: two places that must agree about a timestamp format
+is a trap, and the route validates the id twice already. `proxy-credential-census`
+also probes reachability with a generic `sample` segment, and a pattern it cannot
+match reports the route as unreachable.
+
+The wall makes one pre-existing breakage legible rather than fixing it:
+`rehearsal/promote` takes a mandatory pre-promote capture and is still
+console-side, so it now fails with a sentence naming the pod that can do the work
+instead of an `EROFS` errno. **It needs the same hop** — the natural next piece
+of work in this area.
+
+## E.3 The round trip, re-run through the datastore role
+
+Everything below was driven by **HTTP calls to a datastore-role process** against
+the live cluster, not by an in-process driver.
+
+| Step | Evidence |
+|---|---|
+| no token | `403` |
+| wrong token | `403` |
+| valid token on the sibling `/power` | `403` — the bypass does not admit it |
+| valid token on `/files` | `401` |
+| **capture** `POST /timeline` | `HTTP 200 54.0s` — `captured: true`, point `2026-08-18T23-13-18Z`, `consistency: quiesced`, flush `proven`, `./RoundTrip/level.dat` 387 B |
+| **list** `GET /timeline` | 200, the point is there |
+| **verify** `POST /timeline/<id>/verify` | `ok: true`, 3,420,160 bytes re-hashed, 0 issues |
+| destroy | Deployment, Service, Secret, ConfigMap **and PVC** deleted |
+| recreate | through `createServer` — booted 1/1 with **no manual ownership repair**, the first time in the session |
+| **restore** `POST /timeline/<id>/restore` | `HTTP 200 82.5s` — `restored: true`, 3,368,960 bytes, pre-capture `2026-08-18T23-17-40Z` |
+| **compare** | `restored files: 46   point files: 46` → **IDENTICAL, byte for byte** |
+| boot | `Preparing level "RoundTrip"`, `Done (1.392s)!`, and the server itself re-read `ops.json` with CanaryOp at level 4 |
+
+Two cluster facts the design rests on, both measured:
+
+- the datastore pod can create and write `/datastore/game-worlds` (25.5 G free on
+  the 30 Gi PVC);
+- its ServiceAccount is `infraweaver-console` — the SAME one the console uses —
+  and it can `create pods/exec`, `get pods` and `get`/`patch deployments` in
+  `game-hub`. Capture and restore need nothing it does not already have. **No
+  infra RBAC change is required.**
+
+What is still unproven until a deploy: the console→datastore leg of the hop in
+the cluster (`proxyToDatastore`'s fetch). It is the same call every WordPress
+backup already makes in production, and the datastore leg — middleware bypass,
+gate, wall, engine — is proven above over real HTTP.
+
+## E.4 The config-sync ownership bug, fixed
+
+The init container runs as root and left `server.properties` `root:root` 0644, so
+`itzg/minecraft-server` — **this addon's own default Minecraft egg** — could not
+rewrite it on boot and crash-looped before generating a world:
+
+```
+java.nio.file.AccessDeniedException: /data/server.properties
+[init] [ERROR] Failed to update server.properties
+```
+
+Every throwaway in this session had to be repaired by hand with a one-off root
+pod. It would have failed the update feature on its happy path, whose first step
+is "create the new server and prove it boots". `install-wrapper.ts` already ends
+its success branch with the same `chown -R 1000:1000`; the second writer to the
+same volume now does too, after the templater and without masking its exit
+status. Verified live: the next server created booted unaided.
+
+## E.5 Next
+
+1. **Task 4** (`upgrade/types.ts` + `store.ts`) — the run vocabulary. Not started.
+2. `rehearsal/promote`'s pre-promote capture needs the same hop (E.2).
+3. Then Task 6 (`seed.ts`), then Task 5 (`run.ts`), then 7-10 — with a live
+   cross-server proof when Task 6 lands, since this run restored into the same
+   server name, which is the one thing the update flow does differently.
+
+---
+
+# Part F — Task 4 and Task 6 are built; five things the plan got wrong about the code
+
+> Written 2026-08-19. Commits in `/home/runner/InfraWeaver-platform` (local only,
+> not pushed): `b4f65e84` the run state, `8e7aa287` the cross-server seed.
+> Nothing was deployed and the live cluster was read only.
+
+## F.1 What shipped
+
+| Plan task | State | Commit |
+|---|---|---|
+| Task 4 — `upgrade/types.ts` + `store.ts` (+ `config.ts`) | **DONE** | `b4f65e84` |
+| Task 6 — `upgrade/seed.ts`, the cross-server restore | **DONE** | `8e7aa287` |
+| Task 5 (`run.ts`), 7, 8, 9, 10 | **NOT STARTED** | — |
+
+59 new tests across three suites, each written red first. 134 gamehub suites /
+2,987 tests green; `tsc --noEmit` exit 0; `eslint` exit 0.
+
+Three deliberate mutations were run to prove the load-bearing assertions are not
+decorative — each was reverted and the tree re-verified clean:
+
+| Mutation | Tests that failed |
+|---|---|
+| `capturing` exits to BOTH `stopping-source` and `provisioning` regardless of mode | 4 |
+| `restoreDepsFor(sourceServer)` — the world-destroying bug | 1 (`the restore's verbs are built from the TARGET name and from no other`) |
+| retry depth lowered to rehearsal's 3 | 1 (`a lost write race retries deeply enough to win`) |
+
+## F.2 THE PLAN'S TEST PATHS DO NOT EXIST, AND A TEST WRITTEN THERE NEVER RUNS
+
+Every task in Part B names a test path of the form
+`src/addons/gamehub/lib/<area>/__tests__/<name>.test.ts`, and Task 1 even says to
+"follow the sibling test layout used by `curated-packs.test.ts`". Measured:
+
+```
+$ find src -type d -name "__tests__" | wc -l      → 0
+$ find src -name "*.test.ts*"        | wc -l      → 0
+$ grep testMatch jest.config.js
+  testMatch: ["**/tests/unit/**/*.test.{ts,tsx}"],
+```
+
+There are no `__tests__` directories in this repo and no test files under `src`
+at all. Every unit test lives in `tests/unit/**`, and jest's `testMatch` picks up
+**nothing else**. A file written where the plan says would not fail — it would
+silently never be collected, so `npm test` would stay green while the task's
+entire test suite sat unexecuted. That is the worst available failure mode for a
+plan whose whole safety argument is "there is a test for this", and it applies to
+tasks 1, 2, 3, 4, 5, 6 and 8 as written.
+
+The three suites added here are at `tests/unit/gamehub/upgrade-run-state.test.ts`,
+`upgrade-store.test.ts` and `upgrade-seed.test.ts`, beside the existing
+`upgrade-capacity.test.ts` that Task 5's capacity slice already used.
+
+## F.3 There are no `rehearsal/store.ts` tests to mirror — and mirroring it would copy a measured bug
+
+Task 4 says to "mirror `rehearsal/store.ts` tests — same CAS/409-retry cases".
+`writeRun` has **zero** test coverage; `rehearsal-abort.test.ts` imports only the
+pure helpers (`nextRunData`, `runsFromData`, `activeRun`, `isAbandoned`,
+`newRunId`, `runKey`). There is no CAS test in the codebase to mirror.
+
+Worse, the loop it would have been mirrored from is the shape
+`@/lib/configmap-store` exists to replace, in three ways, each documented in that
+module or its test:
+
+- **three attempts, no delay.** `tests/unit/configmap-store-conflict-retry.test.ts`
+  records the measured cost: *"It retried a 409 exactly ONCE, with no delay: both
+  losers of a simultaneous write re-read the same resourceVersion on the same
+  tick and collided again … four real alerts lost to `Operation cannot be
+  fulfilled on configmaps`."* The answer is `CONFIGMAP_WRITE_ATTEMPTS = 6` with
+  `configMapConflictBackoffMs`.
+- **it retries every error, not just conflicts.** A 403 is attempted three times
+  and then reported as an exhausted-attempts message rather than as a permission
+  problem.
+- **`readConfigMap` swallows every read failure into `null`.** For rehearsal that
+  is a display concern. For an update it is a correctness one: `null` reads as
+  "no runs stored", which answers "nothing is in flight" to the concurrency
+  guard, and a second update would start beside the first — on a namespace where
+  two GTNH-class servers do not fit.
+
+`upgrade/store.ts` therefore imports the retry policy from `@/lib/configmap-store`
+rather than restating it, keeps the game-hub convention of an injected `coreApi`
+and the per-server ConfigMap shape, and treats **only** a 404 as emptiness.
+
+**Recommendation, not done here (out of scope):** `rehearsal/store.ts` has the
+same three properties and drives a feature that can promote an image onto a live
+server. It should adopt the same primitives.
+
+## F.4 Four smaller corrections to the interfaces Part B specifies
+
+1. **`CapacityMode` must be imported, not declared.** Task 4's interface block
+   declares `export type CapacityMode = "fits-together" | "requires-source-stopped"`.
+   `upgrade/capacity.ts` (shipped in `f42ae312`) already exports exactly that
+   union. Two declarations of one union in one directory is the trap this
+   codebase keeps paying for. `types.ts` re-exports the one from `capacity.ts`.
+
+2. **`nextAllowedPhases("planned")` is not `["capturing","aborted"]`.** The plan's
+   example omits `failed`, and Task 8 in the same plan requires the sweep to
+   *"fail it with `inconclusive: console-restarted`"*. A phase the sweep cannot
+   fail is a phase where an abandoned run stays "active" forever and refuses
+   every future update for that server. `failed` is reachable from every
+   non-terminal phase.
+
+3. **`seeding` is the one phase with no `aborted` exit.** A.9 says an Abort button
+   is present "wherever abort is safe"; the plan never says where that is not.
+   It is not safe mid-seed: bytes are landing in the new server's volume, and
+   stopping halfway reports "aborted", which reads as "nothing happened".
+   `isAbortablePhase` states it once for the UI and the state machine.
+
+4. **`seedNewServer` cannot return `Promise<void>`.** C.6 established that
+   `RestoreOutcome.restored` carries `warnings` and that *"the run's verdict
+   assembly must read them, or a server whose `ops.json` did not land will be
+   reported as a clean pass"*. A `void` return discards them along with the byte
+   count and the pre-capture id. It returns a `SeedOutcome`, and `warnings` is
+   always present and empty rather than optional — a caller that had to check for
+   the field would eventually forget to.
+
+## F.5 The exact mechanism of the never-write-the-source hazard (read this before Task 5)
+
+The plan describes the invariant. This is the mechanism, and it is sharper than
+the plan implies.
+
+`restorePoint(ref, deps)` names the point by `ref.server` and takes **every
+server-scoped verb as an injected closure**: `stopServer`, `resolveTarget`,
+`startServer`, `preCapture`, `gamePodCount` and `egg`. Nothing in `restore.ts`
+compares `ref.server` with the server those closures act on, and it should not —
+for the timeline's own restore route they are the same by construction (the route
+builds all of them from one `name`).
+
+For an update they are deliberately different. A `seedNewServer` that built its
+verbs from the source name would: stop the OLD server, wait for its pods to go,
+bring a writable companion up on the OLD volume, and unpack the source's own
+capture over the world it was taken from — with **every signature check
+passing**, because the point really is that server's. There is no checksum, no
+signature and no sentinel anywhere in the restore path that would notice.
+
+So `seed.ts` takes `restoreDepsFor: (server: string) => Promise<RestoreDeps>` as
+a **factory** rather than a ready-made deps object, specifically so that the name
+each verb was built from is an observable fact a test can assert. The test
+asserts the complete call log: `readPoint` called once with `{server: SOURCE}`,
+`restoreDepsFor` called once with `TARGET`, and the deps object handed to the
+restore carrying the target's tag. Task 5's `run.ts` must supply that factory and
+must not build a `RestoreDeps` itself.
+
+Two gates were added that the plan does not list, both because the target is a
+NEW server rather than the same one:
+
+- **`point-belongs-elsewhere`** — `seed.ts` compares `manifest.server` with the
+  caller's `sourceServer`. `restore.ts` never does.
+- **`identity-stream-missing`** — into the SAME server a world-only point is a
+  complete restore, because the ops, whitelist and `server.properties` already on
+  that volume are the right ones. Into a NEW server nothing is already there, so
+  a world-only point yields no operators, no whitelist, no bans, and a
+  `server.properties` whose `level-name` may not name the directory just
+  unpacked — which boots a brand-new empty world beside the restored one and
+  reports success. A.7's "copying half-right silently is worse than copying
+  nothing loudly", made enforceable.
+
+## F.6 Two ordering facts Task 5 must respect
+
+1. **`seeding` cannot come before `fresh-boot-proof`.** `restorePoint`'s
+   pre-restore capture is mandatory and *its failure aborts*, and `runCapture`
+   refuses with `no-pod` when the server is scaled to zero with no pod. The
+   target only has a pod once `fresh-boot-proof` has booted it. A run that
+   reordered these — or that provisioned and seeded without booting first —
+   would abort at the pre-capture with a message about the SOURCE's world that
+   has nothing to do with what went wrong.
+
+2. **Q5 is answered in the cross-server direction, by accident of ordering.**
+   `restorePoint` restores the world first and the identity stream second, and
+   the identity set carries `server.properties`. So the target's `level-name`
+   ends up naming the directory that was just unpacked, because both came from
+   the same point. This is *why* `identity-stream-missing` is a refusal and not a
+   warning: without that stream the two can disagree and nothing notices.
+
+## F.7 Still open
+
+1. **`rehearsal/promote`'s pre-promote capture still needs the datastore hop**
+   (E.2). It did not block this work and was left untouched.
+2. **The console→datastore leg is still unproven in-cluster** (E.3) and the
+   `game-hub` datastore mount question is closed but undeployed.
+3. **The cross-server seed has no live proof.** `seed.ts` has 11 unit tests and
+   zero cluster runs, and D.7's rule stands: *do not trust a green unit suite
+   about anything that crosses a process boundary.* The live proof for this one
+   is a second throwaway server — capture from A, seed into B, diff B against
+   A's point, and check A's volume is byte-identical before and after.
+4. Next in code: **Task 5 (`run.ts`)**, whose deps surface is now fully
+   determined by `advancePhase` / `phaseIsAlreadyDone` / `seedNewServer`; then
+   7, 8, 9.

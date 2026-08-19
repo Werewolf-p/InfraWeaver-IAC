@@ -105,7 +105,7 @@ spec:
             unless on (namespace, cronjob)
               max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
             and on (namespace, cronjob)
-              # 694800s = 8 days, not 26 hours. 26h assumed a daily cadence and
+              # 694800s = 8 days + 1h, not 26 hours. 26h assumed a daily cadence and
               # fired on every WEEKLY job before its first slot could arrive:
               # etcd-metrics-logger (0 2 * * 0, created Sun 15:49, i.e. after
               # that week's 02:00) alerted on 2026-08-17 having never had a
@@ -122,8 +122,9 @@ spec:
           annotations:
             summary: "CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has NEVER succeeded"
             description: >-
-              CronJob {{ $labels.cronjob }} was created over 26 hours ago, is not
-              suspended, and has no recorded successful run at all. The
+              CronJob {{ $labels.cronjob }} was created more than 8 days ago,
+              is not suspended, and has no recorded successful run at all — long
+              enough that even a weekly schedule has had a slot. The
               missed-success alert cannot fire for it because the metric it
               subtracts from does not exist yet. Check the job template, image,
               RBAC, and NetworkPolicies.
@@ -286,7 +287,7 @@ spec:
             unless on (namespace, cronjob)
               max by (namespace, cronjob) (kube_cronjob_status_last_successful_time)
             and on (namespace, cronjob)
-              # 694800s = 8 days, not 26 hours. 26h assumed a daily cadence and
+              # 694800s = 8 days + 1h, not 26 hours. 26h assumed a daily cadence and
               # fired on every WEEKLY job before its first slot could arrive:
               # etcd-metrics-logger (0 2 * * 0, created Sun 15:49, i.e. after
               # that week's 02:00) alerted on 2026-08-17 having never had a
@@ -304,7 +305,7 @@ spec:
             summary: "BACKUP CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has NEVER succeeded"
             description: >-
               Backup-chain CronJob {{ $labels.cronjob }} has no successful run at
-              all and is older than 26h. A backup control that has never
+              all and is older than 8 days. A backup control that has never
               succeeded is a hypothesis, not a control. (This alert fired on
               deploy day for longhorn-backup-verifier — that was correct.)
 
