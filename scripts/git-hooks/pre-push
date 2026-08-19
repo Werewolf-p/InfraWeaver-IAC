@@ -32,18 +32,110 @@ remote_url="${2:-}"
 # renamed/forked.
 public_match="${PUBLIC_REPO_MATCH:-InfraWeaver-IAC}"
 
-# ── Local IaC validation gate ────────────────────────────────────────────────
+# ── Local IaC validation gate — the ONLY place a bad change can be blocked ───
 # GitHub branch protection / rulesets that would require the `validate-iac` CI
 # check are unavailable on this repo's plan (private repo, no GitHub Pro → the
-# protection + rulesets APIs 403). So the only place we can BLOCK a bad change
-# before it reaches main (which ArgoCD syncs to the cluster) is here, client-side.
-# Runs the same gates CI runs; fast and self-skipping when tooling is absent.
+# protection + rulesets APIs 403). CI runs everything and can block nothing.
+# So this hook is the whole enforcement surface, and until 2026-08-19 it ran
+# 4 validators plus gate 7 of 7 — i.e. it skipped SIX of the seven gates that
+# would catch a bad manifest, at the only point that can refuse a push.
+#
+# It now runs exactly what CI runs, whenever the push can affect what CI checks:
+#   push touches kubernetes/** or scripts/**  →  FULL run (~3m)
+#   anything else (docs, plans, README)       →  fast subset (<5s)
+# The path test is what keeps this cheap: a docs-only push pays nothing.
+#
+# This is only safe because of the same day's hardening in validate-iac.sh: a
+# gate whose tool is missing now ends the run INCOMPLETE with exit 1 instead of
+# printing PASSED, so "the hook got quieter" can no longer masquerade as "the
+# change is fine".
+#
 # Escape hatch for emergencies: SKIP_IAC_VALIDATION=1 git push ...
+
+# The build host keeps kubeconform/promtool/shellcheck in ~/bin, which is not on
+# PATH for every shell git may launch this hook from. Without this, gates 1/2/5
+# would report INCOMPLETE and block a perfectly good push — a false block is how
+# a gate gets bypassed habitually, which is how it stops mattering.
+[ -d "$HOME/bin" ] && case ":$PATH:" in *":$HOME/bin:"*) :;; *) PATH="$HOME/bin:$PATH";; esac
+export PATH
+
+# Does this push carry any change under kubernetes/ or scripts/?
+# stdin is "<local ref> <local sha> <remote ref> <remote sha>" per ref. Anything
+# we cannot resolve (new branch, remote sha we do not have) answers YES: the
+# fail-safe direction for a gate is MORE validation, never less.
+push_touches_gated_paths() {
+  local zero='^0\{40\}$\|^0\{64\}$'
+  local lref lsha rref rsha changed saw_ref=false
+  # git's pre-push stdin format is "<local ref> <local sha> <remote ref> <remote sha>";
+  # lref is read only to consume its field.
+  # shellcheck disable=SC2034
+  while read -r lref lsha rref rsha; do
+    [ -n "${lsha:-}" ] || continue
+    saw_ref=true
+    # deleting a remote ref pushes nothing
+    echo "$lsha" | grep -q "$zero" && continue
+    if echo "$rsha" | grep -q "$zero" || ! git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+      echo "pre-push: new branch or unknown remote tip ($rref) — running the FULL gate set." >&2
+      return 0
+    fi
+    changed="$(git diff --name-only "$rsha" "$lsha" 2>/dev/null)" || return 0
+    if echo "$changed" | grep -qE '^(kubernetes|scripts)/'; then
+      return 0
+    fi
+  done
+  # No refs on stdin at all (manual invocation / unusual git) — do not assume clean.
+  $saw_ref || return 0
+  return 1
+}
+
 run_iac_validation() {
   [ "${SKIP_IAC_VALIDATION:-0}" = "1" ] && {
     echo "pre-push: SKIP_IAC_VALIDATION=1 — skipping IaC gates." >&2; return 0; }
   local root; root="$(git rev-parse --show-toplevel)"
-  local rc=0
+  local rc=0 full=false
+  push_touches_gated_paths && full=true
+
+  if $full; then
+    echo "pre-push: push touches kubernetes/** or scripts/** — running the FULL gate set" >&2
+    echo "          (same as CI: 7 gates + 5 validators; ~3 minutes)." >&2
+    # Gates 1-7: kustomize render, kubeconform schema, secret-leak, cron-secret
+    # seed, alerting rules (promtool), armed-blueprint, duplicate-script.
+    # Runs whole rather than --duplicate-scripts-only: six of these seven have
+    # never once run at a point that could block, which is the defect being fixed.
+    if [ -f "$root/scripts/validate-iac.sh" ]; then
+      bash "$root/scripts/validate-iac.sh" --repo-root "$root" || rc=1
+    else
+      echo "pre-push: scripts/validate-iac.sh is MISSING — refusing to call that a pass." >&2
+      rc=1
+    fi
+    # Every ExternalSecret must name a SecretStore that exists. ESO does not error
+    # on an unknown store; it just never reconciles and the workload CrashLoops
+    # (Gatus, 2025-05). Blocking here and in CI since 2026-08-19.
+    if [ -x "$root/scripts/validate-eso-refs.sh" ]; then
+      bash "$root/scripts/validate-eso-refs.sh" --repo-root "$root" || rc=1
+    fi
+    # platform.yaml: enabled apps must have a catalog dir, groups.* must be
+    # well-typed, identity.* must be shaped. sync-groups.sh reads this file to
+    # decide which Applications exist, so a malformed entry is a deploy-path
+    # defect. Had ZERO callers until 2026-08-19; wired rather than deleted.
+    # CWD-relative by design, hence the subshell.
+    if [ -f "$root/scripts/validate-platform-yaml.sh" ]; then
+      ( cd "$root" && bash scripts/validate-platform-yaml.sh ) || rc=1
+    fi
+  else
+    echo "pre-push: no kubernetes/** or scripts/** change in this push — fast subset only." >&2
+    # Gate 7 alone still runs on every push: a duplicated ops script can be
+    # committed from either repo and is this platform's most expensive recurring
+    # defect (2026-06-30 cascade delete; 2026-08-06 12h OpenBao outage). Sub-second.
+    if [ -f "$root/scripts/validate-iac.sh" ]; then
+      bash "$root/scripts/validate-iac.sh" --repo-root "$root" --duplicate-scripts-only || rc=1
+    fi
+  fi
+
+  # These four are NOT part of validate-iac.sh and run on every push regardless:
+  # each is fast, each has no cluster/network dependency, and each catches a
+  # class that has already cost an outage here.
+  #
   # NetworkPolicy ports must be POD ports, not Service ports (the authentik
   # SSO-outage class). Self-skips if PyYAML is missing.
   if [ -x "$root/scripts/validate-netpol-ports.sh" ]; then
@@ -52,13 +144,11 @@ run_iac_validation() {
   # OpenBao policy heredocs must stay extractable and well-formed, otherwise the
   # live drift check silently degrades into comparing nothing — and a `bao policy
   # write` clobber goes unnoticed again (2026-08-06, ~12h of Degraded apps).
-  # Static only: no cluster access, so it is safe and fast on a laptop.
   if [ -x "$root/scripts/validate-openbao-policy-drift.sh" ]; then
     bash "$root/scripts/validate-openbao-policy-drift.sh" --repo-root "$root" || rc=1
   fi
   # Manifests in git that no ArgoCD Application renders (core/rbac,
-  # core/etcd-maintenance, minio-velero — the "committed but never deployed"
-  # class). Pure filesystem analysis, no cluster.
+  # core/etcd-maintenance, minio-velero — the "committed but never deployed" class).
   if [ -f "$root/scripts/validate-gitops-coverage.py" ]; then
     python3 "$root/scripts/validate-gitops-coverage.py" --repo-root "$root" || rc=1
   fi
@@ -68,17 +158,7 @@ run_iac_validation() {
   if [ -f "$root/scripts/validate-scheduling.py" ]; then
     python3 "$root/scripts/validate-scheduling.py" --repo-root "$root" || rc=1
   fi
-  # An ops script that exists in BOTH this repo and InfraWeaver-platform. Two
-  # copies of sync-groups.sh put `repoURL: https://github.com/your-org/your-repo.git`
-  # on the live cluster (the 2026-06-30 cascade-delete outage) and two copies of
-  # bootstrap-openbao.sh cost 12 hours of OpenBao downtime on 2026-08-06 — and the
-  # first one came BACK via a blanket restore commit, which is why a comment was
-  # not enough. Runs here as well as in CI because this box is the one with both
-  # checkouts, so it is the only place the gate sees the live platform tree
-  # instead of the committed snapshot. Sub-second; no cluster, no network.
-  if [ -f "$root/scripts/validate-iac.sh" ]; then
-    bash "$root/scripts/validate-iac.sh" --repo-root "$root" --duplicate-scripts-only || rc=1
-  fi
+
   if [ "$rc" -ne 0 ]; then
     echo "" >&2
     echo "✖ pre-push BLOCKED: IaC validation failed (see above)." >&2

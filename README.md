@@ -75,7 +75,7 @@ merge conflicts.
 ```bash
 git clone https://github.com/your-org/your-infra-repo && cd your-infra-repo
 cp .env.example .env          # or just run the wizard:
-bash scripts/setup.sh         # prompts for domain, repos, registry, email, DNS
+bash scripts/setup-env.sh     # prompts for domain, repos, registry, email, DNS
 ```
 
 The handful of files **you** own (everything else stays upstream):

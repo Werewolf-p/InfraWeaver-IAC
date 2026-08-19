@@ -2,6 +2,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # validate-cluster.sh — Pre-flight checks before running tofu apply
 #
+# ⚠️ WHO RUNS THIS: a HUMAN, deliberately, before `tofu apply`. It is invoked by
+# no pipeline, no hook and no other script, and that is correct — it needs SSH to
+# the Proxmox hosts and a reachable state backend, neither of which a git hook or
+# a CI runner has. It is Step 3 of the documented add-a-host runbook
+# (InfraWeaver-platform/.github/memories/iac-node-management.md:63,
+# `bash scripts/validate-cluster.sh --fix`), the procedure used when hypatia was
+# added on 2026-08-14.
+#
+# It was PROPOSED FOR DELETION on 2026-08-19 as a "zero-caller validator" and the
+# deletion was REFUSED after re-verification, on the same grounds that kept
+# etcd-heal.py (commit c516fdd): "no automated caller" is not "no user" for an
+# operator/DR tool. Measured before refusing: exit 1 today, because it correctly
+# reports it cannot reach the PVE hosts from this shell — a live check doing its
+# job, not a dead file.
+#
 # USAGE:
 #   bash scripts/validate-cluster.sh [--env <env>] [--fix]
 #

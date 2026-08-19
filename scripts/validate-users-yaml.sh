@@ -1,5 +1,31 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ THIS VALIDATOR HAS NEVER RUN, AND IT CURRENTLY FAILS. Read before wiring it.
+#
+# Proposed for deletion 2026-08-19 as a "zero-caller validator". REFUSED: it was
+# run, and it found four real disagreements in a file that is on the deploy path
+# (scripts/deploy/set-user-passwords.sh:27, scripts/deploy/configure-authentik.sh:98)
+# AND is named as the access register in docs/compliance/information-security-policy.md.
+# Deleting it would have deleted the only thing that can see them.
+#
+# MEASURED 2026-08-19 — `bash scripts/validate-users-yaml.sh` exits 1 with:
+#     User 'sindala':        missing required field 'access_level'
+#     User 'koen1':          missing required field 'access_level'
+#     User 'zonnevaarwater': missing required field 'access_level'
+#     User 'Yona':           missing required field 'access_level'
+#   4 of the 5 users in users.yaml omit it. All four DO carry `role_assignments`,
+#   the newer RBAC shape, and configure-authentik.sh only reads access_level to
+#   detect `admin` — so absence behaves as "not an admin", which may well be the
+#   intended state.
+#
+# SO THE OPEN QUESTION IS NOT "is the data broken" BUT "is this contract stale":
+# either `access_level` is still required (fix the four entries) or
+# `role_assignments` superseded it (drop it from REQUIRED_FIELDS here). That is
+# an access-control decision for the operator, not something to guess, which is
+# why this file is neither deleted nor wired into pre-push/CI yet. Wiring it
+# unresolved would block every push in the repo.
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # scripts/validate-users-yaml.sh — Validate users.yaml schema
 #
 # Required fields per user: username, email, access_level

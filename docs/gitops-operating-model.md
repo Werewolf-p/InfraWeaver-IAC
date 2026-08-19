@@ -12,7 +12,7 @@ changes, secrets in a vault, env params in overlays, automated image promotion).
 
 InfraWeaver is a **forkable template**: committed config uses `${PLACEHOLDER}`
 variables, never real deployment values. A forker fills `.env` (gitignored) — or
-runs `scripts/setup.sh` — then `scripts/generate-from-env.sh` substitutes the
+runs `scripts/setup-env.sh` — then `scripts/generate-from-env.sh` substitutes the
 placeholders into `kubernetes/`, `envs/` and `users.yaml` before bootstrap. This
 keeps every deployment-specific value (domain, repo URLs, image registry, node
 topology, admin email) out of upstream and lets forks pull updates without

@@ -9,6 +9,23 @@
 #   ./scripts/get-kubeconfig.sh productie              # prints to stdout
 #   ./scripts/get-kubeconfig.sh ontwikkel merge        # merges into ~/.kube/config
 #   ./scripts/get-kubeconfig.sh ontwikkel /some/path   # writes to custom path
+#   ./scripts/get-kubeconfig.sh --repo-root /path/to/checkout productie
+#
+# --repo-root — THE REASON THIS SCRIPT IS NOW THE ONLY COPY (2026-08-19)
+# ---------------------------------------------------------------------------
+# InfraWeaver-platform carried a byte-identical copy of this file. It could not
+# simply be deleted, because this script reads $REPO_ROOT/terraform (tofu state)
+# and $REPO_ROOT/envs/<env>/generated/talosconfig, and at deploy time those live
+# in the PLATFORM checkout: platform's .gitignore ignores /terraform/,
+# /kubernetes/ and /envs/ precisely because deploy-local.sh rsyncs them in, and
+# then writes talosconfig into platform's envs/. Measured 2026-08-19: infra's
+# envs/ontwikkel/generated/ holds only .gitkeep and infra has no tofu state, so
+# invoking infra's copy with its own root would have handed the operator a
+# missing or stale kubeconfig for a LIVE cluster.
+#
+# So the copy is replaced by an override rather than by a delegation: platform
+# calls this one script and tells it which tree the state actually lives in.
+# One definition, no fork to drift.
 #
 # Prerequisites:
 #   - tofu       in PATH
@@ -20,11 +37,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TERRAFORM_DIR="$REPO_ROOT/terraform"
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+# --repo-root is consumed first so the positional contract below is unchanged
+# for every existing caller. An unreadable override is fatal: silently falling
+# back to this checkout's own root is how the operator would get a kubeconfig
+# for the wrong cluster and not know it.
+while [[ "${1:-}" == --repo-root ]]; do
+  if [[ -z "${2:-}" || ! -d "$2" ]]; then
+    echo "ERROR: --repo-root needs an existing directory (got: '${2:-}')" >&2
+    exit 1
+  fi
+  REPO_ROOT="$(cd "$2" && pwd)"
+  shift 2
+done
+TERRAFORM_DIR="$REPO_ROOT/terraform"
+
 ENVIRONMENT="${1:-}"
 OUTPUT_MODE="${2:-stdout}"  # stdout | merge | <file-path>
 

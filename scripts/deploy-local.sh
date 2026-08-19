@@ -803,97 +803,82 @@ fi
 
 # ── Step 16b: Pre-apply platform manifests (blueprints, ExternalSecrets) ─────
 log "Step 16b: Pre-applying platform manifests (ArgoCD may not have synced yet)..."
+# 2026-08-19: every apply below ran as `... 2>/dev/null || true`, which threw the
+# error text away AND discarded the exit code, then the step printed its own
+# success line regardless. A failure here was structurally unobservable — the same
+# shape as the 2026-08-11 finding where ALL Authentik blueprints had never applied
+# while every app read Synced/Healthy.
+#
+# The applies stay NON-FATAL on purpose: during a first bootstrap a platform
+# namespace or CRD may legitimately not exist yet, and dying here would strand the
+# deploy before Step 17 (Authentik configuration). What changed is that a failure
+# is now NAMED — stderr is printed, the target is recorded, and the step's closing
+# line reports the failures instead of claiming success.
+_16b_failed=()
+_16b_apply() {   # $1 = -f target, $2 = label for the log
+  local _out
+  if _out=$(kubectl --kubeconfig "$KB_FILE" apply -f "$1" 2>&1); then
+    if [[ -n "$_out" ]]; then printf '%s\n' "$_out" | sed 's/^/    /'; fi
+    return 0
+  fi
+  warn "  pre-apply FAILED: $2"
+  if [[ -n "$_out" ]]; then printf '%s\n' "$_out" | sed 's/^/    /' >&2; fi
+  _16b_failed+=("$2")
+  return 0
+}
 # Authentik: blueprint ConfigMaps + media + ExternalSecrets must exist before worker starts
-kubectl --kubeconfig "$KB_FILE" apply -f kubernetes/platform/authentik/manifests/ 2>/dev/null || true
+_16b_apply kubernetes/platform/authentik/manifests/ "kubernetes/platform/authentik/manifests/"
 # Ensure authentik-media ConfigMap exists (Helm chart should create it; belt-and-suspenders)
-kubectl --kubeconfig "$KB_FILE" create configmap authentik-media -n authentik \
-  --dry-run=client -o yaml | kubectl --kubeconfig "$KB_FILE" apply -f - 2>/dev/null || true
+if _16b_media_out=$( { kubectl --kubeconfig "$KB_FILE" create configmap authentik-media -n authentik \
+  --dry-run=client -o yaml | kubectl --kubeconfig "$KB_FILE" apply -f -; } 2>&1 ); then
+  if [[ -n "$_16b_media_out" ]]; then printf '%s\n' "$_16b_media_out" | sed 's/^/    /'; fi
+else
+  warn "  pre-apply FAILED: authentik-media ConfigMap"
+  if [[ -n "$_16b_media_out" ]]; then printf '%s\n' "$_16b_media_out" | sed 's/^/    /' >&2; fi
+  _16b_failed+=("authentik-media ConfigMap")
+fi
 # Apply ExternalSecrets for all platform namespaces so secrets sync before apps start
 for ns_dir in kubernetes/platform/*/manifests; do
-  kubectl --kubeconfig "$KB_FILE" apply -f "$ns_dir/" 2>/dev/null || true
+  [[ -d "$ns_dir" ]] || continue
+  _16b_apply "$ns_dir/" "$ns_dir/"
 done
-ok "Step 16b: Platform manifests pre-applied"
-
-
-# ── Step 16c: Fix Authentik PostgreSQL storageClass (longhorn→local-path) ────
-# The GitHub values.yaml has longhorn-retain — delete the bad PVC and force a
-# re-sync so local-path is used instead.
-log "Step 16c: Ensuring Authentik PostgreSQL uses local-path storageClass..."
-AK_PVC=$(kubectl --kubeconfig "$KB_FILE" get pvc data-authentik-postgresql-0 -n authentik \
-  -o jsonpath='{.spec.storageClassName}' 2>/dev/null || echo "")
-if [[ "$AK_PVC" == "longhorn-retain" ]]; then
-  warn "  Authentik PostgreSQL PVC uses longhorn-retain — fixing to local-path..."
-  # Delete StatefulSet controller (orphan pods for now)
-  kubectl --kubeconfig "$KB_FILE" delete statefulset authentik-postgresql -n authentik --cascade=orphan 2>/dev/null || true
-  # Delete orphaned pod FIRST so kubernetes.io/pvc-protection finalizer releases
-  kubectl --kubeconfig "$KB_FILE" delete pod authentik-postgresql-0 -n authentik --force --grace-period=0 2>/dev/null || true
-  # Wait for pod to actually disappear so pvc-protection finalizer is released
-  for _i in $(seq 1 15); do
-    if ! kubectl --kubeconfig "$KB_FILE" get pod authentik-postgresql-0 -n authentik &>/dev/null; then
-      break
-    fi
-    sleep 2
-  done
-  # Now remove all PVC finalizers and force-delete
-  kubectl --kubeconfig "$KB_FILE" patch pvc data-authentik-postgresql-0 -n authentik \
-    -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
-  kubectl --kubeconfig "$KB_FILE" delete pvc data-authentik-postgresql-0 -n authentik --force --grace-period=0 2>/dev/null || true
-  # Wait for PVC to actually disappear (not just Terminating)
-  for _i in $(seq 1 20); do
-    if ! kubectl --kubeconfig "$KB_FILE" get pvc data-authentik-postgresql-0 -n authentik &>/dev/null; then
-      break
-    fi
-    # If still stuck, also remove PV finalizers and Longhorn Volume CR
-    PV_NAME=$(kubectl --kubeconfig "$KB_FILE" get pv --no-headers 2>/dev/null \
-      | awk '/authentik\/data-authentik-postgresql-0/{print $1}' | head -1)
-    if [[ -n "$PV_NAME" ]]; then
-      kubectl --kubeconfig "$KB_FILE" patch pv "$PV_NAME" \
-        -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
-      kubectl --kubeconfig "$KB_FILE" patch volume -n longhorn-system "$PV_NAME" \
-        -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
-      kubectl --kubeconfig "$KB_FILE" delete volume -n longhorn-system "$PV_NAME" \
-        --force --grace-period=0 2>/dev/null || true
-    fi
-    sleep 2
-  done
-  # Clean up Released Longhorn PV to avoid confusion on next run
-  OLD_LH_PV=$(kubectl --kubeconfig "$KB_FILE" get pv --no-headers 2>/dev/null \
-    | awk '/longhorn-retain/ && /Released/{print $1}' | head -1)
-  if [[ -n "$OLD_LH_PV" ]]; then
-    kubectl --kubeconfig "$KB_FILE" patch pv "$OLD_LH_PV" \
-      -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-    kubectl --kubeconfig "$KB_FILE" delete pv "$OLD_LH_PV" --force --grace-period=0 2>/dev/null || true
-  fi
-  sleep 3
-  # Force ArgoCD to re-sync platform-authentik (will use local-path now)
-  kubectl --kubeconfig "$KB_FILE" annotate application platform-authentik -n argocd \
-    argocd.argoproj.io/refresh="normal" --overwrite 2>/dev/null || true
-  sleep 5
-  kubectl --kubeconfig "$KB_FILE" patch application platform-authentik -n argocd \
-    --type merge -p '{"operation":{"initiatedBy":{"username":"deploy-script"},"sync":{"syncStrategy":{"hook":{}}}}}' \
-    2>/dev/null || true
-  # Wait for PVC to be recreated with local-path
-  for i in $(seq 1 30); do
-    NEW_SC=$(kubectl --kubeconfig "$KB_FILE" get pvc data-authentik-postgresql-0 -n authentik \
-      -o jsonpath='{.spec.storageClassName}' 2>/dev/null || echo "")
-    if [[ "$NEW_SC" == "local-path" ]]; then
-      ok "  Authentik PostgreSQL PVC now uses local-path ✅"
-      # Restart worker/server pods that may be in CrashLoopBackOff waiting for PostgreSQL
-      kubectl --kubeconfig "$KB_FILE" delete pod -n authentik -l app.kubernetes.io/component=worker \
-        --force --grace-period=0 2>/dev/null || true
-      kubectl --kubeconfig "$KB_FILE" delete pod -n authentik -l app.kubernetes.io/component=server \
-        --force --grace-period=0 2>/dev/null || true
-      break
-    elif [[ -n "$NEW_SC" ]]; then
-      warn "  PVC recreated with $NEW_SC (unexpected)"
-      break
-    fi
-    sleep 5
-  done
+if (( ${#_16b_failed[@]} > 0 )); then
+  warn "Step 16b: ${#_16b_failed[@]} pre-apply target(s) FAILED — ArgoCD owns these objects, so"
+  warn "          the deploy continues, but do NOT read the rest of this run as clean:"
+  printf '    - %s\n' "${_16b_failed[@]}" >&2
 else
-  ok "  Authentik PostgreSQL PVC storageClass: ${AK_PVC:-local-path} ✅"
+  ok "Step 16b: Platform manifests pre-applied"
 fi
-ok "Step 16c: Authentik PostgreSQL storageClass verified"
+
+
+# ── Step 16c REMOVED 2026-08-19 — it force-deleted the Authentik PostgreSQL PVC ─
+# The step fired when `data-authentik-postgresql-0`'s storageClass was
+# `longhorn-retain`, and then, with `--force --grace-period=0`, deleted: the
+# StatefulSet (--cascade=orphan), the pod, the PVC (after nulling its finalizers),
+# the PV, the Longhorn Volume CR — and, through a LINE-WIDE
+# `awk '/longhorn-retain/ && /Released/{print $1}' | head -1` that was scoped to no
+# namespace and no app, the first Released longhorn-retain PV anywhere in the
+# cluster. On 2026-08-19 four of this cluster's six Released PVs belonged to
+# zonnevaarwater and yonavaarwater.
+#
+# Its rationale — "ArgoCD deploys from GitHub before bootstrap.sh switches to
+# Onedev, so force the DB back onto local-path" — is dead twice over. OneDev was
+# decommissioned 2026-07-03. And on 2026-08-18 this database was deliberately
+# MOVED OFF local-path onto longhorn-lowlat, because local-path pinned it to cp1
+# by PV nodeAffinity (kubernetes/platform/authentik/values.yaml:339-368). git
+# declares longhorn-lowlat and the live PVC is longhorn-lowlat, so the step took
+# its else branch and printed `storageClass: longhorn-lowlat ✅` — reporting
+# success for the very class it was written to eliminate.
+#
+# The failure it was one restore away from: a DR restore that lands the SSO
+# database on longhorn-retain (a plausible target — it is the Retain-policy class)
+# makes the next unattended deploy destroy that database's volume mid-run.
+#
+# DELETED, not guarded. A deploy step whose failure mode is "deletes the SSO
+# database of the whole platform" must not exist behind a condition; a condition
+# only decides which night it runs. Moving this PVC between storage classes is an
+# operator-run, reviewed migration with a verified backup first — which is exactly
+# how the 2026-08-18 move onto longhorn-lowlat was actually done.
 
 # ── Step 17: Configure Authentik ──────────────────────────────────────────────
 log "Step 17: Configuring Authentik..."

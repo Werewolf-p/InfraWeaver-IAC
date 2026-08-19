@@ -8,9 +8,22 @@
 # on a machine that has both checkouts. The gate FAILS if a live platform
 # checkout is present and disagrees with this snapshot.
 #
-# source:    InfraWeaver-platform d3798283
-# committed: 2026-08-19T04:48:09+02:00
-# snapshot:  2026-08-19T03:14:35Z
+# source:    InfraWeaver-platform f7408cc5
+# committed: 2026-08-19T08:42:17+02:00
+# snapshot:  2026-08-19T06:42:42Z
+#
+# ── RECORDED DIVERGENCE, 'diff <infra copy> <platform copy> | wc -l' ────────
+# One line per allowlisted pair. The gate FAILS when the measured value
+# differs from the value recorded here, so a pair cannot quietly drift
+# further apart (and a shrink cannot go unrecorded, which is how a
+# stale-high number would later hide a regrowth). Regenerate with
+#     scripts/validate-iac.sh --refresh-platform-inventory
+# diff: lib.sh 0
+# diff: update.sh 8
+# diff: deploy-local.sh 510
+# diff: configure-platform.sh 193
+# diff: generate-from-env.sh 121
+#
 scripts/bootstrap.sh
 scripts/check-feature-flag-coverage.mjs
 scripts/ci-update-manifest-tags.sh
@@ -19,7 +32,6 @@ scripts/deploy-local.sh
 scripts/dev-start.sh
 scripts/generate-admin-config.sh
 scripts/generate-from-env.sh
-scripts/get-kubeconfig.sh
 scripts/health-check.sh
 scripts/infra-repo.sh
 scripts/init/build-ui.sh
@@ -29,7 +41,6 @@ scripts/init/setup.sh
 scripts/init/start-local.sh
 scripts/init/test_server.py
 scripts/lib.sh
-scripts/restore-from-truenas.sh
 scripts/scaffold-page.mjs
 scripts/setup-onedev.sh
 scripts/sync-console-image-tag.mjs

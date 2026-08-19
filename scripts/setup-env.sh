@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# scripts/setup.sh — first-run wizard for a fresh InfraWeaver fork.
+# scripts/setup-env.sh — first-run wizard for a fresh InfraWeaver fork.
+#
+# Renamed from scripts/setup.sh on 2026-08-19. It was never a duplicate of
+# InfraWeaver-platform's scripts/init/setup.sh — that is the init-VM installer
+# entry point, an unrelated program — but the two collided on a basename, which
+# is all the duplicate-script gate can see, so the pair sat in that gate's
+# baseline as a permanent false positive. Renaming, not deleting, was always the
+# resolution; this is it.
 #
 # Prompts for the handful of values a forker must set, writes them into .env
 # (seeded from .env.example), and optionally runs generate-from-env.sh to

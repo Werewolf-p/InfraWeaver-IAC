@@ -39,11 +39,19 @@ jobs:
       - name: Install kubectl (provides kustomize v5)
         uses: azure/setup-kubectl@v4
 
+      # Pinned, like promtool below and ruff in validate-code.yml. `releases/latest`
+      # is the drift class that kept this repo's lint gate red for a week from
+      # 2026-08-07 when ruff 0.16.0 widened its defaults with zero code change.
+      # A schema validator that silently changes version can do worse than turn
+      # red: it can start ACCEPTING what it used to reject.
       - name: Install kubeconform
+        env:
+          KUBECONFORM_VERSION: '0.7.0'
         run: |
           curl -fsSL -o /tmp/kc.tar.gz \
-            https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
           tar -xzf /tmp/kc.tar.gz -C /usr/local/bin kubeconform
+          kubeconform -v
 
       # promtool gates the alerting rules (validate-iac.sh step 5/5). Pinned
       # rather than :latest so a Prometheus release cannot turn CI red on a day
@@ -101,5 +109,19 @@ jobs:
       - name: Validate scheduling rules (stale node/zone references, soft zone rules)
         run: python3 scripts/validate-scheduling.py
 
+      # BLOCKING since 2026-08-19. It was the last `|| true` in this file. It was
+      # promoted only after the script was given anti-vacuity floors and proved
+      # able to FAIL: it now hard-fails on an unparseable manifest, on finding
+      # zero SecretStores (it used to substitute a hardcoded 'openbao', so
+      # deleting the real store made it pass MORE easily), and on finding zero
+      # ExternalSecrets. Measured against HEAD: 1 store discovered, 39 refs
+      # checked. Do NOT re-add `|| true` — an informational gate is a gate that
+      # has already been decided not to matter.
       - name: Validate ESO references
-        run: bash scripts/validate-eso-refs.sh || true   # informational until hardened
+        run: bash scripts/validate-eso-refs.sh
+
+      # platform.yaml drives which Applications sync-groups.sh emits. This
+      # validator existed with ZERO callers until 2026-08-19 — the wiring was the
+      # defect, not the script, so it was wired rather than deleted.
+      - name: Validate platform.yaml (catalog dirs, groups typing, identity shape)
+        run: bash scripts/validate-platform-yaml.sh

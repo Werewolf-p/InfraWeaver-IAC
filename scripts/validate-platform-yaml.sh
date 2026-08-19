@@ -5,6 +5,20 @@
 # Checks:
 #   1. All enabled apps have a catalog directory with catalog.yaml
 #   2. No orphaned catalog entries reference non-existent directories
+#   3. groups.* — enabled is a bool, replicas a positive int, directory exists
+#   4. identity.* — shape + URL fields
+#
+# ⚠️ WHO RUNS THIS: since 2026-08-19, the pre-push hook and CI. Before that,
+# NOTHING did. It was proposed for deletion as a "zero-caller validator" and the
+# deletion was REFUSED: platform.yaml is live — sync-groups.sh reads groups.* and
+# catalog.ha out of it — and this is the only thing that validates it. A gate
+# nobody calls is a wiring defect, not dead code, so it got wired instead of
+# deleted. Pure filesystem: no kubectl, no network, no SSH; ~1s.
+#
+# Measured against HEAD on 2026-08-19: exit 0, 7 apps checked, groups + identity
+# sections valid, 2 warnings (homepage/wazuh rows with no kubernetes/platform/
+# directory — the dead switch surface P3.3 of docs/plans/process-simplification.md
+# removes; warnings, not failures, so wiring it does not block that work).
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

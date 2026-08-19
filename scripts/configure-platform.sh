@@ -325,9 +325,27 @@ fi
 _toggle_monitoring_app "loki" "$ENABLE_LOKI"
 
 # ── 7. Run sync-groups.sh to sync AppSet and companion files ─────────────────
+# --no-commit since 2026-08-19. Without it this call produced an UNREVIEWED
+# `chore: sync groups from platform.yaml [skip ci]` commit on whatever branch the
+# operator happened to be on — in practice `deploy-safe`, the branch ArgoCD
+# trusts. That auto-commit is a measured near-miss, not a theory: on 2026-08-18 it
+# was one push away from committing `minio-velero: enabled: false`, the S3 backend
+# behind every Velero backup, while that app was live and Healthy
+# (sync-groups.sh:508-537 carries the full record). InfraWeaver-platform's call
+# site has passed --no-commit since the fork was deleted
+# (platform configure-platform.sh:473); this was the last bare call path, so after
+# this change NO code path auto-commits.
+#
+# What this gives up: a platform.yaml edit no longer reaches git by itself.
+# kubernetes/bootstrap/ is owned by the `bootstrap` ArgoCD Application, so an
+# uncommitted regeneration simply does not take effect — visible, recoverable
+# drift, instead of an unreviewed commit to the GitOps source of truth.
 if [[ -f "${REPO_DIR}/scripts/sync-groups.sh" ]]; then
     echo "==> Syncing ArgoCD appsets and companion bootstrap files..."
-    bash "${REPO_DIR}/scripts/sync-groups.sh"
+    bash "${REPO_DIR}/scripts/sync-groups.sh" --no-commit
+    echo "==> NOTE: --no-commit. Any regenerated file under kubernetes/bootstrap/ is"
+    echo "    UNCOMMITTED. Review it (git diff) and commit it yourself — ArgoCD"
+    echo "    reconciles that directory from git, not from this working tree."
 fi
 
 echo "==> configure-platform: done"

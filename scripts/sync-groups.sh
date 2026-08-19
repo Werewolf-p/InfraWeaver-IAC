@@ -423,10 +423,128 @@ COMPANIONS = {
     ],
 }
 
-def manage_companions(key, enabled):
-    """Enable or disable companion bootstrap files for a group or app key."""
+# Every filename that appears anywhere in COMPANIONS. A file in this set IS
+# managed by some key (its group's entry counts), so it is not a silent drop.
+MANAGED_COMPANION_FILES = {f for _files in COMPANIONS.values() for f in _files}
+
+def _companion_candidates(app_name):
+    """Bootstrap filenames that would plausibly be this app's companion."""
+    return [f"app-{app_name}.yaml", f"app-{app_name}-manifests.yaml"]
+
+def _exists(fname):
+    p = os.path.join(bootstrap_dir, fname)
+    return os.path.exists(p), os.path.exists(p + '.disabled')
+
+def validate_companion_map():
+    """Refuse to run on a COMPANIONS map that would silently do nothing.
+
+    2026-08-19. `manage_companions` used to `return` — silently, with no output at
+    all — for any key not in COMPANIONS. Measured that day: 7 of the 18
+    app-*.yaml{,.disabled} files in kubernetes/bootstrap/ were in no entry and so
+    could never be toggled, and a mapped-but-missing file printed a warning and
+    exited 0. That is not hypothetical rot: removing n8n needed a NEW COMPANIONS
+    entry before its platform.yaml flag meant anything, because until then the
+    flag was inert AND said nothing. A map that quietly drops entries is how a
+    companion Application stops being managed without anyone noticing.
+
+    This runs BEFORE any companion file is renamed, so a wrong map stops the run
+    instead of half-applying it. It fails only where the map is demonstrably
+    WRONG — a file whose state contradicts its flag, a mapped file that has
+    vanished, a key naming a group/app that no longer exists. An unmapped file
+    that happens to agree with its flag is reported, not fatal: it is a latent
+    trap, and it becomes fatal the moment someone flips that flag.
+    """
+    errors, unmanaged = [], []
+    valid_keys = set(groups) | {
+        f"{g}.{a}" for g, c in groups.items() for a in (c.get('apps') or {})
+    }
+
+    # (1) A mapped file that no longer exists in either form. The map is stale and
+    #     the toggle it promises is a no-op.
+    for key, files in COMPANIONS.items():
+        if key not in valid_keys:
+            errors.append(
+                f"COMPANIONS key '{key}' matches no group or group.app in "
+                f"platform.yaml — it can never fire. Delete it or fix the name.")
+        for fname in files:
+            active, disabled = _exists(fname)
+            if not active and not disabled:
+                errors.append(
+                    f"COMPANIONS['{key}'] lists kubernetes/bootstrap/{fname}, which "
+                    f"exists in NEITHER form (.yaml or .yaml.disabled). The toggle "
+                    f"this entry promises does nothing.")
+
+    # (2) An app key with no COMPANIONS entry whose bootstrap file contradicts the
+    #     flag: the operator asked for a state the generator will not deliver.
+    for g, cfg in groups.items():
+        group_enabled = cfg.get('enabled', False)
+        for a, acfg in (cfg.get('apps') or {}).items():
+            if not acfg:
+                continue
+            key = f"{g}.{a}"
+            if key in COMPANIONS:
+                continue
+            want = acfg.get('enabled', True) if group_enabled else False
+            for cand in _companion_candidates(a):
+                if cand in MANAGED_COMPANION_FILES:
+                    continue          # managed by another key (typically its group)
+                active, disabled = _exists(cand)
+                if not active and not disabled:
+                    continue
+                if active and not want:
+                    errors.append(
+                        f"{key}: platform.yaml says enabled=false, but "
+                        f"kubernetes/bootstrap/{cand} is ACTIVE and no COMPANIONS "
+                        f"entry exists for '{key}'. The flag is inert — the app "
+                        f"stays deployed and this script would say nothing. "
+                        f"Add  \"{key}\": [\"{cand}\"]  to COMPANIONS.")
+                elif disabled and not active and want:
+                    errors.append(
+                        f"{key}: platform.yaml says enabled=true, but "
+                        f"kubernetes/bootstrap/{cand}.disabled is the only form "
+                        f"present and no COMPANIONS entry exists for '{key}'. The "
+                        f"flag is inert — the app stays OFF. "
+                        f"Add  \"{key}\": [\"{cand}\"]  to COMPANIONS.")
+                else:
+                    unmanaged.append(
+                        f"{key} -> kubernetes/bootstrap/{cand}"
+                        f"{'' if active else '.disabled'}")
+    return errors, unmanaged
+
+print("\n==> Validating COMPANIONS map...")
+_comp_errors, _comp_unmanaged = validate_companion_map()
+
+if _comp_unmanaged:
+    print("  ⚠  UNMANAGED companion file(s): present in kubernetes/bootstrap/, named by")
+    print("     no COMPANIONS entry, so their app's platform.yaml flag does not move")
+    print("     them. They currently AGREE with their flag — flip that flag and this")
+    print("     becomes a hard failure:")
+    for _u in _comp_unmanaged:
+        print(f"       - {_u}")
+
+if _comp_errors:
+    print("\n  ✗✗✗ COMPANIONS MAP IS WRONG — this run would have silently done nothing ✗✗✗\n")
+    for _e in _comp_errors:
+        print(f"      - {_e}")
+    print("\n      COMPANIONS lives in scripts/sync-groups.sh. Nothing has been renamed;")
+    print("      this check runs before the companion pass. Refusing to continue: a")
+    print("      generator that reports success while leaving a companion Application")
+    print("      in the wrong state is worse than one that stops.")
+    sys.exit(1)
+print(f"  ✅ COMPANIONS map consistent ({len(COMPANIONS)} keys, "
+      f"{len(MANAGED_COMPANION_FILES)} managed file(s), "
+      f"{len(_comp_unmanaged)} unmanaged)")
+
+def manage_companions(key, enabled, app_name=None):
+    """Enable or disable companion bootstrap files for a group or app key.
+
+    The unmapped case used to `return` with no output. It is now NAMED: see
+    validate_companion_map() above, which has already refused the run if any
+    unmapped key actually contradicts its flag.
+    """
     companions = COMPANIONS.get(key, [])
     if not companions:
+        print(f"  ·  {key}: no companion files mapped (enabled={enabled})")
         return
     print(f"\n  ==> Companion files for {key} (enabled={enabled}):")
     for fname in companions:
@@ -443,7 +561,11 @@ def manage_companions(key, enabled):
             elif os.path.exists(active):
                 print(f"    ⏭  Companion {fname} already active")
             else:
-                print(f"    ⚠  Companion {fname} not found (neither active nor .disabled)")
+                # Unreachable: validate_companion_map() exits 1 on this case
+                # before any rename happens. Kept as a belt-and-braces refusal
+                # rather than the warn-and-continue this used to be.
+                sys.exit(f"    ✗ Companion {fname} not found (neither active nor "
+                         f".disabled) — COMPANIONS['{key}'] is stale.")
         else:
             if os.path.exists(active):
                 if dry_run:
@@ -455,7 +577,8 @@ def manage_companions(key, enabled):
             elif os.path.exists(disabled):
                 print(f"    ⏭  Companion {fname} already disabled")
             else:
-                print(f"    ⚠  Companion {fname} not found (neither active nor .disabled)")
+                sys.exit(f"    ✗ Companion {fname} not found (neither active nor "
+                         f".disabled) — COMPANIONS['{key}'] is stale.")
 
 print("\n==> Processing companion bootstrap files...")
 for group_name, group_cfg in groups.items():
@@ -470,12 +593,12 @@ for group_name, group_cfg in groups.items():
                 continue
             app_enabled = app_cfg.get('enabled', True)
             companion_key = f"{group_name}.{app_name}"
-            manage_companions(companion_key, app_enabled)
+            manage_companions(companion_key, app_enabled, app_name)
     else:
         # When whole group is disabled, disable all per-app companions too
         for app_name in (group_cfg.get('apps') or {}):
             companion_key = f"{group_name}.{app_name}"
-            manage_companions(companion_key, False)
+            manage_companions(companion_key, False, app_name)
 
 # ── Process catalog ha: replicas ──────────────────────────────────────────────
 print("\n==> Processing catalog HA replicas...")
