@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# ⚠️ THIS VALIDATOR HAS NEVER RUN, AND IT CURRENTLY FAILS. Read before wiring it.
+# Resolved 2026-08-19 by the operator: `access_level` is a STALE requirement.
 #
-# Proposed for deletion 2026-08-19 as a "zero-caller validator". REFUSED: it was
-# run, and it found four real disagreements in a file that is on the deploy path
-# (scripts/deploy/set-user-passwords.sh:27, scripts/deploy/configure-authentik.sh:98)
-# AND is named as the access register in docs/compliance/information-security-policy.md.
-# Deleting it would have deleted the only thing that can see them.
+# The open question was whether the four users without it were broken data or a
+# superseded contract. It is the contract. `access_level` is read in exactly one
+# way everywhere it appears — `== "admin"` (configure-authentik.sh:98,
+# generate-admin-config.sh:40, send-deploy-email.py:153/194) — so its absence
+# already means "not an admin", which is both the intended state for these users
+# and the fail-safe direction. Authority now lives in `role_assignments`.
 #
-# MEASURED 2026-08-19 — `bash scripts/validate-users-yaml.sh` exits 1 with:
-#     User 'sindala':        missing required field 'access_level'
-#     User 'koen1':          missing required field 'access_level'
-#     User 'zonnevaarwater': missing required field 'access_level'
-#     User 'Yona':           missing required field 'access_level'
-#   4 of the 5 users in users.yaml omit it. All four DO carry `role_assignments`,
-#   the newer RBAC shape, and configure-authentik.sh only reads access_level to
-#   detect `admin` — so absence behaves as "not an admin", which may well be the
-#   intended state.
+# It was also never one contract: this file called the valid set
+# {admin, user, readonly}, users.example.yaml documents `admin | viewer`, and
+# send-welcome-email.py:48 defaults to `platform-user`. Three vocabularies for
+# one field is itself the evidence that it stopped being load-bearing.
 #
-# SO THE OPEN QUESTION IS NOT "is the data broken" BUT "is this contract stale":
-# either `access_level` is still required (fix the four entries) or
-# `role_assignments` superseded it (drop it from REQUIRED_FIELDS here). That is
-# an access-control decision for the operator, not something to guess, which is
-# why this file is neither deleted nor wired into pre-push/CI yet. Wiring it
-# unresolved would block every push in the repo.
+# So: `email` is required, `access_level` is optional and still validated when
+# present (a typo must not silently confer or drop admin). Absence is legal.
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # scripts/validate-users-yaml.sh — Validate users.yaml schema
 #
-# Required fields per user: username, email, access_level
-# Valid access_levels: admin, user, readonly
+# Required per user: email. Optional: access_level (validated when present).
+# A WordPress site role must be backed by a matching role_assignment scope.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -49,7 +41,7 @@ echo "==> Validating $USERS_FILE..."
 python3 << 'PYEOF'
 import yaml, sys
 
-REQUIRED_FIELDS = ['email', 'access_level']
+REQUIRED_FIELDS = ['email']
 VALID_ACCESS_LEVELS = {'admin', 'user', 'readonly', 'operator', 'platform-user'}
 
 try:
@@ -88,6 +80,17 @@ for username, cfg in users.items():
     if email and '@' not in email:
         print(f"  ❌ User '{username}': invalid email '{email}'")
         errors += 1
+
+    # `wordpress_site_roles` only REMEMBERS the exact WordPress role; the grant
+    # that authorises it is the role_assignment. An entry without one is inert
+    # (the addon clamps it to the audited tier), so this is not a privilege hole
+    # — it is drift, and it reads to a human as access that was never granted.
+    scopes = {a.get('scope') for a in cfg.get('role_assignments') or [] if isinstance(a, dict)}
+    for site in (cfg.get('wordpress_site_roles') or {}):
+        if f'/wordpress/sites/{site}' not in scopes:
+            print(f"  ❌ User '{username}': wordpress_site_roles['{site}'] has no matching "
+                  f"role_assignment scope '/wordpress/sites/{site}'")
+            errors += 1
 
 if errors == 0:
     print(f"✅ users.yaml validation passed ({len(users)} user(s))")
