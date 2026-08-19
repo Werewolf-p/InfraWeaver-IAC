@@ -15,6 +15,11 @@ on:
       - "scripts/fleet-topology.yaml"
       - "scripts/validate-openbao-policy-drift.sh"
       - "scripts/deploy/bootstrap-openbao.sh"
+      # Gate 7's input. A PR that edits the snapshot, or edits any script whose
+      # basename could collide with InfraWeaver-platform's tree, must re-run the
+      # duplicate-script gate.
+      - "scripts/platform-scripts.inventory"
+      - "scripts/**"
       - ".github/workflows/validate-iac.yml"
   push:
     branches: [main]
@@ -60,7 +65,12 @@ jobs:
       - name: Install PyYAML (manifest-parsing gates)
         run: python3 -m pip install --quiet pyyaml
 
-      - name: Validate IaC (render + schema + secret-leak + cron-secret + alert-rule gates)
+      # Gates 1/2/5 need kubeconform and promtool, installed above. Since
+      # 2026-08-19 a MISSING tool is no longer a silent skip: validate-iac.sh
+      # ends INCOMPLETE with exit 1 rather than printing PASSED, so a broken
+      # install step above can no longer let this job go green on a partial run.
+      # Never set IAC_ALLOW_SKIPPED_GATES here.
+      - name: Validate IaC (render + schema + secret-leak + cron-secret + alert-rule + duplicate-script gates)
         run: bash scripts/validate-iac.sh
 
       - name: Validate NetworkPolicy ports (pod-port vs Service-port gate)

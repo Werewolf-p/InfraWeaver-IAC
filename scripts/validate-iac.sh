@@ -40,14 +40,40 @@
 #                         DoS on login: any caller can pick a victim address. The
 #                         warning and the mount shipped in the same commit once
 #                         already, which is why this is a gate and not a comment.
+#   7. duplicate-script gate — a script basename may not exist in BOTH this repo's
+#                         scripts/ tree and InfraWeaver-platform's. See the long
+#                         note at DUP_SCRIPT_* below; this is the gate that stops
+#                         a deleted duplicate from being resurrected by the next
+#                         blanket restore commit.
+#
+# ── A SKIPPED GATE IS NOT A PASSED GATE ──────────────────────────────────────
+# Gates 1, 2 and 5 depend on tools (kubeconform, promtool) that a laptop may not
+# have. Until 2026-08-19 they printed "not installed — skipping" and left FAILED
+# untouched, so the script ended with "IaC validation PASSED" and exit 0 while
+# promtool `check rules` and FIVE alert unit-test files had not run at all. That
+# is why CI stayed red for four commits while every local run reported PASSED.
+# Every such skip is now recorded in SKIPPED[], reprinted in the summary, and
+# ends the run as INCOMPLETE with exit 1. Accept a partial run explicitly with
+# IAC_ALLOW_SKIPPED_GATES=1 — it still refuses to print "PASSED".
 #
 # Usage: scripts/validate-iac.sh [--repo-root <path>]
-# Exit non-zero on any failure (CI-friendly).
+#        scripts/validate-iac.sh --duplicate-scripts-only     # gate 7 alone (fast)
+#        scripts/validate-iac.sh --refresh-platform-inventory # re-snapshot gate 7's input
+# Exit non-zero on any failure OR any skipped gate (CI-friendly).
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[[ "${1:-}" == "--repo-root" ]] && REPO_ROOT="$2"
+DUP_ONLY=false
+REFRESH_INVENTORY=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo-root)                 REPO_ROOT="$2"; shift 2 ;;
+    --duplicate-scripts-only)    DUP_ONLY=true; shift ;;
+    --refresh-platform-inventory) REFRESH_INVENTORY=true; shift ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
 cd "$REPO_ROOT" || exit 1
 
 KUSTOMIZE=(kubectl kustomize)
@@ -57,6 +83,15 @@ KUSTOMIZE=(kubectl kustomize)
 # with "missing 'kind' key". Nothing under a dot-directory is a Kubernetes manifest.
 KUBECONFORM_FLAGS=(-strict -ignore-missing-schemas -summary -ignore-filename-pattern '/\.')
 FAILED=0
+
+# Gates that did not run because a tool was missing. Recorded, printed inline as
+# "⚠ SKIPPED", reprinted in the summary, and fatal by default — see the header.
+SKIPPED=()
+note_skip() {  # note_skip "<gate> — <what did not run>" "<how to fix>"
+  SKIPPED+=("$1 → $2")
+  echo "  ⚠ SKIPPED — $1"
+  echo "            fix: $2"
+}
 
 # Known pre-existing raw Secrets pending migration to ExternalSecret/OpenBao.
 # DO NOT add to this list — fix the secret instead. Remove entries as migrated.
@@ -83,15 +118,325 @@ SECRET_BASELINE=()
 # credential and needs no entry.
 PLACEHOLDER_EXEMPT=()
 
-echo "── 1/6 kustomize build (overlays) ───────────────────────────────────────"
+# ── Gate 7 configuration: duplicate ops scripts across the two repos ─────────
+#
+# WHY THIS GATE EXISTS. `scripts/sync-groups.sh` existed in BOTH this repo and
+# InfraWeaver-platform. Platform's was a frozen 2026-06-14 snapshot and it was the
+# copy on the LIVE deploy path (platform deploy-local.sh:704 →
+# configure-platform.sh:435), running AFTER deploy-local.sh:210 rsyncs this repo's
+# kubernetes/ tree into the platform checkout, with step 6 then applying
+# kubernetes/bootstrap/*.yaml to the cluster. So the stale generator's output
+# reached the live cluster on every local deploy: it emitted
+# `repoURL: https://github.com/your-org/your-repo.git` — the trigger of the
+# 2026-06-30 self-inflicted cascade-delete outage — and 0 of 11 Kyverno
+# ignoreDifferences, and its `git add -A` swept unrelated files into an unreviewed
+# auto-commit. The same duplication class cost 12 hours of OpenBao downtime on
+# 2026-08-06 (two copies of bootstrap-openbao.sh holding different halves of one
+# ACL, and `bao policy write` is a full REPLACE).
+#
+# Both were consolidated (infra d0064e5 / platform 2debaff8). Neither deletion
+# stays deleted on its own: platform's copy of sync-groups.sh had ALREADY been
+# resurrected once, by the blanket restore commit 3728d3f6. A comment cannot stop
+# the next blanket restore. This gate can.
+#
+# HOW IT SEES A REPO CI DOES NOT CHECK OUT. CI runs `actions/checkout@v4` on this
+# repo only, so a gate that compares against a live platform checkout would find
+# none and skip — which is the exact bug this whole change is fixing. Instead the
+# gate's input is a COMMITTED snapshot, scripts/platform-scripts.inventory, which
+# is always present and always compared. When a platform checkout IS resolvable
+# the gate additionally recomputes the list live and FAILS if the snapshot has
+# drifted, so the snapshot cannot rot unnoticed on any machine that has both.
+#
+# RATCHET, like SECRET_BASELINE above. A pair listed in DUP_SCRIPT_BASELINE is
+# tolerated; anything else FAILS. And an entry that is NO LONGER duplicated also
+# FAILS ("stale entry — delete this line"), so the list can only shrink, and a
+# basename removed from it can never come back quietly.
+
+# Pairs that MUST exist in both repos. Each needs a reason. Keep this tiny.
+DUP_SCRIPT_DELIBERATE=(
+  # lib.sh — the shared bash shim (72 lines, no dependencies of its own). Every
+  # script in both repos starts with `source "$(dirname "$0")/lib.sh"`, and
+  # platform's deploy-local.sh:51 sources it as the CWD-relative "scripts/lib.sh".
+  # Pointing those at a foreign checkout would make every platform script
+  # unrunnable without an infra clone — strictly worse than one 72-line copy. The
+  # two are kept BYTE-IDENTICAL (converged 2026-08-19); if they ever differ, that
+  # is drift and this entry should be revisited, not widened.
+  "lib.sh"
+  # update.sh — each repo's own self-updater. It fetches THIS repo's remote and
+  # rebuilds from `$(dirname "$0")/..`, so infra's copy updates infra and
+  # platform's updates platform; they hardcode different GitHub URLs on purpose.
+  # A single shared copy could not update the repo it does not live in.
+  "update.sh"
+)
+
+# Known-outstanding duplicates that predate this gate. DO NOT ADD — de-duplicate
+# instead. Format: "<basename>  # <why it is still here / what closes it>"
+DUP_SCRIPT_BASELINE=(
+  # ── The 4 severe-drift pairs. Merge direction decided per file first.
+  "deploy-local.sh"          # diff 453 and platform's is NEWER — the merge reverses; needs its own session (plan C4)
+  "configure-platform.sh"    # itself a fork, diff ~132 (plan C4)
+  "generate-from-env.sh"     # diff 121 (plan C4)
+  # ── The init-VM wizard. PLATFORM owns it: README.md publishes
+  #    raw.githubusercontent.com/.../InfraWeaver-platform/main/scripts/init/setup.sh
+  #    as the documented one-liner installer, and build-ui.sh's APP_DIR resolves to
+  #    <repo>/apps/infraweaver-init, which exists in platform and NOT in infra
+  #    (infra's copy computes <infra>/scripts/apps/infraweaver-init — a path that has
+  #    never existed). Infra's tree is also nested one level too deep at
+  #    scripts/init/init/, so every caller string inside it ("scripts/init/server.py")
+  #    points at a path infra does not have. Closed by plan C3: delete infra's
+  #    scripts/init/init/** (6,898 lines), not platform's.
+  "build-ui.sh"
+  "create-init-vm.sh"
+  "server.py"
+  "setup.sh"
+  "start-local.sh"
+  # ── get-kubeconfig.sh: byte-identical, but NOT safe to defer. It derives
+  #    REPO_ROOT from its own directory and then reads $REPO_ROOT/terraform and
+  #    $REPO_ROOT/envs/<env>/generated/talosconfig. Those live in the PLATFORM
+  #    checkout at deploy time (platform .gitignore:48-50 ignores /terraform/,
+  #    /kubernetes/, /envs/ because deploy-local.sh:203 rsyncs them in, and
+  #    deploy-local.sh:571 writes talosconfig to platform's envs/). Measured
+  #    2026-08-19: infra's envs/ontwikkel/generated/ holds only .gitkeep and infra
+  #    has no terraform state, so calling infra's copy would hand the operator a
+  #    missing or stale kubeconfig for a live cluster. Closed by giving infra's copy
+  #    a --repo-root override (the sync-groups.sh pattern), THEN deleting platform's.
+  "get-kubeconfig.sh"
+  # ── Remaining drifted pairs, smallest first. Each is "diff, pick the survivor,
+  #    delete the other, point the caller at it" — no analysis blockers known.
+  "bootstrap-externalsecrets.sh"  # diff 24
+  "configure-authentik.sh"        # diff 289
+  "configure-oidc.sh"             # diff 193
+  "deploy-argocd.sh"              # diff 21
+  "ensure-cloudflare-dns.sh"      # diff 60
+  "install-tools.sh"              # diff 24
+  "new-app.sh"                    # diff 24
+  "restore-from-truenas.sh"       # diff 14 — platform's adds onedev-data; confirm OneDev's retirement first
+  "seed-catalog-secrets.sh"       # diff 82
+  "seed-openbao-platform.sh"      # diff 20
+  "send-deploy-email.py"          # diff 82
+  "send-welcome-email.py"         # diff 14 — infra's is newer (08-14 ruff fix); platform's is only reached via CWD-relative calls
+  "set-user-passwords.sh"         # diff 21
+)
+
+# Snapshot of InfraWeaver-platform's script inventory. Regenerate with
+#   scripts/validate-iac.sh --refresh-platform-inventory
+# on a machine that has both checkouts.
+PLATFORM_INVENTORY="scripts/platform-scripts.inventory"
+
+# Files counted as "a script" in either tree. Build output, caches and vendored
+# trees are excluded by path so committed Next.js chunks under
+# platform/scripts/init/out/ are not mistaken for ops scripts.
+DUP_SCRIPT_EXT_RE='\.(sh|bash|py|mjs|cjs|js|ts|pl|rb)$'
+DUP_SCRIPT_SKIP_RE='(^|/)(out|dist|build|node_modules|__pycache__|\.ruff_cache|\.impeccable|\.next|\.venv)/'
+
+# Emit the script inventory of a repo checkout, one relative path per line, sorted.
+# Uses `git ls-files`: a duplicate only "comes back" by being committed, and the
+# snapshot must be comparable to the same thing on the other side.
+dup_script_list() {  # dup_script_list <repo-root>
+  git -C "$1" ls-files scripts 2>/dev/null \
+    | grep -Ev "$DUP_SCRIPT_SKIP_RE" \
+    | grep -E "$DUP_SCRIPT_EXT_RE" \
+    | LC_ALL=C sort
+}
+
+# First resolvable InfraWeaver-platform checkout, or empty. Same resolver chain as
+# platform's configure-platform.sh uses for this repo, inverted.
+resolve_platform_repo() {
+  local c
+  for c in "${INFRAWEAVER_PLATFORM_REPO:-}" "${PLATFORM_DIR:-}" \
+           "$REPO_ROOT/../InfraWeaver-platform" "$HOME/InfraWeaver-platform" \
+           "/opt/InfraWeaver-platform"; do
+    [[ -n "$c" && -d "$c/.git" && -d "$c/scripts" ]] || continue
+    (cd "$c" && pwd); return 0
+  done
+  return 1
+}
+
+write_platform_inventory() {  # write_platform_inventory <platform-root>
+  local p="$1"
+  {
+    echo "# InfraWeaver-platform script inventory — INPUT TO scripts/validate-iac.sh GATE 7."
+    echo "#"
+    echo "# One git-tracked script path per line, relative to the platform repo root."
+    echo "# This file exists because CI checks out THIS repo only: without it the"
+    echo "# duplicate-script gate would find no platform tree and skip, which is the"
+    echo "# failure mode it was written to prevent. Do not hand-edit — regenerate with"
+    echo "#     scripts/validate-iac.sh --refresh-platform-inventory"
+    echo "# on a machine that has both checkouts. The gate FAILS if a live platform"
+    echo "# checkout is present and disagrees with this snapshot."
+    echo "#"
+    echo "# source:    InfraWeaver-platform $(git -C "$p" rev-parse --short HEAD 2>/dev/null || echo '<unknown>')"
+    echo "# committed: $(git -C "$p" log -1 --format=%cI 2>/dev/null || echo '<unknown>')"
+    echo "# snapshot:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    dup_script_list "$p"
+  } > "$PLATFORM_INVENTORY"
+}
+
+# ── Gate 7 body (also runnable alone via --duplicate-scripts-only) ───────────
+gate_duplicate_scripts() {
+  echo "── 7/7 duplicate-script gate (infra scripts/ vs InfraWeaver-platform scripts/) ─"
+
+  if [[ ! -f "$PLATFORM_INVENTORY" ]]; then
+    echo "  ✗ $PLATFORM_INVENTORY is missing — this gate is not guarding anything."
+    echo "      Regenerate it:  scripts/validate-iac.sh --refresh-platform-inventory"
+    FAILED=1; return
+  fi
+
+  local plat_repo="" mode
+  plat_repo="$(resolve_platform_repo || true)"
+
+  local snap_list live_list
+  snap_list="$(grep -v '^[[:space:]]*#' "$PLATFORM_INVENTORY" | grep -v '^[[:space:]]*$' | LC_ALL=C sort)"
+  if [[ -z "$snap_list" ]]; then
+    echo "  ✗ $PLATFORM_INVENTORY contains no entries — an empty inventory cannot fail,"
+    echo "      which makes this gate a no-op. Regenerate it:"
+    echo "      scripts/validate-iac.sh --refresh-platform-inventory"
+    FAILED=1; return
+  fi
+
+  # Staleness is recorded, NOT returned on. A resurrected duplicate makes the
+  # snapshot stale too, and "refresh the inventory" would be the wrong headline
+  # for "you just re-added sync-groups.sh". Duplicates are reported first, below.
+  local stale_inventory=false
+  if [[ -n "$plat_repo" ]]; then
+    mode="live checkout $plat_repo @ $(git -C "$plat_repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    live_list="$(dup_script_list "$plat_repo")"
+    [[ "$live_list" != "$snap_list" ]] && stale_inventory=true
+  else
+    mode="committed snapshot ($(grep -m1 '^# source:' "$PLATFORM_INVENTORY" | sed 's/^# source:[[:space:]]*//'), taken $(grep -m1 '^# snapshot:' "$PLATFORM_INVENTORY" | sed 's/^# snapshot:[[:space:]]*//'))"
+    echo "  · no InfraWeaver-platform checkout found (tried \$INFRAWEAVER_PLATFORM_REPO,"
+    echo "    \$PLATFORM_DIR, ../InfraWeaver-platform, \$HOME/InfraWeaver-platform,"
+    echo "    /opt/InfraWeaver-platform) — this gate still RUNS, against the snapshot."
+    live_list="$snap_list"
+  fi
+  echo "  · comparing against: $mode"
+
+  local infra_list
+  infra_list="$(dup_script_list "$REPO_ROOT")"
+  if [[ -z "$infra_list" ]]; then
+    echo "  ✗ no scripts found in this repo's scripts/ tree — the comparison is empty,"
+    echo "      so this gate cannot fail. Is git available and is $REPO_ROOT a checkout?"
+    FAILED=1; return
+  fi
+
+  # basename → path, for both sides (first path wins; the message names one).
+  local dupes
+  dupes="$(LC_ALL=C comm -12 \
+    <(echo "$infra_list" | sed 's#.*/##' | LC_ALL=C sort -u) \
+    <(echo "$live_list"  | sed 's#.*/##' | LC_ALL=C sort -u))"
+
+  local allowed=() b p_infra p_plat new_dupes=() stale=()
+  allowed=("${DUP_SCRIPT_DELIBERATE[@]}" "${DUP_SCRIPT_BASELINE[@]}")
+
+  while read -r b; do
+    [[ -n "$b" ]] || continue
+    printf '%s\n' "${allowed[@]}" | grep -qxF "$b" || new_dupes+=("$b")
+  done <<< "$dupes"
+
+  # Ratchet: an allowlisted pair that is no longer a pair must leave the list,
+  # otherwise deleting a duplicate silently re-authorises its resurrection.
+  for b in "${allowed[@]}"; do
+    grep -qxF "$b" <<< "$dupes" || stale+=("$b")
+  done
+
+  if (( ${#new_dupes[@]} > 0 )); then
+    echo ""
+    echo "  ✗✗✗ DUPLICATED OPS SCRIPT — ${#new_dupes[@]} basename(s) exist in BOTH repos ✗✗✗"
+    echo ""
+    for b in "${new_dupes[@]}"; do
+      p_infra="$(echo "$infra_list" | grep -m1 "/$b\$")"
+      p_plat="$(echo "$live_list"  | grep -m1 "/$b\$")"
+      echo "      $b"
+      echo "        infra:    $p_infra"
+      echo "        platform: $p_plat"
+    done
+    echo ""
+    echo "      Two copies of an ops script is this platform's most expensive recurring"
+    echo "      defect. sync-groups.sh: platform's frozen 2026-06-14 fork sat on the LIVE"
+    echo "      deploy path and applied 'repoURL: https://github.com/your-org/your-repo.git'"
+    echo "      to the cluster — the 2026-06-30 cascade-delete outage — plus 0 of 11 Kyverno"
+    echo "      ignoreDifferences. bootstrap-openbao.sh: two copies held different halves of"
+    echo "      one OpenBao ACL and 'bao policy write' is a full REPLACE → 12 hours of"
+    echo "      Degraded apps on 2026-08-06. Both copies looked fine in isolation."
+    echo ""
+    echo "      WHAT TO DO — pick ONE surviving copy, delete the other, and point the"
+    echo "      caller at the survivor. The established pattern is platform"
+    echo "      configure-platform.sh:435 and deploy-local.sh:774-790: resolve an infra"
+    echo "      checkout, die loudly with a 'do NOT copy it back' message if absent, and"
+    echo "      invoke the one real script. Do NOT re-add the copy."
+    echo ""
+    echo "      If a pair genuinely must exist twice, add it to DUP_SCRIPT_DELIBERATE in"
+    echo "      $(basename "${BASH_SOURCE[0]}") WITH the reason. DUP_SCRIPT_BASELINE is"
+    echo "      closed — it may only shrink."
+    FAILED=1
+  fi
+
+  if (( ${#stale[@]} > 0 )); then
+    echo ""
+    echo "  ✗ ${#stale[@]} allowlist entr(y|ies) name a pair that is NO LONGER duplicated:"
+    printf '      %s\n' "${stale[@]}"
+    echo "      Delete those lines from DUP_SCRIPT_DELIBERATE / DUP_SCRIPT_BASELINE in"
+    echo "      $(basename "${BASH_SOURCE[0]}"). Leaving them there would silently"
+    echo "      re-authorise the duplicate the moment someone restores it."
+    FAILED=1
+  fi
+
+  if $stale_inventory; then
+    echo ""
+    echo "  ✗ $PLATFORM_INVENTORY is STALE — the live platform checkout disagrees with it."
+    echo "      The snapshot is this gate's ONLY input in CI, which checks out no platform"
+    echo "      tree; letting it rot is how the gate would go blind. Refresh and commit:"
+    echo "        scripts/validate-iac.sh --refresh-platform-inventory"
+    echo "      Drift ( -snapshot / +live ):"
+    diff <(echo "$snap_list") <(echo "$live_list") | grep -E '^[<>]' | sed 's/^</      -/; s/^>/      +/'
+    FAILED=1
+  fi
+
+  if (( ${#new_dupes[@]} == 0 && ${#stale[@]} == 0 )) && ! $stale_inventory; then
+    echo "  ✓ no undeclared duplicate script basenames" \
+         "(deliberate: ${#DUP_SCRIPT_DELIBERATE[@]}, baseline: ${#DUP_SCRIPT_BASELINE[@]}," \
+         "infra: $(echo "$infra_list" | wc -l), platform: $(echo "$live_list" | wc -l))"
+  fi
+}
+
+if $REFRESH_INVENTORY; then
+  PLAT="$(resolve_platform_repo || true)"
+  if [[ -z "$PLAT" ]]; then
+    echo "✗ --refresh-platform-inventory needs an InfraWeaver-platform checkout." >&2
+    echo "  Tried \$INFRAWEAVER_PLATFORM_REPO, \$PLATFORM_DIR, $REPO_ROOT/../InfraWeaver-platform," >&2
+    echo "  \$HOME/InfraWeaver-platform, /opt/InfraWeaver-platform." >&2
+    exit 1
+  fi
+  write_platform_inventory "$PLAT"
+  echo "✓ wrote $PLATFORM_INVENTORY from $PLAT" \
+       "($(grep -cv '^#' "$PLATFORM_INVENTORY") script(s)) — commit it."
+  exit 0
+fi
+
+if $DUP_ONLY; then
+  gate_duplicate_scripts
+  echo "──────────────────────────────────────────────────────────────────────────"
+  [[ $FAILED -eq 0 ]] && echo "duplicate-script gate PASSED" || echo "duplicate-script gate FAILED"
+  exit $FAILED
+fi
+
+echo "── 1/7 kustomize build (overlays) ───────────────────────────────────────"
+# Resolved ONCE, and its absence is recorded rather than silently skipped in two
+# separate places (it used to vanish entirely from gate 1's output).
+HAVE_KUBECONFORM=false
+command -v kubeconform >/dev/null 2>&1 && HAVE_KUBECONFORM=true
+KUBECONFORM_FIX="install kubeconform (CI does: see .github/workflows/validate-iac.yml)"
+
 mapfile -t OVERLAYS < <(find kubernetes -type f -path '*/overlays/*/kustomization.yaml' -printf '%h\n' | sort -u)
 if [[ ${#OVERLAYS[@]} -eq 0 ]]; then
-  echo "  (no overlays yet — skipping)"
+  # Not a tooling skip: there is genuinely nothing to render. Still worth saying
+  # out loud, because "0 overlays" and "all overlays passed" look identical.
+  echo "  (no overlays found under kubernetes/**/overlays/ — nothing to render)"
 fi
 for d in "${OVERLAYS[@]}"; do
   if "${KUSTOMIZE[@]}" "$d" >/tmp/iac-render.yaml 2>/tmp/iac-err.txt; then
     echo "  ✓ $d"
-    if command -v kubeconform >/dev/null 2>&1; then
+    if $HAVE_KUBECONFORM; then
       kubeconform "${KUBECONFORM_FLAGS[@]}" /tmp/iac-render.yaml >/tmp/kc.txt 2>&1 \
         && echo "    ✓ kubeconform" \
         || { echo "    ✗ kubeconform:"; sed 's/^/      /' /tmp/kc.txt; FAILED=1; }
@@ -100,9 +445,12 @@ for d in "${OVERLAYS[@]}"; do
     echo "  ✗ $d"; sed 's/^/    /' /tmp/iac-err.txt; FAILED=1
   fi
 done
+$HAVE_KUBECONFORM || note_skip \
+  "1/7 — schema validation of ${#OVERLAYS[@]} rendered overlay(s): kubeconform not installed" \
+  "$KUBECONFORM_FIX"
 
-echo "── 2/6 kubeconform (flat manifest dirs without overlays) ─────────────────"
-if command -v kubeconform >/dev/null 2>&1; then
+echo "── 2/7 kubeconform (flat manifest dirs without overlays) ─────────────────"
+if $HAVE_KUBECONFORM; then
   mapfile -t FLAT < <(find kubernetes -type d -name manifests | sort)
   for d in "${FLAT[@]}"; do
     kubeconform "${KUBECONFORM_FLAGS[@]}" "$d" >/tmp/kc.txt 2>&1 \
@@ -110,10 +458,11 @@ if command -v kubeconform >/dev/null 2>&1; then
       || { echo "  ✗ $d:"; sed 's/^/    /' /tmp/kc.txt; FAILED=1; }
   done
 else
-  echo "  kubeconform not installed — skipping (CI installs it)"
+  note_skip "2/7 — kubeconform not installed, no flat manifest dir was schema-checked" \
+            "$KUBECONFORM_FIX"
 fi
 
-echo "── 3/6 secret-leak gate ──────────────────────────────────────────────────"
+echo "── 3/7 secret-leak gate ──────────────────────────────────────────────────"
 LEAKS="$(BASELINE="${SECRET_BASELINE[*]}" EXEMPT="${PLACEHOLDER_EXEMPT[*]}" python3 - << 'PY'
 import glob, yaml, os
 baseline = set(os.environ.get("BASELINE","").split())
@@ -163,7 +512,7 @@ else
   echo "  ✓ no committed secrets or write-me placeholders (baseline: ${#SECRET_BASELINE[@]}, exempt: ${#PLACEHOLDER_EXEMPT[@]})"
 fi
 
-echo "── 4/6 cron-secret seed gate ─────────────────────────────────────────────"
+echo "── 4/7 cron-secret seed gate ─────────────────────────────────────────────"
 CRON_GAPS="$(python3 - << 'PY'
 import glob, yaml
 
@@ -324,7 +673,7 @@ else
   echo "  ✓ every workload secret key is declared in its catalog.yaml AND produced by an ExternalSecret"
 fi
 
-echo "── 5/6 alerting rules (promtool + duplicate scan) ────────────────────────"
+echo "── 5/7 alerting rules (promtool + duplicate scan) ────────────────────────"
 # Alerting rules used to have no gate at all. Two real defects shipped through
 # that gap: a >85% node-memory alert existed twice under different alertnames in
 # two files (one condition, two Discord pages, un-inhibitable because
@@ -430,10 +779,17 @@ if command -v promtool >/dev/null 2>&1; then
     fi
   fi
 else
-  echo "  promtool not installed — skipping check/test (CI installs it; see .github/workflows/validate-iac.yml)"
+  # THE SKIP THAT COST FOUR RED COMMITS. This branch used to print one line and
+  # leave FAILED at 0, so a laptop with no promtool ended the whole run with
+  # "IaC validation PASSED" while `promtool check rules` and every *.test.yaml
+  # under kubernetes/monitoring/alerts/tests/ had not executed. CI, which does
+  # install promtool, disagreed — four times.
+  shopt -s nullglob; _NTESTS=(kubernetes/monitoring/alerts/tests/*.test.yaml); shopt -u nullglob
+  note_skip "5/7 — promtool not installed: 'check rules' and ${#_NTESTS[@]} alert unit-test file(s) did NOT run" \
+            "install promtool 3.13.2 (it is in ~/bin here; CI installs it in .github/workflows/validate-iac.yml)"
 fi
 
-echo "── 6/6 armed-blueprint gate ──────────────────────────────────────────────"
+echo "── 6/7 armed-blueprint gate ──────────────────────────────────────────────"
 # A security control that is WRONG is worse than one that is absent, and this
 # repo has already written the proof of it: manifests/blueprints/
 # 70-brute-force-reputation.yaml documents, in its own §3c, that arming the
@@ -473,6 +829,31 @@ else
   FAILED=1
 fi
 
+gate_duplicate_scripts
+
 echo "──────────────────────────────────────────────────────────────────────────"
-[[ $FAILED -eq 0 ]] && echo "IaC validation PASSED" || echo "IaC validation FAILED"
-exit $FAILED
+if (( ${#SKIPPED[@]} > 0 )); then
+  echo ""
+  echo "  ⚠⚠ ${#SKIPPED[@]} GATE(S) DID NOT RUN. This is not a pass — it is an unknown:"
+  printf '      · %s\n' "${SKIPPED[@]}"
+  echo ""
+fi
+
+if [[ $FAILED -ne 0 ]]; then
+  echo "IaC validation FAILED"
+  exit 1
+fi
+if (( ${#SKIPPED[@]} > 0 )); then
+  if [[ "${IAC_ALLOW_SKIPPED_GATES:-0}" == "1" ]]; then
+    echo "IaC validation INCOMPLETE — ${#SKIPPED[@]} gate(s) skipped, everything that ran passed."
+    echo "  (IAC_ALLOW_SKIPPED_GATES=1 — exiting 0 anyway. CI must never set this.)"
+    exit 0
+  fi
+  echo "IaC validation INCOMPLETE — ${#SKIPPED[@]} gate(s) skipped, everything that ran passed."
+  echo "  Install the tool(s) listed above, or accept a partial run explicitly with"
+  echo "  IAC_ALLOW_SKIPPED_GATES=1. A silently-skipped gate is why CI stayed red for"
+  echo "  four commits while every local run reported PASSED."
+  exit 1
+fi
+echo "IaC validation PASSED"
+exit 0

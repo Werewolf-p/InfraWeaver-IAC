@@ -13,7 +13,22 @@
 #
 # Also syncs catalog ha: replicas to catalog application.yaml files.
 #
-# Usage: scripts/sync-groups.sh [--dry-run] [--repo-root <path>]
+# Usage: scripts/sync-groups.sh [--dry-run] [--no-commit] [--repo-root <path>]
+#
+# ⚠️ THIS IS THE ONLY COPY OF THIS GENERATOR. Do not add a second one.
+#   InfraWeaver-platform carried a 2026-06-14 fork of this file until 2026-08-19.
+#   It sat on the live deploy path (platform deploy-local.sh -> configure-platform.sh)
+#   and, measured against a throwaway clone of this repo, it regenerated all four
+#   bootstrap ApplicationSets 91-93 lines SHORTER than the committed ones —
+#   dropping the kyverno policy-CRD ignores, the cilium/hubble cert ignores and the
+#   argocd global.domain param — and emitted
+#   `repoURL: https://github.com/your-org/your-repo.git`, which is exactly the
+#   2026-06-30 self-inflicted cascade-delete outage. Platform's copy is deleted;
+#   its configure-platform.sh now calls THIS file with
+#   `--repo-root <platform checkout> --no-commit`.
+#   Duplicating an ops script is what caused the 2026-08-06 12-hour OpenBao outage
+#   (see platform deploy-local.sh:774-790 for the same "call infra's, never copy"
+#   fix). If you are about to copy this file: don't.
 set -euo pipefail
 
 SCRIPT_NAME="sync-groups"
@@ -21,11 +36,16 @@ SCRIPT_NAME="sync-groups"
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 DRY_RUN=false
+# --no-commit: regenerate files but never stage or commit. Used when --repo-root
+# points at a checkout that is NOT the home of these files — the platform repo
+# git-ignores /kubernetes/, so a commit there is either impossible or wrong.
+NO_COMMIT=false
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
+    --no-commit) NO_COMMIT=true; shift ;;
     --repo-root) REPO_ROOT="$2"; shift 2 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
@@ -40,7 +60,7 @@ if [[ ! -f "$PLATFORM_FILE" ]]; then
   exit 1
 fi
 
-echo "==> sync-groups.sh starting (dry_run=$DRY_RUN, repo=$REPO_ROOT)"
+echo "==> sync-groups.sh starting (dry_run=$DRY_RUN, no_commit=$NO_COMMIT, repo=$REPO_ROOT)"
 
 export DRY_RUN REPO_ROOT PLATFORM_FILE BOOTSTRAP_DIR CHANGED_FILE
 
@@ -486,7 +506,7 @@ else:
 PYEOF
 
 # ── Commit if changes were made ───────────────────────────────────────────────
-if [[ -f "$CHANGED_FILE" ]] && ! $DRY_RUN; then
+if [[ -f "$CHANGED_FILE" ]] && ! $DRY_RUN && ! $NO_COMMIT; then
   cd "$REPO_ROOT"
   # Stage ONLY the files this script computed.
   #
@@ -515,6 +535,9 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
   else
     echo "==> No git changes to commit"
   fi
+elif [[ -f "$CHANGED_FILE" ]] && $NO_COMMIT; then
+  rm -f "$CHANGED_FILE"
+  echo "==> --no-commit: files regenerated in $REPO_ROOT; nothing staged or committed"
 else
   rm -f "$CHANGED_FILE" 2>/dev/null || true
   $DRY_RUN || echo "==> No changes — nothing to commit"

@@ -1827,3 +1827,250 @@ world dir    World   (capital — world-archive.yaml, and Part C's measurement)
 4. The dashboard "Update available" chip (A.9) is not built; the entry point is
    the per-server tool strip.
 5. Nothing is deployed and nothing is pushed.
+
+---
+
+# Part H — Three of G.5's five closed, and two things nobody had measured
+
+> Written 2026-08-19. Commits in `/home/runner/InfraWeaver-platform` (local only,
+> not pushed, nothing deployed): `3a93b06c` the vanilla arm, `9457aad6` the
+> feature flag and the hop, `f7df8fbf` promote takes the hop, `a90a4f3f` the
+> sweep's resumer.
+>
+> The live cluster was READ-ONLY throughout. No server was created, no server was
+> scaled, `gt-new-horizons` was never touched, and no `next build` was run.
+> Every "measured" line below is a `kubectl get`.
+
+## H.1 What shipped
+
+| G.5 item | State | Commit |
+|---|---|---|
+| 3 — the vanilla provider has no route | **CLOSED** | `3a93b06c` |
+| 1 — `rehearsal/promote` needs the datastore hop | **CLOSED** | `f7df8fbf` |
+| 2 — the console→datastore leg is unproven in-cluster | **NOT unproven — BROKEN, and fixed** | `9457aad6` |
+| G.4.4 #9 / G.2 #4 — the sweep cannot resume | **Verified still true; the lie in its wiring fixed; the limitation now stated in code** | `a90a4f3f` |
+| 4 — the dashboard "Update available" chip | not built | — |
+| 5 — nothing deployed, nothing pushed | still true | — |
+
+143 gamehub suites / 3,120 tests green; `tsc --noEmit` exit 0; `eslint` clean on
+every changed file. Every test was written RED first, and five deliberate
+mutations were run and reverted:
+
+| Mutation | Test that failed |
+|---|---|
+| the vanilla feed's pinned fallback returns `[]` | 3 (`…the pinned known-good, labelled, with a warning`) |
+| a vanilla start body is flattened into a `ModpackRef` | 2 (`builds a VANILLA ref … never a modpack one`) |
+| the `unavailable` feed carries no warning | 1 (`no feed is ever both empty and silent`) |
+| the feature gate runs on BOTH sides of the hop again | 1 (`does NOT re-refuse an already-authorized call that arrived on the datastore pod`) |
+| the promote bypass pattern widened to `rehearsal.*` | 5 refusals, incl. `/rehearsal` and `/rehearsal/../power` |
+| the resumer's `seeding` guard removed | 2 (`NEVER re-drives a stalled seed`) |
+
+⚠️ **F.1's warning was honoured**: every new test is under `tests/unit/gamehub/`
+(or `tests/unit/` for the middleware one), which is the only place jest's
+`testMatch` looks, and each was watched failing before it was made to pass.
+
+## H.2 THE ONE NOBODY HAD MEASURED — the hop was dead on arrival
+
+F.7 #2 and G.5 #2 both say the console→datastore leg is "unproven in-cluster".
+It was not merely unproven. Measured on the live cluster, read-only:
+
+```
+$ kubectl get deploy infraweaver-backup -n infraweaver-console \
+    -o jsonpath='{.spec.template.spec.containers[0].env[*].name}'
+AUTHENTIK_CLIENT_ID AUTHENTIK_CLIENT_SECRET AUTHENTIK_ISSUER AUTH_SECRET
+AUTH_TRUST_HOST AUTH_URL BACKUP_DATASTORE_DIR BACKUP_DATASTORE_NAME_PROFILE
+BACKUP_MANIFEST_ENFORCE BACKUP_MANIFEST_KEY BACKUP_MIGRATION_TARGET_DIR
+BACKUP_SERVICE_TOKEN BASE_DOMAIN IW_BACKUP_ROLE NEXTAUTH_SECRET NEXTAUTH_URL
+NEXT_PUBLIC_BASE_DOMAIN NODE_ENV
+
+$ kubectl get deploy infraweaver-console  ... | grep PLATFORM
+PLATFORM_ENABLE_ALL
+```
+
+Eighteen names on the datastore pod, and **not one `GAMEHUB_*`, and no
+`PLATFORM_ENABLE_ALL`**. `backup-deployment.yaml` says its env is deliberately
+minimal, and it is.
+
+Every timeline route opened with
+
+```ts
+const availability = timelineAvailability();
+if (!availability.available) return unavailable(availability.reason);
+```
+
+and `withTimelineRoute` runs its handler on **both** sides of the hop. So that
+check also ran on the datastore pod, where `GAMEHUB_TIMELINE` is unset and
+`platformDefaultFor` (with `PLATFORM_ENABLE_ALL` unset) resolves it **off**.
+Every forwarded capture, restore, verify, protect, delete, inspect, maintenance
+and update-start arrived at the only pod that can do the work and was answered
+`503 World Timeline is unavailable`.
+
+G.4.5's step 2 — "confirm a plain capture of `gt-new-horizons` succeeds through
+the datastore hop" — would have failed, and it would have looked like the feature
+flag was off on the console.
+
+**The fix is a rule, not a second copy of the environment.** `withTimelineRoute`
+now takes a `featureGate` thunk and spends it on the CONSOLE side only: the
+deployment an operator configures, that holds the session and the RBAC grant, and
+that has already refused before it forwards anything. Copying the flags onto the
+datastore pod would create two places that must agree about every future flag
+forever, and the failure mode of that disagreement is a button that 503s only
+after it is pressed. The flag is not a security wall — the service token and the
+RBAC check are — so skipping it after the hop widens nothing. Ten in-handler
+checks across six route files became one option per route.
+
+**Still not proven end to end in-cluster**, because that needs a deploy: the
+`fetch` from a console replica to `infraweaver-backup.infraweaver-console.svc`
+has never been watched for a timeline path. It is the same call every WordPress
+backup makes in production, and the datastore leg is proven (E.3), but the flag
+was the thing standing between them and it was invisible from either side alone.
+
+## H.3 G.5 #1 — promote takes the hop
+
+`rehearsal/promote`'s first act is the MANDATORY rollback capture, through the
+timeline's own `runCapture`, and its failure ABORTS the promotion. It ran under
+`withGameHubAuth` on a console replica, so the one route that decides which mods
+open a live world could not take the rollback point it refuses to proceed
+without.
+
+It now takes the same hop, not a second mechanism: `withTimelineRoute` +
+`proxyToDatastore` from `@/lib/datastore-hop`, with `TIMELINE_PROXY_TIMEOUT_MS`
+(a promote captures a whole world before it touches anything) and its own
+anchored `proxy.ts` bypass — the fifth. Everything after the fork happens on the
+datastore pod: the capture, the stop, the image patch, the lock rollback and the
+restart. E.3 already measured that its ServiceAccount is `infraweaver-console`
+and carries every verb those need in `game-hub`, so **no infra RBAC change**.
+
+The pattern admits `servers/<name>/rehearsal/promote` and nothing else. Starting,
+listing and discarding a rehearsal never reach the chunk store.
+
+**Held by a CENSUS, because a per-route test is what missed this.**
+`tests/unit/gamehub/timeline-capture-hop-census.test.ts` finds every route that
+reaches `runCapture` by reading the tree, and holds three walls for each: the
+gate that forks, the proxy branch that forwards, and the anchored token-guarded
+middleware pattern. Written red, it named exactly the promote route and exactly
+the three walls it lacked. A future route that adds a capture and forgets any of
+them fails here and is named.
+
+## H.4 G.5 #3 — the vanilla arm has a route and a version list
+
+`UpgradeTarget.ref` has carried a vanilla arm since Task 4 and `createBodyFor`
+has built `TYPE=VANILLA` from it since Task 5 — it is the arm G.3's live proof
+actually drove — but `startUpgradeSchema` was `provider: z.literal("gtnh")`, so
+the only body a browser could produce was a modpack one whatever the server ran.
+
+- **The schema is a discriminated union on `provider`.** The vanilla arm carries
+  the Minecraft version itself, bounded to the spellings Mojang publishes
+  (`1.21.4`, `1.21.4-pre1`, `25w03a`); that value becomes the new server's
+  `VERSION` env var, which the itzg image turns into a download.
+- **`upgradeTargetRefFrom`** maps each arm to its ref, pure and asserted. A
+  vanilla body flattened into a `ModpackRef` would install GT New Horizons over
+  somebody's vanilla world on a run whose every other check passes.
+- **`listVanillaVersions`** is the vanilla feed with the SAME never-empty
+  contract `listGtnhVersions` has: unreachable manifest, non-200, or a manifest
+  with no release → the pinned known-good version (`MINECRAFT_PINNED_VERSION`,
+  default `1.21.4` — the version G.3 actually built and booted), labelled
+  `pinned-fallback`, with a warning naming it. It shares `loadManifest` and its
+  cache with the compat reader rather than opening a second answer to "what does
+  Mojang publish". Releases only: a snapshot beside a release invites a one-way
+  world-format upgrade nobody asked for.
+- **`feedProviderFor`** picks the list from what the create path WROTE — the
+  `infraweaver.io/modpack` annotation, absent on plain servers. A CurseForge or
+  FTB pack is no longer served the GTNH list (it was, before); it gets an
+  `unavailable` feed, which has zero rows and therefore ALWAYS carries a
+  sentence. `resolveUpgradeFeed` is its only producer and cannot emit it silent.
+- **`concreteMinecraftVersion`** reads a plain server's current version off its
+  container env, and answers null for `VERSION=LATEST` — that server runs
+  whatever Mojang last published, so `updateAvailable: null` ("unknown, pick
+  one") is the honest answer, not "up to date".
+- The page sends the arm the payload named. The GTNH channel is read off the
+  version id (`2.8.5-java8`) rather than assumed.
+
+**Not done, deliberately:** CurseForge and FTB still have no version source. That
+is Phase 2, and the `unavailable` feed says so out loud rather than offering the
+wrong provider's list.
+
+## H.5 G.2 #4 / G.4.4 #9 — the sweep still only CLOSES, and now it says so honestly
+
+**Verified: still true after H.3, and for a reason that is about deployment, not
+about the hop.** The hop is request-scoped — `proxyToDatastore(req, …)` forwards
+an INBOUND request verbatim to the same path — and the sweep has no inbound
+request per run; its inbound request is `POST /api/game-hub/power-sweep`, a
+six-stage namespace maintenance pass. Measured:
+
+- `game-hub-power-sweep-cronjob.yaml:104` POSTs to the **console** Service, and a
+  console replica does not mount `/datastore`;
+- the datastore pod's 18 env vars (H.2) do **not** include
+  `GAME_HUB_POWER_CRON_TOKEN`, so a tick sent there today is refused by the
+  route's own token check;
+- forwarding the whole sweep would also re-run the five stages the console can
+  and should do itself.
+
+So a cross-pod resume would need three new things: an inbound resume verb, an
+outbound client (the `hydrate-client.ts` shape), and — the one that is a design
+decision rather than wiring — a **driver lease**. A run is declared stalled by
+SILENCE past its phase budget, and `provisioning`'s budget is exactly
+`CAPTURE_TIMEOUT_MS`, so a healthy long phase can be declared abandoned while its
+original driver is still working. Today exactly one driver per run can exist,
+because `decideUpgradeStart` refuses a second start. An automatic resume without
+a lease could put two.
+
+**What WAS fixed is a lie in the wiring.** `resume: async () => isDatastoreRole()`
+answered TRUE on the datastore pod without driving anything, and the engine's
+contract for that boolean is "I advanced this run". `upgradeResumer` now makes it
+mean that: it refuses without touching the run when this process cannot reach the
+world store, and otherwise advances the run by ONE phase (a sweep tick has a
+CronJob budget; a driver holding it for a 420 MB pack install would be reaped
+mid-install — and one phase per tick is what Task 8 asked for).
+
+**It NEVER re-drives a stalled `seeding`, even where it could.** Every other
+phase is safe to enter twice — `capturing` finds the point on the record,
+`provisioning` adopts the server it already made, `stopping-source` is an
+idempotent scale, both boot phases only observe. `seeding` stops the target,
+brings up a WRITABLE companion and unpacks two streams into that volume, so a
+second driver there is the one way this sweep could put two writers on one world.
+`abortUpgrade` refuses the same phase for the same reason. A stalled seed is
+closed with a sentence and the operator decides.
+
+Both deployment facts are now stated in `upgrade/sweep.ts` and in the power-sweep
+route rather than implied. **Giving a sweep tick a path to the datastore pod is
+an operator decision** (a second CronJob, its own token on that pod, and the
+lease question) and is deliberately not taken here.
+
+## H.6 What is still unproven, and why
+
+1. **No GTNH run has ever been performed.** Unchanged from G.4.4 #1. It needs
+   12+12 GiB against a 16 GiB namespace quota, so it requires either stopping the
+   live server or raising the quota — both the operator's call. `game-hub`
+   headroom was checked and nothing was created.
+2. **The console→datastore `fetch` is still unwatched in-cluster** (H.2). The
+   flag that was silently refusing every forwarded call is fixed, but confirming
+   the leg needs a deploy.
+3. **Nothing is deployed and nothing is pushed.** The commits are local on
+   `main` in `/home/runner/InfraWeaver-platform`.
+4. **The vanilla feed's live shape is unwatched.** `listVanillaVersions` is
+   tested against a stubbed manifest; the console pod's actual outbound access to
+   `launchermeta.mojang.com` was not exercised. If it is blocked the list falls
+   back to the pinned row, labelled and warned — which is the designed answer,
+   not a failure.
+5. **Promote has not been run through the hop.** Its unit surface and the census
+   hold the wiring; a real promotion moves a live server to a new image and was
+   not performed on a read-only cluster.
+6. **The sweep's resume path is untested against a cluster** because it is
+   unreachable in this deployment by construction (H.5). Its refusal branch is
+   what runs today, and that is the branch the production behaviour depends on.
+7. Q2 (cross-version GTNH config expectations) and Q4 (whole-file
+   `server.properties` carry) remain open, unchanged from G.4.4.
+
+## H.7 What a fresh worker should do next
+
+1. Rebuild and deploy the console image from `a90a4f3f`. Nothing works in
+   production until it is deployed, and H.2 means the pre-`9457aad6` image cannot
+   have worked at all.
+2. Then G.4.5's step 2 — a plain capture of `gt-new-horizons` through the hop.
+   That single call now proves the console leg, the flag fix and the datastore
+   leg at once.
+3. Then a promote of a rehearsal on a throwaway, which is the same hop with a
+   different verb and the only way to watch H.3 end to end.
+4. Phase 2 items in G.5 (#3's remainder: CurseForge/FTB feeds, the DNS cutover,
+   the dashboard chip) are untouched.

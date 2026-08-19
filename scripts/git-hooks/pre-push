@@ -68,6 +68,17 @@ run_iac_validation() {
   if [ -f "$root/scripts/validate-scheduling.py" ]; then
     python3 "$root/scripts/validate-scheduling.py" --repo-root "$root" || rc=1
   fi
+  # An ops script that exists in BOTH this repo and InfraWeaver-platform. Two
+  # copies of sync-groups.sh put `repoURL: https://github.com/your-org/your-repo.git`
+  # on the live cluster (the 2026-06-30 cascade-delete outage) and two copies of
+  # bootstrap-openbao.sh cost 12 hours of OpenBao downtime on 2026-08-06 — and the
+  # first one came BACK via a blanket restore commit, which is why a comment was
+  # not enough. Runs here as well as in CI because this box is the one with both
+  # checkouts, so it is the only place the gate sees the live platform tree
+  # instead of the committed snapshot. Sub-second; no cluster, no network.
+  if [ -f "$root/scripts/validate-iac.sh" ]; then
+    bash "$root/scripts/validate-iac.sh" --repo-root "$root" --duplicate-scripts-only || rc=1
+  fi
   if [ "$rc" -ne 0 ]; then
     echo "" >&2
     echo "✖ pre-push BLOCKED: IaC validation failed (see above)." >&2
