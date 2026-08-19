@@ -526,10 +526,12 @@ if _comp_errors:
     print("\n  ✗✗✗ COMPANIONS MAP IS WRONG — this run would have silently done nothing ✗✗✗\n")
     for _e in _comp_errors:
         print(f"      - {_e}")
-    print("\n      COMPANIONS lives in scripts/sync-groups.sh. Nothing has been renamed;")
-    print("      this check runs before the companion pass. Refusing to continue: a")
-    print("      generator that reports success while leaving a companion Application")
-    print("      in the wrong state is worse than one that stops.")
+    print("\n      COMPANIONS lives in scripts/sync-groups.sh. No COMPANION file has been")
+    print("      renamed — this check runs before the companion pass. (A non-dry run may")
+    print("      already have renamed an application.yaml in the group pass above; fix")
+    print("      the map and re-run, it is idempotent.) Refusing to continue: a generator")
+    print("      that reports success while leaving a companion Application in the wrong")
+    print("      state is worse than one that stops.")
     sys.exit(1)
 print(f"  ✅ COMPANIONS map consistent ({len(COMPANIONS)} keys, "
       f"{len(MANAGED_COMPANION_FILES)} managed file(s), "
